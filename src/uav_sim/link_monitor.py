@@ -151,7 +151,8 @@ class LinkMonitor:
 
     def __init__(self, seed: int, weaknet_level: str, duration_s: float,
                  uav_ids: Iterable[int], cfg: dict,
-                 weather: Optional[WeatherModel] = None) -> None:
+                 weather: Optional[WeatherModel] = None,
+                 station_ids: Optional[Iterable[int]] = None) -> None:
         self.seed = int(seed)
         self.weaknet_level = str(weaknet_level)
         self.duration_s = float(duration_s)
@@ -169,12 +170,20 @@ class LinkMonitor:
                                    duration_s=self.duration_s, cfg=cfg)
         self.weather: Optional[WeatherModel] = weather
 
+        # ---- 多基站：每 (uav, station) 一条链路 ----
+        # station_ids=None 时退化为**单站**模式：只有默认站，行为与改造前逐位一致。
+        self.station_ids: List[int] = (
+            sorted({int(s) for s in station_ids}) if station_ids else [1])
+        self.default_station: int = self.station_ids[0]
+
         #: 网格点数 = ceil(duration/0.5) + 1（含 t=0 与 t>=duration 的收尾点）
         self._grid_len: int = int(math.ceil(self.duration_s / HEALTH_GRID_S)) + 1
 
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
-        self._series: Dict[int, List[float]] = {}
+        #: 链路序列：``{uav_id: {station_id: [health...]}}``。
+        #: 单站时内层只有 default_station 一条 —— ``health_at(uav,t)`` 取它。
+        self._series: Dict[int, Dict[int, List[float]]] = {}
         self._active: set = set()
         self._states: Dict[int, LinkState] = {}
         self._samples: List[LinkSample] = []
@@ -189,33 +198,44 @@ class LinkMonitor:
         """注册新无人机链路（= 设备上线，创建其确定性健康度曲线）。
 
         曲线只由 ``(seed, uav_id)`` 决定，与注册顺序无关，故可离线复现。
+        多基站下为**每个站**各建一条曲线（不同站的种子派生不同，故各不相同）。
         """
         uav_id = int(uav_id)
         if uav_id in self._series:
             with self._lock:
                 self._active.add(uav_id)
             return
-        self._series[uav_id] = self._build_series(uav_id)
+        self._series[uav_id] = {sid: self._build_series(uav_id, sid)
+                                for sid in self.station_ids}
         with self._lock:
             self._active.add(uav_id)
             self._states.setdefault(uav_id, LinkState(uav_id=uav_id))
-            self._states[uav_id].apply_health(self._series[uav_id][0])
+            self._states[uav_id].apply_health(
+                self._series[uav_id][self.default_station][0])
 
     def unregister_uav(self, uav_id: int) -> None:
         """注销无人机链路（= 设备下线，从活跃集合移除，曲线保留以供回放）。"""
         with self._lock:
             self._active.discard(int(uav_id))
 
-    def _build_series(self, uav_id: int) -> List[float]:
-        """离线生成 0.5 s 网格健康度序列（单 uav 一个独立随机流）。
+    def _build_series(self, uav_id: int, station_id: int = 1) -> List[float]:
+        """离线生成 0.5 s 网格健康度序列（单 (uav, station) 一个独立随机流）。
 
         生成顺序（契约 §4.6.2 硬要求）：
-            ① 先按 ``(seed, uav_id)`` 的独立随机流生成**基础健康度**（弱网噪声/低谷段）；
+            ① 先按 ``(seed, uav_id, station_id)`` 的独立随机流生成**基础健康度**（弱网噪声/低谷段）；
             ② **之后**再按同一网格时刻施加天气衰减 ``weather.apply_health``。
         顺序不能反：天气是外部环境，必须叠加在设备自身波动之上；反过来会让
         随机流抽样次数受天气影响，破坏"同 seed 同链路"的控制变量前提。
+
+        **单站兼容性**：station_id == 默认站且只有单站时，种子派生与改造前
+        ``seed * _SEED_STRIDE + uav_id`` **完全相同** —— 既有链路曲线逐点不变。
+        多站时把 ``station_id`` 折进种子，保证同 uav 到不同站是两条不同曲线。
         """
-        rng = random.Random(self.seed * _SEED_STRIDE + int(uav_id))
+        if len(self.station_ids) <= 1 and int(station_id) == self.default_station:
+            sseed = self.seed * _SEED_STRIDE + int(uav_id)
+        else:
+            sseed = self.seed * _SEED_STRIDE + int(uav_id) * 131 + int(station_id) * 17
+        rng = random.Random(sseed)
         mu, sigma = health_profile(self.weaknet_level)
         series: List[float] = []
         h = mu
@@ -269,23 +289,33 @@ class LinkMonitor:
         uids = list(self._series.keys())
         # 整体替换 dict（而不是原地改）：health_at 可能在其它线程并发读，
         # GIL 下"换引用"是原子的，读端要么看到旧表要么看到新表，不会读到半更新状态。
-        rebuilt = {uid: self._build_series(uid) for uid in uids}
+        rebuilt = {uid: {sid: self._build_series(uid, sid) for sid in self.station_ids}
+                   for uid in uids}
         self._series = rebuilt
         with self._lock:
             now = self._now
-        for uid, values in rebuilt.items():
+        for uid, per_station in rebuilt.items():
             with self._lock:
                 st = self._states.get(uid)
-            if st is not None and values:
+            if st is not None and per_station.get(self.default_station):
                 st.apply_health(self.health_at(uid, now))
 
     # ---------------------------------------------------------------- 查询
-    def health_at(self, uav_id: int, t: float) -> float:
-        """纯函数式查询：``t`` 时刻该链路的健康度（0~100，网格间线性插值）。
+    def health_at(self, uav_id: int, t: float, station_id: Optional[int] = None) -> float:
+        """纯函数式查询：``t`` 时刻该 (uav, station) 链路的健康度（0~100，网格间线性插值）。
 
+        ``station_id=None``（默认）表示查**默认站**的链路 —— 单站模式下这就是
+        "该机唯一的那条链路"，因此既有调用 ``health_at(uav, t)`` 语义与数值完全不变。
         未注册的 uav 返回 100.0（视为链路正常，避免"未知设备必然失败"的伪结论）。
         """
-        series = self._series.get(int(uav_id))
+        per_station = self._series.get(int(uav_id))
+        if not per_station:
+            return 100.0
+        sid = self.default_station if station_id is None else int(station_id)
+        series = per_station.get(sid)
+        if not series:
+            # 该站没有这条曲线：退化为默认站（不制造"未知站必失败"的伪结论）
+            series = per_station.get(self.default_station)
         if not series:
             return 100.0
         idx = float(t) / HEALTH_GRID_S
@@ -297,18 +327,40 @@ class LinkMonitor:
         frac = idx - i0
         return series[i0] + (series[i0 + 1] - series[i0]) * frac
 
-    def get_health(self, uav_id: int) -> float:
+    def get_health(self, uav_id: int, station_id: Optional[int] = None) -> float:
         """当前时刻（``tick`` 推进到的 now）该链路健康度。"""
         with self._lock:
             now = self._now
-        return self.health_at(uav_id, now)
+        return self.health_at(uav_id, now, station_id)
 
-    def get_all_health(self) -> dict:
-        """当前时刻全部活跃链路健康度 ``{uav_id: health}``。"""
+    def get_all_health(self, station_id: Optional[int] = None) -> dict:
+        """当前时刻全部活跃链路健康度 ``{uav_id: health}``（指定站；None=默认站）。"""
         with self._lock:
             now = self._now
             active = sorted(self._active)
-        return {uid: self.health_at(uid, now) for uid in active}
+        return {uid: self.health_at(uid, now, station_id) for uid in active}
+
+    def health_matrix(self, station_ids: Optional[Iterable[int]] = None,
+                      uav_ids: Optional[Iterable[int]] = None,
+                      t: Optional[float] = None) -> dict:
+        """``{uav_id: {station_id: health}}`` 全链路矩阵（多基站 3D 连线用）。
+
+        ``uav_ids=None`` 时只返回**当前在线**的无人机；显式传入时可覆盖全部无人机
+        （离线设备的历史曲线仍然保留，因此一样能查出健康度）—— 快照接口需要
+        全量覆盖，才能与 ``station_of_uav`` 的口径一致。
+
+        ``t=None`` 用监控器自己 tick 到的时刻；**调用方应显式传 ``t``**：
+        监控器的 ``_now`` 只在 ``tick()`` 时推进，与 ``Simulator.now()`` 可能差
+        小半个 tick，若快照里两处链路读数用了不同的时间基准，会出现
+        "links 与 link_matrix 对不上"的假不一致（Lead 验收实测差 0.73）。
+        """
+        with self._lock:
+            ts = self._now if t is None else float(t)
+            active = sorted(self._active)
+        ids = [int(u) for u in uav_ids] if uav_ids is not None else active
+        sids = list(station_ids) if station_ids is not None else list(self.station_ids)
+        return {uid: {int(sid): round(self.health_at(uid, ts, sid), 2) for sid in sids}
+                for uid in ids}
 
     def is_poor(self, uav_id: int, t: float) -> bool:
         """是否劣质链路（``health < weaknet.health_poor``）。"""
@@ -334,7 +386,6 @@ class LinkMonitor:
         for uid in active:
             health = self.health_at(uid, now)
             samples.append(self._make_sample(uid, now, health))
-
     @staticmethod
     def _make_sample(uav_id: int, ts: float, health: float) -> LinkSample:
         """由健康度反演物理量，构造落库用采样（与 health_score 公式自洽）。"""
@@ -375,9 +426,11 @@ class LinkMonitor:
     def mean_health(self, uav_id: Optional[int] = None) -> float:
         """整条曲线的健康度均值 —— 供标定/报告说明链路档位（附加方法）。"""
         if uav_id is not None:
-            series = self._series.get(int(uav_id)) or [100.0]
+            per_station = self._series.get(int(uav_id)) or {}
+            series = per_station.get(self.default_station) or [100.0]
             return sum(series) / len(series)
-        all_points = [v for s in self._series.values() for v in s]
+        all_points = [v for per_station in self._series.values()
+                      for s in per_station.values() for v in s]
         return sum(all_points) / len(all_points) if all_points else 100.0
 
 

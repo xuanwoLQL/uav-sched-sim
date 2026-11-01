@@ -21,6 +21,7 @@ run.py —— UavSchedulerSim 统一命令行入口
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import sys
@@ -361,20 +362,24 @@ def _print_result(res) -> None:
 # ---------------------------------------------------------------------------
 def cmd_all(args: argparse.Namespace) -> int:
     from uav_sim.experiment import ExperimentRunner
-    from uav_sim.models import SCENARIO_CODES, SCHEDULER_NAMES
+    from uav_sim.models import CLASSIC_SCHEDULER_NAMES, SCENARIO_CODES
 
     cfg = _load_cfg(args.config)
     if args.no_db:
         cfg["database"]["enable"] = False
 
-    _banner(f"全量对照实验：{len(SCENARIO_CODES)} 工况 × {len(SCHEDULER_NAMES)} 策略 = "
-            f"{len(SCENARIO_CODES) * len(SCHEDULER_NAMES)} 组")
+    # 默认矩阵 = 3 工况 × **5 个经典单节点策略** = 15 组（既有报告口径）。
+    # 第 6 个策略 cross_node 属多基站能力面，需显式 opt-in（--schedulers cross_node），
+    # 否则"策略差异"会与"拓扑差异"纠缠，且既有 15 组数字全部失效。
+    sched_names = list(args.schedulers or CLASSIC_SCHEDULER_NAMES)
+    _banner(f"全量对照实验：{len(SCENARIO_CODES)} 工况 × {len(sched_names)} 策略 = "
+            f"{len(SCENARIO_CODES) * len(sched_names)} 组")
 
     t0 = time.perf_counter()
     runner = ExperimentRunner(cfg)
     results = runner.run_matrix(
         scenario_codes=args.scenarios or SCENARIO_CODES,
-        scheduler_names=args.schedulers or SCHEDULER_NAMES,
+        scheduler_names=sched_names,
         persist=not args.no_db,
         progress=True,
     )
@@ -645,7 +650,7 @@ def cmd_weather(args: argparse.Namespace) -> int:
     """天气对照实验：PEAK 工况 × 4 天气 × 5 策略 = 20 组（契约 §4.6.5）。"""
     from uav_sim.config import resolve_path
     from uav_sim.experiment import ExperimentRunner
-    from uav_sim.models import SCHEDULER_LABELS, SCHEDULER_NAMES
+    from uav_sim.models import CLASSIC_SCHEDULER_NAMES, SCHEDULER_LABELS
     from uav_sim.weather import PRESET_ORDER, WEATHER_PRESETS
 
     cfg = _load_cfg(args.config)
@@ -662,9 +667,9 @@ def cmd_weather(args: argparse.Namespace) -> int:
     poor_threshold = float(cfg.get("weaknet", {}).get(
         "health_poor", POOR_HEALTH_FALLBACK))
 
-    total = len(PRESET_ORDER) * len(SCHEDULER_NAMES)
+    total = len(PRESET_ORDER) * len(CLASSIC_SCHEDULER_NAMES)
     _banner(f"天气 × 调度策略 对照实验：{WEATHER_EXP_SCENARIO} × "
-            f"{len(PRESET_ORDER)} 天气 × {len(SCHEDULER_NAMES)} 策略 = {total} 组")
+            f"{len(PRESET_ORDER)} 天气 × {len(CLASSIC_SCHEDULER_NAMES)} 策略 = {total} 组")
     print("  天气曲线：0.5s 网格、onset 爬升 → 平台期阵风 ±15% → 尾部衰减；")
     print("  控制变量：同 seed 下 5 个策略回放**同一条**天气 / 链路曲线，只有策略不同。")
     print(f"  链路口径：劣质链路 = 健康度 < {poor_threshold:.0f}；")
@@ -681,7 +686,7 @@ def cmd_weather(args: argparse.Namespace) -> int:
     # 为什么不是外层天气：天气矩阵要在共享机器上跑 20 组，机器负载会缓慢漂移；
     # 让同一策略的 4 个天气组在时间上相邻，组间的系统负载尽量一致 ——
     # 对照实验只允许"天气"一个变量变化，负载漂移是最大的混淆因素。
-    for sched in SCHEDULER_NAMES:
+    for sched in CLASSIC_SCHEDULER_NAMES:
         for preset in PRESET_ORDER:
             label = WEATHER_PRESETS[preset].label
             k += 1
@@ -732,6 +737,218 @@ def cmd_weather(args: argparse.Namespace) -> int:
 
     _print_weather_conclusion(rows, poor_threshold)
     return 0 if not failed else 1
+
+
+# ===========================================================================
+# 多基站 / MEC 边缘计算对照实验（改造建议第五章 B）
+# ===========================================================================
+#: MEC 权衡实验的两个可调参数（边缘算力 / 回传带宽）扫描点。
+#: 每条 = (标签, 边缘算力 MB/s, 回传带宽 MB/s)；None 表示用 config 默认值。
+MEC_SWEEP: tuple = (
+    ("边缘-基线", None, None),
+    ("边缘-算力减半", 60.0, None),
+    ("边缘-回传1/3", None, 20.0),
+    ("边缘-最差(算力减半+回传1/3)", 60.0, 20.0),
+)
+
+#: 参与对照的调度策略（动态权重 = 单节点基线；cross_node = 跨节点策略）
+MEC_SCHEDULERS: tuple = ("dynamic", "cross_node")
+
+#: 本实验使用的工况（峰值最能暴露节点间不均衡）
+MEC_EXP_SCENARIO: str = "PEAK"
+
+
+def cmd_mec(args: argparse.Namespace) -> int:
+    """**纯中心 vs 端-边-云** 对照实验 + 通信/计算开销权衡（改造建议第五章 B）。
+
+    三组对照，全部固定 PEAK 工况与同一 seed（控制变量）：
+
+    * **A 纯中心**：单站拓扑 + MEC 关闭 —— 全部任务回中心处理（改造前的形态）；
+    * **B 端-边-云**：3 站拓扑（1 中心 + 2 边缘）+ MEC 开启 ——
+      轻量运维任务下沉边缘、重勘查任务回中心；
+    * **C 权衡扫描**：在 B 的基础上分别压低"边缘算力"与"回传带宽"，
+      观察端到端时延如何变化 —— 这就是「通信开销 vs 计算开销」的量化权衡。
+
+    产出 ``results/mec/mec_matrix.csv``（不写数据库、不碰既有 15 组 results/raw）。
+    """
+    import csv as _csv
+
+    from uav_sim.config import resolve_path
+    from uav_sim.experiment import ExperimentRunner
+    from uav_sim.models import SCHEDULER_LABELS
+
+    cfg = _load_cfg(args.config)
+    if getattr(args, "seed", None) is not None:
+        cfg.setdefault("simulation", {})["random_seed"] = int(args.seed)
+    # 辅助实验：不写数据库、不覆盖既有 15 组正式结果（契约 §0/§6）
+    cfg["database"]["enable"] = False
+    results_dir = resolve_path(cfg, "output.results_dir")
+    out_dir = results_dir / "mec"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_csv = out_dir / "mec_matrix.csv"
+
+    metric_keys = ("throughput", "completion_rate", "avg_wait_all_ms",
+                   "avg_wait_high_ms", "starvation_rate_low",
+                   "resource_utilization", "edge_offload_ratio",
+                   "avg_e2e_ms", "edge_e2e_ms", "center_e2e_ms",
+                   "e2e_if_edge_ms", "e2e_if_center_ms",
+                   "e2e_light_if_edge_ms", "e2e_light_if_center_ms",
+                   "e2e_heavy_if_edge_ms", "e2e_heavy_if_center_ms",
+                   "mec_crossing_data_mb",
+                   "mec_light_tasks", "mec_heavy_tasks",
+                   "migration_count", "migration_cost_ms",
+                   "cross_node_comm_ms", "station_load_imbalance")
+
+    # ---- 组装运行计划：(模式, 标签, station_spec, mec_enabled, 参数覆盖, 策略) ----
+    # 三档对照：① 纯中心（单站，改造前形态）
+    #           ② 多站但**不启用 MEC**（无角色硬约束，最能体现"跨节点负载均衡"本身）
+    #           ③ 端-边-云（多站 + MEC 角色分流）+ 两个可调参数的权衡扫描
+    plan: list = []
+    for sched in MEC_SCHEDULERS:
+        plan.append(("center", "纯中心(单站)", None, False, {}, sched))
+    for sched in MEC_SCHEDULERS:
+        plan.append(("multi", "多站-无MEC", "triple", False, {}, sched))
+    for tag, edge_mbps, backhaul in MEC_SWEEP:
+        for sched in MEC_SCHEDULERS:
+            over: dict = {}
+            if edge_mbps is not None:
+                over["edge_compute_mbps"] = float(edge_mbps)
+            if backhaul is not None:
+                over["backhaul_mbps"] = float(backhaul)
+            plan.append(("edge", tag, "triple", True, over, sched))
+
+    total = len(plan)
+    _banner(f"MEC 边缘计算对照实验：{MEC_EXP_SCENARIO} × 纯中心/多站/端-边-云 = {total} 组")
+    print("  控制变量：同一 seed、同一工况、同一任务轨迹；只有拓扑/MEC/策略不同。")
+    print("  纯中心   = 1 站 + MEC 关闭（全部回中心，等价改造前形态）")
+    print("  多站-无MEC = 3 站（1 中心 + 2 边缘）+ MEC 关闭（无角色约束，看均衡本身）")
+    print("  端-边-云 = 3 站 + MEC 开启（轻量下沉边缘、重勘查回中心）")
+    print(f"  产出：{out_csv}\n")
+
+    rows: list = []
+    failed = 0
+    t0 = time.perf_counter()
+    k = 0
+    for mode, tag, station_spec, mec_on, over, sched in plan:
+        k += 1
+        run_cfg = copy.deepcopy(cfg)
+        if over:
+            run_cfg.setdefault("mec", {}).update(over)
+        print(f"[{k:>2}/{total}] {tag:<26} × {sched:<10} ... ", end="", flush=True)
+        runner = ExperimentRunner(run_cfg, results_dir=out_dir / "raw",
+                                  station_spec=station_spec, mec_enabled=mec_on)
+        res = runner.run_one(MEC_EXP_SCENARIO, sched, persist=False)
+        if res.error:
+            failed += 1
+            print(f"✗ {res.error}")
+            continue
+        row = {
+            "mode": mode,
+            "variant": tag,
+            "scheduler": sched,
+            "scheduler_label": SCHEDULER_LABELS.get(sched, sched),
+            "stations": runner.station_spec if runner.station_spec else "single",
+            "mec": int(bool(mec_on)),
+            "edge_compute_mbps": float(run_cfg.get("mec", {}).get("edge_compute_mbps", 0.0)),
+            "backhaul_mbps": float(run_cfg.get("mec", {}).get("backhaul_mbps", 0.0)),
+        }
+        for key in metric_keys:
+            row[key] = float(res.metrics.get(key, 0.0))
+        rows.append(row)
+        print(f"完整率={row['completion_rate']:5.1f}% "
+              f"平均等待={row['avg_wait_all_ms']:7.0f}ms "
+              f"端到端={row['avg_e2e_ms']:7.1f}ms "
+              f"边缘分流={row['edge_offload_ratio']:5.1f}% "
+              f"迁移={int(row['migration_count']):>4d}次 "
+              f"({res.metrics.get('runtime_wall_s', 0.0):.1f}s)")
+
+    elapsed = time.perf_counter() - t0
+    _banner("MEC 对照实验完成")
+    print(f"  成功 {len(rows)} / {total} 组，总实耗 {elapsed:.1f}s")
+    if failed:
+        print(f"  ✗ 失败 {failed} 组")
+    if not rows:
+        return 1
+
+    cols = list(rows[0].keys())
+    with out_csv.open("w", encoding="utf-8-sig", newline="") as fp:
+        w = _csv.DictWriter(fp, fieldnames=cols)
+        w.writeheader()
+        w.writerows(rows)
+    print(f"  ✓ 汇总表 -> {out_csv}")
+
+    _print_mec_conclusion(rows)
+    return 0 if not failed else 1
+
+def _print_mec_conclusion(rows: list) -> None:
+    """打印可直接引用进报告的中文结论（数字全部来自本次实跑）。"""
+    def one(mode: str, sched: str, key: str, variant: str | None = None) -> float:
+        for r in rows:
+            if r["mode"] == mode and r["scheduler"] == sched and (
+                    variant is None or r["variant"] == variant):
+                return float(r.get(key, 0.0))
+        return 0.0
+
+    print()
+    print("  ── 纯中心 vs 端-边-云（同策略对比）" + "─" * 30)
+    for sched in MEC_SCHEDULERS:
+        c_e2e = one("center", sched, "avg_e2e_ms")
+        e_e2e = one("edge", sched, "avg_e2e_ms", "边缘-基线")
+        c_wait = one("center", sched, "avg_wait_all_ms")
+        e_wait = one("edge", sched, "avg_wait_all_ms", "边缘-基线")
+        c_comp = one("center", sched, "completion_rate")
+        e_comp = one("edge", sched, "completion_rate", "边缘-基线")
+        impro = (c_e2e - e_e2e) / c_e2e * 100.0 if c_e2e > 0 else 0.0
+        print(f"  [{sched}] 端到端 {c_e2e:7.1f} -> {e_e2e:7.1f} ms（{impro:+.1f}%）；"
+              f"平均等待 {c_wait:6.0f} -> {e_wait:6.0f} ms；"
+              f"完整率 {c_comp:5.1f}% -> {e_comp:5.1f}%")
+
+    print()
+    print("  ── 通信开销 vs 计算开销：压低边缘算力 / 回传带宽后的端到端时延" + "─" * 12)
+    print("  （反事实 = **同一批任务**分别放到边缘 / 中心算出来的端到端时延，排除任务大小差异）")
+    print(f"  {'变体':<26}{'轻量@边缘':>11}{'轻量@中心':>11}{'重载@边缘':>11}{'重载@中心':>11}{'分水岭MB':>10}")
+    for tag, _, _ in MEC_SWEEP:
+        le = one("edge", "cross_node", "e2e_light_if_edge_ms", tag)
+        lc = one("edge", "cross_node", "e2e_light_if_center_ms", tag)
+        he = one("edge", "cross_node", "e2e_heavy_if_edge_ms", tag)
+        hc = one("edge", "cross_node", "e2e_heavy_if_center_ms", tag)
+        cross = one("edge", "cross_node", "mec_crossing_data_mb", tag)
+        print(f"  {tag:<26}{le:>11.1f}{lc:>11.1f}{he:>11.1f}{hc:>11.1f}{cross:>10.2f}")
+    print("  判读：'轻量@边缘 < 轻量@中心' 说明轻量运维任务下沉是**划算的**；")
+    print("        '重载@边缘 >> 重载@中心' 说明重勘查任务必须回中心（边缘算力不够）；")
+    print("        分水岭 MB = 两者相等的数据量，比它小的任务下沉边缘更快。")
+
+    print()
+    print("  ── 跨节点均衡效果（动态权重 vs 跨节点策略）" + "─" * 24)
+    print(f"  {'模式':<14}{'策略':<12}{'不均衡度':>10}{'迁移次数':>10}{'迁移代价(ms)':>14}{'平均等待(ms)':>14}")
+    for mode, mlabel in (("multi", "多站-无MEC"), ("edge", "端-边-云")):
+        for sched in MEC_SCHEDULERS:
+            tag = None if mode == "multi" else "边缘-基线"
+            imb = one(mode, sched, "station_load_imbalance", tag)
+            mig = one(mode, sched, "migration_count", tag)
+            cost = one(mode, sched, "migration_cost_ms", tag)
+            wait = one(mode, sched, "avg_wait_all_ms", tag)
+            print(f"  {mlabel:<14}{sched:<12}{imb:>10.3f}{int(mig):>10d}{cost:>14.1f}{wait:>14.0f}")
+    print()
+    print("  说明：不均衡度 = 各站负载的变异系数（σ/均值，0 = 完全均衡）；")
+    print("        迁移代价 = 在途耗时 + 跨节点回传造成的服务时长放大，**不是瞬移**；")
+    print("        多站-无MEC 一档没有 MEC 角色硬约束，最能体现'跨节点均衡'本身的效果。")
+
+    # ---- 口径交代：为什么"边缘分流比例"看起来接近 100% ----
+    lt = one("edge", "cross_node", "mec_light_tasks", "边缘-基线")
+    ht = one("edge", "cross_node", "mec_heavy_tasks", "边缘-基线")
+    tot = lt + ht
+    print()
+    print("  ── 口径交代（重要，报告必须写）" + "─" * 34)
+    if tot > 0:
+        print(f"  本工况任务构成：轻量 {int(lt)} 个 / 重勘查 {int(ht)} 个 "
+              f"（轻量占 {lt / tot * 100:.1f}%）")
+        print("  因此「边缘分流比例」偏高是**任务配比**决定的，不能单独当作 MEC 成功与否的证据；")
+        print("  真正说明 MEC 价值的判据是上面的**分水岭数据量**与**按类别的反事实时延对比**：")
+        print("  轻量任务下沉边缘更快、重勘查回中心更快，这条结论与任务配比无关。")
+        print("  （若需要「重勘查占比更高」的工况，可在 config 的工况参数里调高勘查比例后重跑。）")
+    else:
+        print("  未能统计任务分级构成（MEC 未记录）")
 
 
 def _print_weather_conclusion(rows: list, poor_threshold: float) -> None:
@@ -1110,6 +1327,9 @@ def cmd_ui(args: argparse.Namespace) -> int:
         scheduler=str(args.scheduler).lower(),
         speed=float(args.speed),
         autostart=bool(args.autostart),
+        stations=(str(args.stations).strip().lower() or None) if getattr(
+            args, "stations", None) else None,
+        mec=(None if getattr(args, "mec", None) is None else bool(args.mec)),
     )
 
 
@@ -1163,6 +1383,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("demo-limiter", help="演示资源限流（拒绝/分片/并发上限）")
     sp.set_defaults(func=cmd_demo_limiter)
 
+    sp = sub.add_parser(
+        "mec", help="MEC 边缘计算对照实验：纯中心 vs 端-边-云 + 通信/计算开销权衡")
+    sp.add_argument("--config", default=None, help="配置文件路径（默认 config.yaml）")
+    sp.add_argument("--seed", type=int, default=None, help="覆盖随机种子（默认取配置）")
+    sp.set_defaults(func=cmd_mec)
+
     sp = sub.add_parser("sensitivity", help="参数敏感性实验（验证「静态参数固化」痛点）")
     sp.set_defaults(func=cmd_sensitivity)
 
@@ -1200,8 +1426,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--scenario", default="PEAK", choices=["LIGHT", "NORMAL", "PEAK"],
                     help="面板默认工况（页面上仍可切换）")
     sp.add_argument("--scheduler", default="dynamic",
-                    choices=["fcfs", "rr", "priority", "mlfq", "dynamic"],
-                    help="面板默认策略（页面上仍可切换）")
+                    choices=["fcfs", "rr", "priority", "mlfq", "dynamic", "cross_node"],
+                    help="面板默认策略（页面上仍可切换；cross_node = 跨节点负载均衡）")
+    sp.add_argument("--stations", default=None,
+                    help="多基站拓扑（默认单站；triple = 1 中心 + 2 边缘）。"
+                         "会被记为会话默认值，页面上点「开始仿真」即按它启动")
+    sp.add_argument("--mec", action="store_true", default=None,
+                    help="启用 MEC 边缘计算（轻量运维下沉边缘、重勘查回中心）")
     sp.add_argument("--speed", type=float, default=1.0, help="播放速度倍率（0.5 ~ 4）")
     sp.add_argument("--autostart", action="store_true", help="打开页面后立即开始仿真")
     sp.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")

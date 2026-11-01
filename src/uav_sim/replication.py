@@ -44,7 +44,14 @@ if str(_SRC_ROOT) not in sys.path:
 
 from uav_sim.config import cfg_get_int, load_config, resolve_path
 from uav_sim.experiment import ExperimentRunner
-from uav_sim.models import METRIC_SPEC, SCENARIO_CODES, SCENARIO_LABELS, SCHEDULER_LABELS, SCHEDULER_NAMES
+from uav_sim.models import (  # noqa: E402
+    CLASSIC_SCHEDULER_NAMES,
+    METRIC_SPEC,
+    SCENARIO_CODES,
+    SCENARIO_LABELS,
+    SCHEDULER_LABELS,
+    SCHEDULER_NAMES,
+)
 from uav_sim.statistics import MetricAggregate, aggregate, paired_ci95
 
 
@@ -141,7 +148,9 @@ class ReplicationStudy:
                    progress: bool = True) -> Dict[Tuple[str, str], CellSummary]:
         """跑完整矩阵（默认 3 工况 × 5 策略），返回 ``{(scenario, scheduler): CellSummary}``。"""
         codes = [str(c).upper() for c in (scenarios or SCENARIO_CODES)]
-        scheds = [str(s).lower() for s in (schedulers or SCHEDULER_NAMES)]
+        # 默认 5 个经典单节点策略（= 3×5 矩阵）；多基站策略 cross_node 需显式指定，
+        # 理由同 experiment.run_matrix：不让拓扑差异污染策略对照。
+        scheds = [str(s).lower() for s in (schedulers or CLASSIC_SCHEDULER_NAMES)]
         total = len(codes) * len(scheds)
 
         if progress:

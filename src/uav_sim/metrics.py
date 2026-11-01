@@ -139,7 +139,8 @@ def compute_metrics(tasks: List[Task],
                     starvation_threshold_ms: float = 3000.0,
                     end_ts: Optional[float] = None,
                     runtime_wall_s: float = 0.0,
-                    preempt_count: int = 0) -> Dict[str, float]:
+                    preempt_count: int = 0,
+                    station_metrics: Optional[dict] = None) -> Dict[str, float]:
     """计算一次仿真的全部指标（契约 §4.8）。
 
     返回扁平 dict，**键全部来自 ``models.METRIC_SPEC``**（缺项填 0.0），
@@ -214,6 +215,17 @@ def compute_metrics(tasks: List[Task],
         "chunk_count": float(limiter_status.get("chunked", 0) or 0),
         "runtime_wall_s": float(runtime_wall_s),
     }
+
+    # ---- 多基站 / MEC 扩展指标（改造建议第五章）----
+    # 单站 + MEC 关闭时 station_metrics 全为 0，因此这些键恒为 0.0，
+    # 与"改造前不存在这些指标"在数值上等价（既有结论不受影响）。
+    if station_metrics:
+        for _k, _v in station_metrics.items():
+            if _k in METRIC_SPEC:
+                try:
+                    metrics[_k] = float(_v)
+                except (TypeError, ValueError):  # pragma: no cover - 容错
+                    metrics[_k] = 0.0
 
     # ---- 契约要求：键必须来自 METRIC_SPEC；缺项补 0 ----
     for key in METRIC_SPEC:

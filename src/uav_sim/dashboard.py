@@ -87,6 +87,26 @@ def _content_type(name: str) -> str:
     return _MIME.get(Path(name).suffix.lower(), "application/octet-stream")
 
 
+def _parse_id_list(raw) -> Optional[list]:
+    """把 ``"2,3"`` 这类查询串解析成 ``[2, 3]``；空/非法返回 None（= 用缺省分组）。"""
+    if raw in (None, "", []):
+        return None
+    if isinstance(raw, (list, tuple)):
+        parts = [str(x) for x in raw]
+    else:
+        parts = str(raw).split(",")
+    out = []
+    for p in parts:
+        p = p.strip()
+        if not p:
+            continue
+        try:
+            out.append(int(p))
+        except (TypeError, ValueError):
+            continue
+    return out or None
+
+
 def _read_page_raw(name: str) -> Optional[bytes]:
     """读取 static 目录下的文件；不存在返回 None。"""
     p = STATIC_DIR / name
@@ -118,13 +138,18 @@ class SimRun:
     """一次可视化的仿真运行（在后台线程里跑）。"""
 
     def __init__(self, cfg: dict, scenario: str, scheduler: str, speed: float = 1.0,
-                 weather: Optional[str] = None) -> None:
+                 weather: Optional[str] = None, stations: Optional[str] = None,
+                 mec: Optional[bool] = None) -> None:
         self.base_cfg = cfg
         self.scenario = scenario
         self.scheduler = scheduler
         self.speed = max(0.25, min(8.0, float(speed)))
         #: 本次运行使用的天气预设（/api/weather 可在运行中/下次启动时改它）
         self.weather_preset: str = config_preset(cfg, weather)
+        #: 多基站拓扑（None/""/"1" = 单站默认；"triple" = 中心 1 + 边缘 2）
+        self.stations: Optional[str] = (str(stations).strip() or None) if stations else None
+        #: 是否启用 MEC 边缘计算（None = 取 config.mec.enable）
+        self.mec: Optional[bool] = mec
         self.status = "idle"          # idle / running / finished / stopped / error
         self.error: Optional[str] = None
         self.sim: Optional[Simulator] = None
@@ -162,7 +187,8 @@ class SimRun:
             trace = generate_trace(sc, int(cfg["simulation"]["random_seed"]), cfg)
             sim = Simulator(sc, trace, cfg, scheduler_name=self.scheduler,
                             seed=int(cfg["simulation"]["random_seed"]),
-                            weather_preset=self.weather_preset)
+                            weather_preset=self.weather_preset,
+                            station_spec=self.stations, mec_enabled=self.mec)
             self.sim = sim
             sched = create_scheduler(self.scheduler, sim, cfg)
             raw = sim.run(sched, duration_s=sc.duration_s)
@@ -224,6 +250,9 @@ class SimRun:
             "scheduler_label": SCHEDULER_LABELS.get(self.scheduler, self.scheduler),
             "speed": self.speed,
             "weather_preset": self.weather_preset,
+            # 本次运行的多基站拓扑 / MEC 开关（null = 单站默认）
+            "stations_spec": self.stations,
+            "mec_enabled": self.mec,
             "scenarios": [{"code": c, "label": SCENARIO_LABELS.get(c, c)} for c in SCENARIO_CODES],
             "schedulers": [{"code": s, "label": SCHEDULER_LABELS.get(s, s)} for s in SCHEDULER_NAMES],
         }
@@ -251,6 +280,13 @@ class Dashboard:
         self.cfg = cfg
         self.run: Optional[SimRun] = None
         self._lock = threading.Lock()
+        # ---- 多基站 / MEC 的"会话默认值" ----
+        # 为什么需要它：3D 页面的「开始仿真」按钮只会发 /api/start（不带 stations/mec），
+        # 若没有服务端默认值，用户在 UI 里永远只能跑单站。有了这两个默认值，
+        # 可以用 `run.py ui --stations triple --mec` 或 `GET /api/topology?...`
+        # 一次性设定，之后点按钮就是多站演示（无需改前端文件）。
+        self.default_stations: Optional[str] = None
+        self.default_mec: Optional[bool] = None
         # ---- 天气：默认值 / 下次启动的预设（契约 §4.6.4「未运行作下次默认」） ----
         self._seed = cfg_get_int(cfg, "simulation.random_seed", 20261031)
         self.weather_preset: str = config_preset(cfg)
@@ -299,25 +335,39 @@ class Dashboard:
         return {"ok": True, "weather": snapshot}
 
     def start_run(self, scenario: str, scheduler: str, speed: float,
-                  weather: Optional[str] = None) -> dict:
+                  weather: Optional[str] = None,
+                  stations: Optional[str] = None,
+                  mec: Optional[bool] = None) -> dict:
         with self._lock:
             if self.run is not None and self.run.status == "running":
                 return {"ok": False, "msg": "已有仿真在运行"}
             preset = config_preset(self.cfg, weather if weather is not None
                                    else self.weather_preset)
             self.weather_preset = preset
-            self.run = SimRun(self.cfg, scenario, scheduler, speed, weather=preset)
+            # 未显式指定时用会话默认值（见 __init__ 的说明）
+            if stations is None:
+                stations = self.default_stations
+            if mec is None:
+                mec = self.default_mec
+            self.run = SimRun(self.cfg, scenario, scheduler, speed, weather=preset,
+                              stations=stations, mec=mec)
             try:
                 self.run.start()
             except Exception as exc:  # noqa: BLE001
                 return {"ok": False, "msg": str(exc)}
-            return {"ok": True, "weather_preset": preset}
+            return {"ok": True, "weather_preset": preset,
+                    "stations": self.run.stations, "mec": self.run.mec}
 
     # ------------------------------------------------------------------
     # 混沌工程 / Trace 导出（2026-11：OS 微观透视）
     # ------------------------------------------------------------------
     def chaos(self, kind: str, **kw) -> dict:
-        """触发一次混沌注入：weaknet（弱网风暴）/ burst（并发洪峰）/ deadlock（死锁）。"""
+        """触发一次混沌注入。
+
+        单站混沌：weaknet（弱网风暴）/ burst（并发洪峰）/ deadlock（死锁）。
+        多基站混沌（改造建议第五章 C）：node_down（节点宕机）/
+        partition（网络分区）/ split_brain（脑裂）/ recover（一键恢复）。
+        """
         run = self.run
         if run is None or getattr(run, "sim", None) is None:
             return {"ok": False, "msg": "没有运行中的仿真，请先点「开始仿真」"}
@@ -332,10 +382,26 @@ class Dashboard:
                 return sim.inject_burst(n=int(kw.get("n", 500)))
             if kind == "deadlock":
                 return sim.inject_deadlock(hold_s=float(kw.get("hold", 20.0)))
+            # ---- 多基站混沌 ----
+            if kind == "node_down":
+                sid = kw.get("station")
+                return sim.inject_node_down(
+                    station_id=(int(sid) if sid not in (None, "") else None),
+                    duration_s=float(kw.get("duration", 20.0)))
+            if kind == "partition":
+                ga = _parse_id_list(kw.get("a"))
+                gb = _parse_id_list(kw.get("b"))
+                return sim.inject_partition(a=ga, b=gb,
+                                            duration_s=float(kw.get("duration", 20.0)))
+            if kind == "split_brain":
+                return sim.inject_split_brain(duration_s=float(kw.get("duration", 20.0)))
+            if kind == "recover":
+                return sim.recover_nodes()
         except Exception as exc:  # noqa: BLE001 - 接口层兜底
             logger.exception("混沌注入失败")
             return {"ok": False, "msg": f"{type(exc).__name__}: {exc}"}
-        return {"ok": False, "msg": f"未知混沌类型 {kind}（可选 weaknet/burst/deadlock）"}
+        return {"ok": False, "msg": f"未知混沌类型 {kind}（可选 weaknet/burst/deadlock/"
+                                    f"node_down/partition/split_brain/recover）"}
 
     def trace_export(self, fmt: str = "json"):
         """导出当前/最近一次运行的完整事件日志，返回 ``(content_type, bytes)``。"""
@@ -360,6 +426,29 @@ class Dashboard:
             return "text/csv; charset=utf-8", ("\ufeff" + buf.getvalue()).encode("utf-8")
         body = json.dumps({"meta": meta, "events": events}, ensure_ascii=False, indent=1)
         return "application/json; charset=utf-8", body.encode("utf-8")
+
+    def set_topology_default(self, stations: Optional[str] = None,
+                             mec: Optional[bool] = None) -> dict:
+        """设定**下一次启动**用的多基站拓扑 / MEC 开关（``GET /api/topology``）。
+
+        设计为"下次生效"而不是立刻重跑：运行中改拓扑会让正在跑的仿真状态错乱，
+        而重跑又会丢掉当前进度。想立刻用新拓扑，就再点一次「开始仿真」。
+        """
+        with self._lock:
+            if stations is not None:
+                s = str(stations).strip().lower()
+                self.default_stations = None if s in ("", "1", "single", "none") else s
+            if mec is not None:
+                self.default_mec = bool(mec)
+            running = self.run is not None and self.run.status == "running"
+            return {
+                "ok": True,
+                "stations": self.default_stations,
+                "mec": self.default_mec,
+                "applies": "next_run" if running else "now",
+                "msg": ("已记录；当前有仿真在跑，重启仿真后生效"
+                        if running else "已记录，下次点「开始仿真」生效"),
+            }
 
     def stop_run(self) -> dict:
         with self._lock:
@@ -464,6 +553,8 @@ def _make_handler(dash: Dashboard):
                 return
             if path == "/api/chaos":
                 # GET /api/chaos?kind=weaknet|burst|deadlock[&duration=20&frac=0.4&n=500&hold=20]
+                #   多基站：kind=node_down&station=2 / partition&a=1&b=2,3 /
+                #           split_brain / recover
                 kind = (qs.get("kind") or [""])[0].strip().lower()
                 kw = {}
                 for k in ("duration", "frac", "n", "hold"):
@@ -472,6 +563,9 @@ def _make_handler(dash: Dashboard):
                             kw[k] = float(qs[k][0])
                         except (TypeError, ValueError):
                             pass
+                for k in ("station", "a", "b"):
+                    if k in qs:
+                        kw[k] = qs[k][0]
                 try:
                     self._json(dash.chaos(kind, **kw))
                 except Exception as exc:  # noqa: BLE001
@@ -489,6 +583,15 @@ def _make_handler(dash: Dashboard):
                 scheduler = (qs.get("scheduler") or ["dynamic"])[0].lower()
                 speed = float((qs.get("speed") or ["1"])[0])
                 weather = (qs.get("weather") or [""])[0].strip().lower() or None
+                # 多基站拓扑：stations=triple / stations=3 / stations=1（单站默认）
+                stations = (qs.get("stations") or [""])[0].strip().lower() or None
+                # MEC 边缘计算：mec=1/0/true/false（缺省取 config.mec.enable）
+                mec_raw = (qs.get("mec") or [""])[0].strip().lower()
+                mec: Optional[bool] = None
+                if mec_raw in ("1", "true", "on", "yes"):
+                    mec = True
+                elif mec_raw in ("0", "false", "off", "no"):
+                    mec = False
                 if scenario not in SCENARIO_CODES:
                     self._json({"ok": False, "msg": f"未知工况 {scenario}"}, 400)
                     return
@@ -499,7 +602,22 @@ def _make_handler(dash: Dashboard):
                     self._json({"ok": False,
                                 "msg": f"未知天气 {weather}"}, 400)
                     return
-                self._json(dash.start_run(scenario, scheduler, speed, weather=weather))
+                self._json(dash.start_run(scenario, scheduler, speed, weather=weather,
+                                          stations=stations, mec=mec))
+                return
+            if path == "/api/topology":
+                # GET /api/topology?stations=triple&mec=1
+                #   设定"下一次启动"的多基站拓扑与 MEC 开关（3D 页面上的「开始仿真」
+                #   按钮不带这两个参数，因此需要服务端记住它们）。
+                st = (qs.get("stations") or [""])[0].strip().lower()
+                mec_raw2 = (qs.get("mec") or [""])[0].strip().lower()
+                mec_val: Optional[bool] = None
+                if mec_raw2 in ("1", "true", "on", "yes"):
+                    mec_val = True
+                elif mec_raw2 in ("0", "false", "off", "no"):
+                    mec_val = False
+                self._json(dash.set_topology_default(
+                    stations=(st if st else None), mec=mec_val))
                 return
             if path == "/api/stop":
                 self._json(dash.stop_run())
@@ -532,10 +650,17 @@ def make_server(cfg: Optional[dict] = None, host: str = "127.0.0.1",
 def serve(cfg: Optional[dict] = None, host: str = "127.0.0.1",
           port: int = DEFAULT_PORT, open_browser: bool = True,
           scenario: str = "PEAK", scheduler: str = "dynamic",
-          speed: float = 1.0, autostart: bool = False) -> int:
-    """启动面板并阻塞（Ctrl+C 退出）。返回进程退出码。"""
+          speed: float = 1.0, autostart: bool = False,
+          stations: Optional[str] = None, mec: Optional[bool] = None) -> int:
+    """启动面板并阻塞（Ctrl+C 退出）。返回进程退出码。
+
+    ``stations`` / ``mec``：多基站拓扑名（如 ``"triple"``）与 MEC 开关。
+    它们会被记为**会话默认值**，因此用户在 3D 页面上点「开始仿真」也能跑多站
+    （页面的按钮不带这两个参数）。``None`` = 单站 + 取 config.mec.enable。
+    """
     cfg = cfg or load_config()
     dash = Dashboard(cfg)
+    dash.set_topology_default(stations=stations, mec=mec)
     url = f"http://{host}:{port}/"
 
     httpd = ThreadingHTTPServer((host, port), _make_handler(dash))
@@ -552,7 +677,7 @@ def serve(cfg: Optional[dict] = None, host: str = "127.0.0.1",
     print()
 
     if autostart:
-        dash.start_run(scenario, scheduler, speed)
+        dash.start_run(scenario, scheduler, speed, stations=stations, mec=mec)
 
     if open_browser:
         def _open() -> None:

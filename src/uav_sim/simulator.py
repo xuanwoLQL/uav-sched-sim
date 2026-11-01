@@ -59,7 +59,7 @@ import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 _SRC_ROOT: Path = Path(__file__).resolve().parents[1]
 if str(_SRC_ROOT) not in sys.path:
@@ -67,6 +67,7 @@ if str(_SRC_ROOT) not in sys.path:
 
 from uav_sim.config import cfg_get_float, cfg_get_int
 from uav_sim.link_monitor import LinkMonitor
+from uav_sim.mec import MecController, desired_role_for
 from uav_sim.models import (
     LinkSample,
     QueueSnapshot,
@@ -78,9 +79,15 @@ from uav_sim.models import (
     UAVStatus,
     new_task_id,
 )
-from uav_sim.queue_manager import MultiLevelQueue
-from uav_sim.resource_limiter import ResourceLimiter
+from uav_sim.queue_manager import MultiLevelQueue  # noqa: F401 - 契约再导出（外部按旧路径引用）
+from uav_sim.resource_limiter import ResourceLimiter  # noqa: F401 - 契约再导出
 from uav_sim.scenarios import Scenario, TraceEvent, WorkloadTrace
+from uav_sim.station import (
+    ClusterLimiter,
+    ClusterQueue,
+    StationCluster,
+    resolve_station_specs,
+)
 from uav_sim.weather import WeatherModel, config_preset
 
 logger = logging.getLogger(__name__)
@@ -193,7 +200,9 @@ class Simulator:
 
     def __init__(self, scenario: Scenario, trace: WorkloadTrace, cfg: dict,
                  scheduler_name: str, seed: int,
-                 weather_preset: Optional[str] = None) -> None:
+                 weather_preset: Optional[str] = None,
+                 station_spec: Optional[object] = None,
+                 mec_enabled: Optional[bool] = None) -> None:
         self.scenario = scenario
         self.trace = trace
         self.cfg = cfg or {}
@@ -205,6 +214,8 @@ class Simulator:
         self._t0: Optional[float] = None
 
         # ---- 系统容量 ----
+        # 注意：单站时 workers = runtime.worker_threads（与改造前一致）；
+        # 多站时下面会被覆盖为"所有站核数之和"。
         self.workers: int = cfg_get_int(cfg, "runtime.worker_threads", 8)
         self.bandwidth_mbps: float = cfg_get_float(cfg, "runtime.worker_bandwidth_mbps", 150.0)
         self.bandwidth_floor: float = cfg_get_float(
@@ -230,18 +241,30 @@ class Simulator:
 
         # ---- 调度基础设施（对所有策略一视同仁） ----
         uav_ids = list(range(1, int(scenario.uav_count) + 1))
-        self.queue = MultiLevelQueue(
-            capacity=cfg_get_int(cfg, "server.queue_capacity", 5000),
-            starvation_threshold_ms=self.starvation_threshold_ms,
-            congestion_ref=cfg_get_float(
-                cfg, "server.congestion_reference_depth", 4.0 * self.workers),
-        )
-        self.limiter = ResourceLimiter(
-            max_concurrent=cfg_get_int(cfg, "server.max_concurrent", self.workers),
-            max_task_memory_mb=cfg_get_float(cfg, "server.max_task_memory_mb", 2048.0),
-            per_uav_quota=cfg_get_int(cfg, "server.per_uav_quota", 2),
-            enable_chunking=bool(self.cfg.get("server", {}).get("enable_chunking", True)),
-        )
+        # ---- 多基站 / MEC（改造建议第五章）----
+        # 关键：单站（默认）时 ClusterQueue/ClusterLimiter 的每个返回值与直接使用
+        # 单个 MultiLevelQueue/ResourceLimiter 逐位相同 -> 既有 15 组结果零影响。
+        self.station_specs = resolve_station_specs(self.cfg, station_spec)
+        self.stations = StationCluster(self.station_specs, self.cfg)
+        #: 多站时 workers 反映所有站核数之和（供系统负载 S 因子归一化）
+        self.workers = int(self.stations.total_workers)
+        self.queue = ClusterQueue(self.stations)
+        self.limiter = ClusterLimiter(self.stations)
+
+        # 每台无人机接入站点（一致性哈希决定原生归属，之后可被迁移改变）
+        self._uav_station: Dict[int, int] = {
+            uid: int(self.stations.home_station_for(uid)) for uid in uav_ids}
+        for uid, sid in self._uav_station.items():
+            node = self.stations.node(sid)
+            if node is not None:
+                node.uavs.add(int(uid))
+
+        # ---- MEC 边缘计算 ----
+        self.mec = MecController(self.cfg, station_roles={
+            int(n.spec.id): str(n.spec.role) for n in self.stations.nodes})
+        if mec_enabled is not None:
+            self.mec.cfg_obj.enable = bool(mec_enabled)
+
         # ---- 天气模型（3D 渲染升级：天气 -> 弱网 -> 链路健康度 -> 调度权重） ----
         # 构造顺序很关键：先建 WeatherModel，再传给 LinkMonitor —— 后者在
         # register_uav() 时会用 weather.at(t) 对健康度网格施加衰减。
@@ -254,6 +277,7 @@ class Simulator:
             seed=self.seed, weaknet_level=scenario.weaknet_level,
             duration_s=float(scenario.duration_s), uav_ids=uav_ids, cfg=cfg,
             weather=self.weather,
+            station_ids=[int(n.spec.id) for n in self.stations.nodes],
         )
 
         # ---- 运行期状态 ----
@@ -355,23 +379,63 @@ class Simulator:
     # ==================================================================
     # 任务工厂与服务时长标定
     # ==================================================================
-    def link_factor(self, uav_id: int, t: float) -> float:
-        """链路折损系数 ∈ [floor, 1]：链路越差，同一份数据要占用越长服务时间。"""
-        health = self.link_monitor.health_at(uav_id, t)
+    def link_factor(self, uav_id: int, t: float, station_id: Optional[int] = None) -> float:
+        """链路折损系数 ∈ [floor, 1]：链路越差，同一份数据要占用越长服务时间。
+
+        ``station_id=None`` 查默认站（单站模式下语义与数值完全不变）。
+        """
+        health = self.link_monitor.health_at(uav_id, t, station_id)
         return self.bandwidth_floor + (1.0 - self.bandwidth_floor) * max(0.0, min(100.0, health)) / 100.0
 
-    def compute_service_s(self, data_size_mb: float, uav_id: int, t: float) -> float:
-        """任务服务时长（仿真秒）= 数据量 / (单线程带宽 × 链路折损系数)。"""
-        eff_bw = self.bandwidth_mbps * self.link_factor(uav_id, t)
+    def compute_service_s(self, data_size_mb: float, uav_id: int, t: float,
+                          station_id: Optional[int] = None) -> float:
+        """任务服务时长（仿真秒）= 数据量 / (单线程带宽 × 链路折损系数)。
+
+        带宽取**任务归属站**的带宽（边缘站带宽更低，这正是"下沉边缘更近
+        但更薄"的代价）；单站时等于 ``runtime.worker_bandwidth_mbps``，
+        与改造前逐位一致。
+        """
+        bw = self.bandwidth_mbps
+        node = self.stations.node(int(station_id)) if station_id is not None else None
+        if node is not None:
+            bw = float(node.spec.bandwidth_mbps)
+        eff_bw = bw * self.link_factor(uav_id, t, station_id)
         return max(1e-6, float(data_size_mb) / max(1e-9, eff_bw))
+
+    def _mec_target_station(self, task_type: TaskType) -> Optional[int]:
+        """MEC 卸载决策：按任务分级挑一个"该角色且在线"的站（最空闲优先）。
+
+        返回 None 表示"不干预"（MEC 关闭 / 单站 / 该角色当前无可用站）——
+        此时任务落在无人机原生归属站，与改造前行为一致。这就是**优雅降级**：
+        边缘站全挂了不会让轻量任务无家可归，而是照旧回中心。
+        """
+        if not self.mec.enabled or not self.stations.is_multi:
+            return None
+        role = desired_role_for(task_type, self.cfg)
+        cands = [n for n in self.stations.nodes
+                 if n.online and str(n.spec.role).upper() == role]
+        if not cands:
+            return None
+        rr = self._running_remaining_by_station()
+        best = min(cands, key=lambda n: (n.load(float(rr.get(int(n.spec.id), 0.0))),
+                                        int(n.spec.id)))
+        return int(best.spec.id)
 
     def make_task(self, uav_id: int, task_type: TaskType, data_size_mb: float,
                   now: float) -> Task:
         """按当前链路健康度把一条到达事件变成真正的 `Task`。
 
         **不要绕过本方法直接 new Task**，否则服务时长标定会与系统容量模型不一致。
+
+        多基站 + MEC 开启时，这里同时完成**初始放置**：轻量运维任务下沉边缘站、
+        重勘查任务回中心站（放置不是迁移，故 ``home_station_id`` 与之一致，
+        ``migrate_count`` 保持 0 —— 迁移只统计"事后被搬走"）。
         """
-        health = self.link_monitor.health_at(uav_id, now)
+        station_id = int(self._uav_station.get(int(uav_id), self.stations.default_id))
+        mec_sid = self._mec_target_station(task_type)
+        if mec_sid is not None:
+            station_id = mec_sid
+        health = self.link_monitor.health_at(uav_id, now, station_id)
         task = Task(
             task_id=new_task_id("T"),
             uav_id=int(uav_id),
@@ -379,7 +443,9 @@ class Simulator:
             task_type=task_type,
             data_size_mb=float(data_size_mb),
             submit_ts=float(now),
-            service_s=self.compute_service_s(data_size_mb, uav_id, now),
+            service_s=self.compute_service_s(data_size_mb, uav_id, now, station_id),
+            station_id=station_id,
+            home_station_id=station_id,
         )
         task.enqueue_ts = float(now)
         task.link_health = float(health)
@@ -453,6 +519,134 @@ class Simulator:
         return {"ok": True, "kind": "deadlock", "task_id": task.task_id,
                 "uav": int(task.uav_id)}
 
+    # ------------------------------------------------------------------
+    # 混沌工程扩展：节点宕机 / 网络分区 / 脑裂（改造建议第五章 C）
+    # ------------------------------------------------------------------
+    def inject_node_down(self, station_id: Optional[int] = None,
+                         duration_s: float = 20.0) -> dict:
+        """让某个服务器节点宕机（默认 2 号边缘站；单站模式拒绝执行）。
+
+        宕机后：该站 ``online=False``，站上排队任务由 ``_process_station_down``
+        疏散到存活站（**带迁移代价**），运行中的任务在模拟里继续跑完 —— 因此
+        "任务重调度"这条链在迁移次数与站级 done 上都能看到。
+        ``duration_s<=0`` 表示不自动恢复，需手动 ``recover``。
+        """
+        if not self.stations.is_multi:
+            return {"ok": False, "msg": "当前是单站模式，无节点可宕机（请用 stations=triple）"}
+        now = self.now()
+        sid = int(station_id) if station_id else int(self.stations.nodes[-1].spec.id)
+        node = self.stations.node(sid)
+        if node is None:
+            return {"ok": False, "msg": f"未知站点 {sid}"}
+        self.stations.set_online(sid, False, now)
+        dur = float(duration_s)
+        if dur > 0:
+            self._chaos["node_down_until"] = dict(self._chaos.get("node_down_until") or {})
+            self._chaos["node_down_until"][sid] = now + dur
+        self._log_event("chaos_node_down", None, station=sid,
+                        duration_s=dur)
+        return {"ok": True, "kind": "node_down", "station": sid,
+                "until": round(now + dur, 2) if dur > 0 else None}
+
+    @staticmethod
+    def _as_ids(value) -> List[int]:
+        """把 ``None`` / ``1`` / ``"2,3"`` / ``[2, 3]`` 一律规整成 ``[2, 3]``。"""
+        if value is None:
+            return []
+        if isinstance(value, (int, float)):
+            return [int(value)]
+        if isinstance(value, str):
+            parts = value.split(",")
+        else:
+            try:
+                parts = list(value)
+            except TypeError:
+                return []
+        out: List[int] = []
+        for p in parts:
+            try:
+                out.append(int(str(p).strip()))
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    def inject_partition(self, a: Optional[Iterable[int]] = None,
+                         b: Optional[Iterable[int]] = None,
+                         duration_s: float = 20.0) -> dict:
+        """制造网络分区：``a`` 组与 ``b`` 组互不可达（跨区不再迁移）。
+
+        缺省 ``a=[1]``、``b=其余站`` —— 即"边缘站与中心云失联"这一最典型场景。
+        ``a``/``b`` 接受 int、``"2,3"`` 字符串或 id 列表。
+        """
+        if not self.stations.is_multi:
+            return {"ok": False, "msg": "当前是单站模式，无分区可制造（请用 stations=triple）"}
+        now = self.now()
+        ids = [int(n.spec.id) for n in self.stations.nodes]
+        ga = self._as_ids(a) or [ids[0]]
+        gb = self._as_ids(b) or [i for i in ids if i not in ga]
+        if not gb:
+            return {"ok": False, "msg": "分区两组不能有一组为空"}
+        groups = self.stations.set_partition([ga, gb])
+        dur = float(duration_s)
+        if dur > 0:
+            self._chaos["partition_until"] = now + dur
+        self._chaos["partition_groups"] = groups
+        self._log_event("chaos_partition", None, groups=groups, duration_s=dur)
+        return {"ok": True, "kind": "partition", "groups": groups,
+                "until": round(now + dur, 2) if dur > 0 else None}
+
+    def inject_split_brain(self, duration_s: float = 20.0) -> dict:
+        """制造脑裂：分区两侧各自认为自己是主，各自独立调度且拒绝跨区迁移。
+
+        实现上 = 先把中心站与边缘站分成两组，再置 ``split_brain=True``。
+        与普通分区的区别在语义与面板呈现（两侧都"自认主"），可达性判定一致。
+        """
+        if not self.stations.is_multi:
+            return {"ok": False, "msg": "当前是单站模式，无脑裂可制造（请用 stations=triple）"}
+        ids = [int(n.spec.id) for n in self.stations.nodes]
+        centers = [int(n.spec.id) for n in self.stations.nodes
+                   if str(n.spec.role).upper() == "CENTER"] or [ids[0]]
+        edges = [i for i in ids if i not in centers] or ids[1:]
+        groups = self.stations.set_partition([centers, edges])
+        self.stations.split_brain = True
+        now = self.now()
+        dur = float(duration_s)
+        if dur > 0:
+            self._chaos["partition_until"] = now + dur
+        self._chaos["partition_groups"] = groups
+        self._log_event("chaos_split_brain", None, groups=groups, duration_s=dur)
+        return {"ok": True, "kind": "split_brain", "groups": groups,
+                "until": round(now + dur, 2) if dur > 0 else None}
+
+    def recover_nodes(self) -> dict:
+        """一键恢复：全部站点上线 + 解除分区 + 清除脑裂。"""
+        up = self.stations.nodes_down()
+        self.stations.recover_all()
+        self._chaos["node_down_until"] = {}
+        self._chaos["partition_until"] = 0.0
+        self._chaos["partition_groups"] = []
+        self._log_event("chaos_recover", None, restored=up)
+        return {"ok": True, "kind": "recover", "restored": up}
+
+    def _process_chaos_recovery(self, now: float) -> None:
+        """到期自动恢复：节点宕机时长到点自动上线，分区/脑裂到点自动解除。"""
+        until_map = self._chaos.get("node_down_until") or {}
+        if isinstance(until_map, dict) and until_map:
+            left = {}
+            for sid, ts in list(until_map.items()):
+                if float(ts) <= now:
+                    self.stations.set_online(int(sid), True, now)
+                    self._log_event("chaos_node_up", None, station=int(sid))
+                else:
+                    left[int(sid)] = float(ts)
+            self._chaos["node_down_until"] = left
+        p_until = float(self._chaos.get("partition_until", 0.0) or 0.0)
+        if p_until > 0 and now >= p_until:
+            self.stations.clear_partition()
+            self._chaos["partition_until"] = 0.0
+            self._chaos["partition_groups"] = []
+            self._log_event("chaos_partition_heal", None)
+
     def submit_task(self, task: Task) -> bool:
         """生产者线程提交任务（线程安全）；队列满则丢弃并计数。"""
         if task is None:
@@ -471,16 +665,29 @@ class Simulator:
             task.finish_ts = self.now()
         return ok
 
-    def dispatch(self, task: Task, limit_s: Optional[float] = None) -> bool:
+    def dispatch(self, task: Task, limit_s: Optional[float] = None,
+                 station_id: Optional[int] = None) -> bool:
         """把已获得限流许可的任务交给工作线程池（契约 §4.6）。
 
         ``limit_s``：本轮最多允许运行的仿真秒数（RR / MLFQ 的时间片，None = 跑完）。
+        ``station_id``：指定由哪个站的线程池执行；None = 取任务当前归属站。
         返回 False 表示未受理（仿真已停止 / 线程池已关闭），调用方应释放限流许可。
         """
         if task is None:
             return False
         now = self.now()
         slot = -1
+        # 解析目标站（单站时恒为默认站，行为与改造前一致）
+        sid = int(station_id if station_id is not None else
+                  getattr(task, "station_id", self.stations.default_id))
+        node = self.stations.node(sid)
+        if node is None:
+            node = self.stations.node(self.stations.default_id)
+            sid = int(node.spec.id) if node is not None else self.stations.default_id
+            task.station_id = sid
+        if node is not None and not node.online:
+            # 目标站宕机：拒绝派发，让调用方释放许可、任务留队等重调度
+            return False
         with self._lock:
             if self.stop_event.is_set():
                 return False
@@ -494,24 +701,40 @@ class Simulator:
                 # 已经跑完的任务不应再进线程池
                 task.state = TaskState.DONE
                 task.finish_ts = now
+                if node is not None:
+                    node.done += 1
                 return False
             self._running[task.task_id] = (task, now)
-            # 分配并发槽位（= 绑定的"CPU 核号"），并计算本次上下文切换开销
-            slot = self._free_slots.pop(0) if self._free_slots else -1
+            # 分配并发槽位（= 该站绑定的"CPU 核号"），并计算本次上下文切换开销
+            slot = node.take_slot(task.task_id) if node is not None else -1
             self._slot_of[task.task_id] = slot
             prev_finish = self._last_finish_ts.get(int(task.uav_id))
             if prev_finish is not None:
                 self._last_switch_ms[int(task.uav_id)] = round(
                     max(0.0, now - prev_finish) * 1000.0, 2)
             task.state = TaskState.RUNNING
-        self._log_event("dispatch", task, slot=slot,
+            if node is not None:
+                node.dispatched += 1
+        self._log_event("dispatch", task, slot=slot, station=sid,
                         slice_ms=(None if limit_s is None else round(float(limit_s) * 1000.0, 1)))
+        executor = node.executor if node is not None else self._executor
+        if executor is None:
+            executor = self._executor
         try:
-            self._executor.submit(self._run_task, task, exec_s)  # type: ignore[union-attr]
+            executor.submit(self._run_task, task, exec_s)  # type: ignore[union-attr]
         except RuntimeError:  # 线程池已关闭
             with self._lock:
                 self._running.pop(task.task_id, None)
             return False
+        # ---- MEC 端到端时延记账（**与策略无关**，对所有策略统一口径） ----
+        # 关键设计：e2e 是"度量"，不是"策略"。mec.enable 只控制**卸载决策**
+        # （轻量任务是否下沉边缘），不控制是否统计时延。否则"纯中心"模式下
+        # avg_e2e_ms 恒为 0，"纯中心 vs 端-边-云"就没有可比口径了。
+        if node is not None:
+            try:
+                self.mec.note_dispatch(task, str(node.spec.role))
+            except Exception:  # pragma: no cover - 记账失败不影响仿真
+                pass
         return True
 
     def _release_slot(self, task: Task, now: Optional[float] = None) -> None:
@@ -519,15 +742,17 @@ class Simulator:
 
         上下文切换开销 = 本机上一次任务结束 → 本次任务被派发 之间的仿真时间差，
         在 ``dispatch()`` 里算好写进 ``_last_switch_ms``。
+        多站时归还到**任务归属站**的槽位表（站内编号）。
         """
         try:
             with self._lock:
-                slot = self._slot_of.pop(task.task_id, -1)
-                if slot >= 0:
-                    self._free_slots.append(slot)
-                    self._free_slots.sort()
+                self._slot_of.pop(task.task_id, -1)
                 self._last_finish_ts[int(task.uav_id)] = float(
                     now if now is not None else self.now())
+            node = self.stations.node(int(getattr(task, "station_id",
+                                                    self.stations.default_id)))
+            if node is not None:
+                node.release_slot(task.task_id)
         except Exception:  # pragma: no cover
             logger.exception("_release_slot 异常 task=%s", getattr(task, "task_id", "?"))
 
@@ -618,7 +843,10 @@ class Simulator:
                 return
 
             # ---- 上传完成 -> 弱网失败判定 ----
-            health = self.link_monitor.health_at(task.uav_id, now)
+            # 链路健康度按**任务归属站**取（多站时"该机到该站"的链路）；
+            # 单站时等价于改造前的 health_at(uav, now)，逐位一致。
+            health = self.link_monitor.health_at(
+                task.uav_id, now, int(getattr(task, "station_id", self.stations.default_id)))
             p_fail = self._failure_probability(health, task.uav_id)
             self.limiter.release(task)
 
@@ -630,6 +858,10 @@ class Simulator:
             task.finish_ts = now
             with self._lock:
                 self._done_count += 1
+            done_node = self.stations.node(int(getattr(task, "station_id",
+                                                       self.stations.default_id)))
+            if done_node is not None:
+                done_node.done += 1
             self._log_event("done", task, wait_ms=round(float(task.wait_ms_total), 1),
                             retry=int(task.retry_count))
             if self._scheduler is not None:
@@ -796,8 +1028,17 @@ class Simulator:
         duration = float(duration_s if duration_s is not None else self.scenario.duration_s)
         self._scheduler = scheduler
         self.stop_event.clear()
-        self._executor = ThreadPoolExecutor(
-            max_workers=self.workers, thread_name_prefix="UAV-Worker")
+        # ---- 线程池：单站时 1 个（与改造前一致）；多站时每站一个独立线程池 ----
+        if self.stations.is_multi:
+            for node in self.stations.nodes:
+                node.executor = ThreadPoolExecutor(
+                    max_workers=max(1, int(node.spec.workers)),
+                    thread_name_prefix=f"Station-{node.spec.id}")
+            self._executor = None
+        else:
+            self.stations.nodes[0].executor = ThreadPoolExecutor(
+                max_workers=max(1, self.workers), thread_name_prefix="UAV-Worker")
+            self._executor = self.stations.nodes[0].executor
 
         workers: List[UAVWorker] = []
         t_start = time.perf_counter()
@@ -824,8 +1065,11 @@ class Simulator:
 
                 self._process_churn(now)
                 self._flush_retries(now)
+                self.stations.flush_migrations(now)   # 到期的迁移任务投入目标站
                 self.link_monitor.tick(now)
                 self._reap_deadlocks(now)
+                self._process_chaos_recovery(now)     # 宕机/分区到期自动恢复
+                self._process_station_down(now)       # 节点宕机 -> 疏散该站队列
 
                 # ---- 调度一轮（策略实现，绝不阻塞） ----
                 try:
@@ -862,6 +1106,9 @@ class Simulator:
             self.stop_event.set()
             for w in workers:
                 w.join(timeout=1.0)
+            for node in self.stations.nodes:
+                if node.executor is not None:
+                    node.executor.shutdown(wait=True)
             if self._executor is not None:
                 self._executor.shutdown(wait=True)
             # 正常跑完 -> 取 duration（不要取"多跑了一帧"的 now，否则面板会显示 90.5/90）；
@@ -895,8 +1142,108 @@ class Simulator:
             "uav_status": self.uav_status(),
             # 天气曲线快照（0.5 s 网格逐点 dict；ExperimentRunner 写入 RunResult）
             "weather_samples": self.weather_samples(),
+            # ---- 多基站 / MEC 收尾快照（供 run.py mec / 报告使用） ----
+            "stations": self.stations.snapshot({}, end_ts),
+            "station_metrics": self._station_metrics(end_ts),
+            "mec": self.mec.snapshot(),
             "stop_reason": "duration_reached",
         }
+
+    # ==================================================================
+    # 多基站辅助：站级指标 / 宕机疏散
+    # ==================================================================
+    def _running_remaining_by_station(self) -> Dict[int, float]:
+        """每站正在运行任务的剩余服务秒之和（站级负载的"在途"部分）。"""
+        out: Dict[int, float] = {}
+        with self._lock:
+            items = list(self._running.values())
+        for task, _ in items:
+            sid = int(getattr(task, "station_id", self.stations.default_id))
+            out[sid] = out.get(sid, 0.0) + float(task.remaining_s)
+        return out
+
+    def _station_of_uav(self) -> Dict[int, int]:
+        """每架无人机**当前接入**的站 id（契约 ``live.station_of_uav``）。
+
+        接入点不是一成不变的：它所属的站宕机后，该机会被**改接到存活站**
+        （一致性哈希顺时针找下一个可用站）。这正是 3D 场景里"切换站点过渡动画"
+        的数据来源，也让"节点宕机 -> 任务重调度"在每机层面可见。
+        """
+        out: Dict[int, int] = {}
+        for uid in range(1, int(self.scenario.uav_count) + 1):
+            sid = int(self._uav_station.get(uid, self.stations.default_id))
+            node = self.stations.node(sid)
+            if node is not None and node.online:
+                out[uid] = sid
+                continue
+            new_sid = int(self.stations.pick_by_hash(f"uav:{uid}"))
+            target = self.stations.node(new_sid)
+            if target is None or not target.online:
+                alive = self.stations.alive_nodes()
+                new_sid = int(alive[0].spec.id) if alive else int(self.stations.default_id)
+            if new_sid != sid:
+                if node is not None:
+                    node.uavs.discard(uid)
+                self._uav_station[uid] = new_sid
+                nn = self.stations.node(new_sid)
+                if nn is not None:
+                    nn.uavs.add(uid)
+                self._log_event("uav_rehome", None, uav=int(uid), frm=sid, to=new_sid)
+            out[uid] = int(self._uav_station.get(uid, sid))
+        return out
+
+    def _station_metrics(self, end_ts: float) -> Dict[str, float]:
+        """站级 / 迁移 / MEC 汇总指标（供 metrics.compute_metrics 与报告使用）。"""
+        rrs = self._running_remaining_by_station()
+        stations = self.stations.snapshot(rrs, end_ts)
+        max_q = max((s["queue_depth"] for s in stations), default=0)
+        load_imb = self.stations.load_imbalance(rrs)
+        tasks = self.all_tasks()
+        migrated = [t for t in tasks if int(getattr(t, "migrate_count", 0)) > 0]
+        mig_cost = ([float(t.migration_cost_ms) for t in migrated])
+        mec = self.mec.snapshot()
+        return {
+            "station_max_queue_depth": float(max_q),
+            "station_load_imbalance": float(load_imb),
+            "migration_count": float(self.stations.migrations_total),
+            "migration_cost_ms": float(sum(mig_cost) / len(mig_cost)) if mig_cost else 0.0,
+            "cross_node_comm_ms": float(sum(mig_cost)),
+            "edge_offload_ratio": float(mec.get("edge_offload_ratio", 0.0)) * 100.0,
+            "avg_e2e_ms": float(mec.get("avg_e2e_ms", 0.0)),
+            "edge_e2e_ms": float(mec.get("avg_e2e_edge_ms", 0.0)),
+            "center_e2e_ms": float(mec.get("avg_e2e_center_ms", 0.0)),
+            "e2e_if_edge_ms": float(mec.get("e2e_if_edge_ms", 0.0)),
+            "e2e_if_center_ms": float(mec.get("e2e_if_center_ms", 0.0)),
+            "e2e_light_if_edge_ms": float(mec.get("e2e_light_if_edge_ms", 0.0)),
+            "e2e_light_if_center_ms": float(mec.get("e2e_light_if_center_ms", 0.0)),
+            "e2e_heavy_if_edge_ms": float(mec.get("e2e_heavy_if_edge_ms", 0.0)),
+            "e2e_heavy_if_center_ms": float(mec.get("e2e_heavy_if_center_ms", 0.0)),
+            "mec_crossing_data_mb": float(mec.get("crossing_data_mb", 0.0)),
+            # 任务分级计数（报告必须交代口径：本工况 HIGH:LOW 配比决定"边缘分流比例"
+            # 的可解释性，否则 98% 的边缘分流会被误读成"MEC 很成功"）。
+            "mec_light_tasks": float(mec.get("light_tasks", 0)),
+            "mec_heavy_tasks": float(mec.get("heavy_tasks", 0)),
+        }
+
+    def _process_station_down(self, now: float) -> None:
+        """节点宕机看门狗：站 offline 后，把其队列里的任务疏散到存活站。
+
+        与死锁看门狗同构的"检测 -> 处置 -> 记事件"闭环：
+        疏散通过 ``StationCluster.evacuate_station`` 走**带代价的迁移**，因此
+        "节点宕机 -> 任务重调度"整条链在指标上可见（迁移次数上升 + 站 done 下降）。
+        """
+        for node in self.stations.nodes:
+            if node.online:
+                continue
+            if node.queue.total_depth <= 0:
+                continue
+            try:
+                moved = self.stations.evacuate_station(int(node.spec.id), now)
+            except Exception:  # pragma: no cover
+                moved = 0
+            if moved:
+                self._log_event("node_evacuate", None, station=int(node.spec.id),
+                                moved=int(moved))
 
     # ==================================================================
     # 实时快照（供可视化面板高频轮询，必须轻量）
@@ -904,9 +1251,12 @@ class Simulator:
     # ------------------------------------------------------------------
     # 快照辅助：单机透视 / 权重因子 / 内核级指标
     # ------------------------------------------------------------------
-    def _uav_detail(self, running: List[dict], health: dict, online: dict) -> Dict[str, dict]:
+    def _uav_detail(self, running: List[dict], health: dict, online: dict,
+                    station_of: Optional[Dict[int, int]] = None) -> Dict[str, dict]:
         """把"运行中任务"反查回每架无人机，得到线程五态 + 绑核 + 切换开销。"""
         by_uav = {int(r["uav_id"]): r for r in running}
+        if station_of is None:
+            station_of = self._station_of_uav()
         out: Dict[str, dict] = {}
         for uid in range(1, int(self.scenario.uav_count) + 1):
             r = by_uav.get(uid)
@@ -929,6 +1279,8 @@ class Simulator:
                 "core": r["core"] if r else -1,
                 "wait_ms": r["wait_ms"] if r else 0.0,
                 "switch_ms": round(float(self._last_switch_ms.get(uid, 0.0)), 2),
+                # 多基站：该机当前接入的站（3D 连线与"多基站"页签用）
+                "station_id": int(station_of.get(uid, self.stations.default_id)),
             }
         return out
 
@@ -1008,8 +1360,17 @@ class Simulator:
             retry_pending = len(self._retry_pending)
             online = dict(self._uav_online)
 
-        health = self.link_monitor.get_all_health()
         limiter = self.limiter.get_status()
+        # 先算"每机当前接入站"：它可能因某站宕机而**改派**，而站级快照的
+        # uavs/uav_count 依赖改派结果，因此必须先于 stations 计算（否则同一份
+        # 快照里 stations 与 station_of_uav 会自相矛盾）。
+        station_of = self._station_of_uav()
+        # 每机"到其**当前接入站**"的健康度。单站时 station_of 恒为默认站，
+        # 于是 links_all 与旧 get_all_health() 逐位相同（旧口径零改动）；
+        # 多站时 links 必须按接入站取，否则面板会显示"到别的站"的链路质量。
+        links_all: Dict[int, float] = {
+            int(uid): float(self.link_monitor.health_at(int(uid), now, int(sid)))
+            for uid, sid in station_of.items()}
         sched_stats = {}
         if self._scheduler is not None and hasattr(self._scheduler, "get_stats"):
             try:
@@ -1038,7 +1399,7 @@ class Simulator:
             # 每架无人机的合并状态（3D 面板直接按 uav_id 索引，免去前端自己 join）
             # 2026-11：补上"线程五态 / 绑定核号 / 当前任务 / 最近一次上下文切换开销"，
             # 供「OS 微观透视镜」点击单机时下钻。
-            "uav_states": self._uav_detail(running, health, online),
+            "uav_states": self._uav_detail(running, links_all, online, station_of),
             "counters": {
                 "submitted": int(submitted),
                 "done": int(done),
@@ -1057,7 +1418,8 @@ class Simulator:
             },
             "system_load": round(float(self.system_load()), 4),
             "overload_seconds": round(float(self._overload_seconds), 3),
-            "links": {str(uid): round(float(h), 2) for uid, h in health.items()},
+            "links": {str(uid): round(float(links_all.get(uid, 100.0)), 2)
+                      for uid in range(1, int(self.scenario.uav_count) + 1)},
             "uav_online": {str(uid): bool(v) for uid, v in online.items()},
             "scheduler_stats": {
                 "high_time_slice_ms": round(float(sched_stats.get("high_time_slice_ms", 0.0)), 1),
@@ -1088,7 +1450,25 @@ class Simulator:
                 "burst": int(self._chaos.get("burst", 0)),
                 "deadlock_task": self._chaos.get("deadlock_task"),
                 "deadlock_until": round(float(self._chaos.get("deadlock_until", 0.0)), 2),
+                # ---- 多基站混沌：节点宕机 / 网络分区 / 脑裂 ----
+                "nodes_down": self.stations.nodes_down(),
+                "partitions": self.stations.partitions_view(),
+                "split_brain": bool(self.stations.split_brain),
             },
+            # ---- 多基站 / MEC（改造建议第五章；契约键名见 docs/11） ----
+            "stations": self.stations.snapshot(self._running_remaining_by_station(), now),
+            "station_of_uav": {str(uid): int(sid)
+                               for uid, sid in sorted(station_of.items())},
+            # 全链路矩阵：**两层键都用字符串**，与 JSON 序列化后的键型一致，
+            # 避免"直接读 snapshot() 是 int 键、经 HTTP 变成 str 键"的踩坑。
+            # 覆盖**全部**无人机（含已返航的）：与 station_of_uav / links 口径一致，
+            # 否则前端按 uav_id 索引时会出现"有的机没有链路记录"。
+            "link_matrix": {str(uid): {str(sid): float(h) for sid, h in row.items()}
+                            for uid, row in self.link_monitor.health_matrix(
+                                [int(n.spec.id) for n in self.stations.nodes],
+                                range(1, int(self.scenario.uav_count) + 1),
+                                t=now).items()},
+            "mec": self.mec.snapshot(),
             "trace_tail": list(self._event_log)[-60:],
             # ---- 天气快照（契约 §4.6.4：键名不可改，前端天气系统直接消费） ----
             # 运行中切换天气后这里立刻变化；未开始仿真时是 t=0 的曲线起点。

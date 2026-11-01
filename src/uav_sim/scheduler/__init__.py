@@ -27,6 +27,7 @@ if str(_SRC_ROOT) not in sys.path:
 
 from uav_sim.models import SCHEDULER_NAMES  # noqa: E402
 from uav_sim.scheduler.base import BaseScheduler  # noqa: E402
+from uav_sim.scheduler.cross_node import CrossNodeScheduler  # noqa: E402
 from uav_sim.scheduler.dynamic import DynamicWeightScheduler  # noqa: E402
 from uav_sim.scheduler.fcfs import FCFSScheduler  # noqa: E402
 from uav_sim.scheduler.mlfq import MLFQScheduler  # noqa: E402
@@ -40,6 +41,7 @@ SCHEDULERS: Dict[str, Type[BaseScheduler]] = {
     "priority": PriorityScheduler,
     "mlfq": MLFQScheduler,
     "dynamic": DynamicWeightScheduler,
+    "cross_node": CrossNodeScheduler,
 }
 
 #: 防御性校验：注册表必须覆盖 models.SCHEDULER_NAMES 的全部策略
@@ -54,6 +56,7 @@ __all__ = [
     "PriorityScheduler",
     "MLFQScheduler",
     "DynamicWeightScheduler",
+    "CrossNodeScheduler",
     "SCHEDULERS",
     "create_scheduler",
 ]

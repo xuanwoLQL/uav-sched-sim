@@ -46,11 +46,11 @@ from uav_sim.config import cfg_get_float, cfg_get_int, load_config, resolve_path
 from uav_sim.db import DBWriter
 from uav_sim.metrics import compute_metrics, extra_stats, final_turnaround_ms, final_wait_ms
 from uav_sim.models import (
+    CLASSIC_SCHEDULER_NAMES,
     METRIC_SPEC,
     SCENARIO_CODES,
     SCENARIO_LABELS,
     SCHEDULER_LABELS,
-    SCHEDULER_NAMES,
     RunResult,
 )
 from uav_sim.scenarios import (
@@ -68,8 +68,14 @@ class ExperimentRunner:
     """对照实验执行器（契约 §4.10）。"""
 
     def __init__(self, cfg: Optional[dict] = None,
-                 results_dir: Optional[str | Path] = None) -> None:
+                 results_dir: Optional[str | Path] = None,
+                 station_spec: Optional[object] = None,
+                 mec_enabled: Optional[bool] = None) -> None:
         self.cfg = cfg if cfg is not None else load_config()
+        #: 多基站拓扑（None = 单站默认，行为与改造前完全一致）
+        self.station_spec = station_spec
+        #: MEC 边缘计算开关（None = 取 config.mec.enable）
+        self.mec_enabled = mec_enabled
         self.results_dir = Path(results_dir) if results_dir is not None \
             else resolve_path(self.cfg, "output.results_dir")
         self.raw_dir = self.results_dir / "raw"
@@ -139,7 +145,9 @@ class ExperimentRunner:
 
             # ---- 2) 装配仿真器与调度策略 ----
             sim = Simulator(scenario, trace, self.cfg, scheduler_name=sched, seed=seed,
-                            weather_preset=weather_preset)
+                            weather_preset=weather_preset,
+                            station_spec=self.station_spec,
+                            mec_enabled=self.mec_enabled)
             scheduler = create_scheduler(sched, sim, self.cfg)
 
             # ---- 3) 跑仿真 ----
@@ -166,6 +174,8 @@ class ExperimentRunner:
                 end_ts=end_ts,
                 runtime_wall_s=wall,
                 preempt_count=int(raw.get("preempt_count", 0)),
+                # 多基站 / MEC 扩展指标（单站时全为 0.0，等价于改造前）
+                station_metrics=raw.get("station_metrics"),
             )
 
             # ---- 5) 明细落盘（等待时延按仿真结束时刻结算，与指标口径一致） ----
@@ -225,7 +235,12 @@ class ExperimentRunner:
         的对照；``run.py all`` 不传 = 默认 clear，对既有 15 组结果零影响）。
         """
         codes = [str(c).upper() for c in (scenario_codes or SCENARIO_CODES)]
-        scheds = [str(s).lower() for s in (scheduler_names or SCHEDULER_NAMES)]
+        # 默认只跑 5 个**经典单节点策略**（= 15 组矩阵）。
+        # 为什么不用 SCHEDULER_NAMES（6 个）：后者含多基站策略 cross_node，
+        # 让它默认混进矩阵会把"策略差异"与"拓扑差异"纠缠在一起，并让既有的
+        # 15 组结果 / 图表 / 报告数字失效。cross_node 一律**显式 opt-in**
+        # （run.py all --schedulers cross_node，或 run.py mec 的对照实验）。
+        scheds = [str(s).lower() for s in (scheduler_names or CLASSIC_SCHEDULER_NAMES)]
         total = len(codes) * len(scheds)
 
         if progress:

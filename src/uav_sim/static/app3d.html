@@ -373,6 +373,33 @@ const C = { ok: 0x3ddc97, warn: 0xffd166, bad: 0xff6b6b,
 const state = { drones: [], live: null, summary: {}, status: "idle", time: 0, orbitMode: false,
                 field: null, flow: null, cloudUs: [], wx: null };
 
+/* ==========================================================================
+   多基站 / MEC（后端 /api/state.live 新增 stations / station_of_uav / link_matrix）
+   --------------------------------------------------------------------------
+   三层视觉，对应调度里的三件事：
+     ① 地面站本体   —— CENTER = 高塔大盘，EDGE = 矮杆小机柜；颜色取 station.color
+     ② 站顶负载柱 + 地面圈层 —— 高度/颜色随 load 绿→黄→红；partitioned 灰虚线，
+                                 offline 熄灭暗红（"这个站挂了"一眼可见）
+     ③ 无人机→接入站的连线 —— 线色取 link_matrix[uid][station] 的健康度；
+                                切站（station_of_uav 变化）走 ~0.6s 插值 + 透明度凹陷，
+                                不瞬移；migrations_in/out 抬头时站点扩散一圈冲击波
+   降级：live 里没有 stations（老后端 / 未启动）时整体退回"单站 = 老地面站位置"，
+        连线仍按 uav_states.health 着色，与升级前表现一致，绝不报错白屏。
+   ========================================================================== */
+const STATION_FALLBACK = { id: 1, name: "地面站 · 调度服务器", role: "CENTER",
+                           x: STATION_XZ.x, z: STATION_XZ.z, color: "#4ea1ff" };
+const STATIONS = {
+  list: [],                     // 渲染中的站（rec = 后端数据，group = three 对象）
+  byId: {},                     // id -> 站（按字符串键，兼容 JSON 的数字键）
+  mode: "fallback",             // fallback（单站） | live（多基站）
+  key: "",                      // 站点集合指纹：变化才重建几何
+  primaryAnchor: UPLINK_TOP.clone(),   // 主站天线顶点的世界坐标（HUD 箭头 / 相机用）
+};
+/* 切站过渡时长：迁移必须是"看得见的过程"，0.6s 内把线端点从老站插值到新站 */
+const HANDOVER_S = 0.6;
+const LOAD_YELLOW = new THREE.Color(0xffd166), LOAD_RED = new THREE.Color(0xff4d4d);
+const _stColor = new THREE.Color(), _anchorTmp = new THREE.Vector3();
+
 /* ============================================================ 1. 噪声 */
 /** 2D 梯度噪声（Perlin 风格）：比"随机值 + 双线性"更接近真实地形，且无方块感 */
 function makeGradientNoise(seed) {
@@ -1208,71 +1235,446 @@ function makeTextSprite(text, opt) {
   return sp;
 }
 
-function buildStation(scene) {
-  const g = new THREE.Group();
-  g.position.set(STATION_XZ.x, PAD_H, STATION_XZ.z);
+/** 站台底面高度：老单站所在的地形被整平成 PAD_H，其它站直接贴各自所在地形 */
+function stationBaseY(x, z) {
+  if (Math.hypot(x - STATION_XZ.x, z - STATION_XZ.z) < 8) return PAD_H;
+  try { return terrainH(x, z); } catch (e) { return PAD_H; }
+}
 
-  const plat = new THREE.Mesh(new THREE.CylinderGeometry(10, 11.5, 1.6, 12),
-    new THREE.MeshStandardMaterial({ color: 0x2a2f33, roughness: 0.85, metalness: 0.25 }));
-  plat.position.y = 0.8; plat.receiveShadow = true; plat.castShadow = true;
+/** 负载 → 颜色：0 绿 → 0.5 黄 → 1 红（>1 过载保持红） */
+function loadColor(load, out) {
+  const c = out || new THREE.Color();
+  const k = clamp(Number(load) || 0, 0, 1);
+  if (k < 0.5) c.setHex(0x3ddc97).lerp(LOAD_YELLOW, k * 2);
+  else c.setHex(0xffd166).lerp(LOAD_RED, (k - 0.5) * 2);
+  return c;
+}
+
+/**
+ * 贴地圆环点位（相对站点 group 的局部坐标）。
+ * 为什么不让圈层做成一块平的圆盘：EDGE 站会落在坡地上，平面圆盘会有一半插进山体里。
+ * 沿地形采样一圈点，圈层就永远"贴"在山坡上，平/陡都好看。
+ */
+function groundLoopLocal(cx, cz, r, n, lift) {
+  const baseY = stationBaseY(cx, cz);
+  const pts = [];
+  for (let i = 0; i <= n; i++) {
+    const a = i / n * Math.PI * 2;
+    const x = cx + Math.cos(a) * r, z = cz + Math.sin(a) * r;
+    let y = baseY;
+    try { y = terrainH(x, z); } catch (e) { y = baseY; }
+    pts.push(new THREE.Vector3(x - cx, y - baseY + lift, z - cz));
+  }
+  return pts;
+}
+
+/**
+ * 建一座地面站。rec 缺省 = 升级前的单站（老位置 + 老造型），保证降级路径外观不变。
+ * CENTER / EDGE 走两套造型与配色，站名/坐标/颜色都来自后端契约。
+ */
+function buildStation(scene, rec) {
+  rec = rec || STATION_FALLBACK;
+  const isCenter = String(rec.role || "CENTER").toUpperCase() !== "EDGE";
+  const baseCol = new THREE.Color(rec.color || (isCenter ? "#4ea1ff" : "#f5a623"));
+  const g = new THREE.Group();
+  g.position.set(rec.x, stationBaseY(rec.x, rec.z), rec.z);
+
+  /* ---- ① 站台底座：CENTER 12 边大圆盘 / EDGE 8 边小圆盘，轮廓一眼能区分角色 ---- */
+  const R = isCenter ? 1 : 0.6;
+  const plat = new THREE.Mesh(new THREE.CylinderGeometry(10 * R, 11.5 * R, 1.6 * R, isCenter ? 12 : 8),
+    new THREE.MeshStandardMaterial({ color: isCenter ? 0x2a2f33 : 0x333c44,
+      roughness: 0.85, metalness: 0.25 }));
+  plat.position.y = 0.8 * R; plat.receiveShadow = true; plat.castShadow = true;
   g.add(plat);
 
-  // 停机坪标记
-  const mark = new THREE.Mesh(new THREE.RingGeometry(6.2, 7.4, 40),
-    new THREE.MeshBasicMaterial({ color: 0xf5a623, transparent: true, opacity: 0.35,
+  // 停机坪标记（取站点主题色，让"哪个颜色是哪个站"在近景也成立）
+  const mark = new THREE.Mesh(new THREE.RingGeometry(6.2 * R, 7.4 * R, 40),
+    new THREE.MeshBasicMaterial({ color: baseCol.getHex(), transparent: true, opacity: 0.35,
       side: THREE.DoubleSide }));
-  mark.rotation.x = -Math.PI / 2; mark.position.y = 1.62;
+  mark.rotation.x = -Math.PI / 2; mark.position.y = 1.62 * R;
   g.add(mark);
 
-  const rack = new THREE.Mesh(new THREE.BoxGeometry(5.4, 3.6, 3.0),
-    new THREE.MeshStandardMaterial({ color: 0x36424e, roughness: 0.6, metalness: 0.5 }));
-  rack.position.set(-4.2, 3.4, 1.6); rack.castShadow = true;
-  g.add(rack);
-  for (let i = 0; i < 6; i++) {
-    const led = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.15, 0.06),
-      new THREE.MeshBasicMaterial({ color: i % 2 ? C.ok : C.blue }));
-    led.position.set(-6.6, 2.4 + i * 0.4, 3.1);
-    g.add(led);
+  /* ---- ② 上部结构：CENTER 高塔 + 抛物面天线；EDGE 机柜 + 矮桅杆 + 板状天线阵 ---- */
+  let towerTop = 17;                       // 天线顶点（相对站台面）—— 连线就接在这里
+  if (isCenter) {
+    const rack = new THREE.Mesh(new THREE.BoxGeometry(5.4, 3.6, 3.0),
+      new THREE.MeshStandardMaterial({ color: 0x36424e, roughness: 0.6, metalness: 0.5 }));
+    rack.position.set(-4.2, 3.4, 1.6); rack.castShadow = true;
+    g.add(rack);
+    for (let i = 0; i < 6; i++) {
+      const led = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.15, 0.06),
+        new THREE.MeshBasicMaterial({ color: i % 2 ? C.ok : C.blue }));
+      led.position.set(-6.6, 2.4 + i * 0.4, 3.1);
+      g.add(led);
+    }
+    const towerMat = new THREE.MeshStandardMaterial({ color: 0x6a747c, roughness: 0.65, metalness: 0.55 });
+    const tower = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.55, 16, 8), towerMat);
+    tower.position.y = 8.5; tower.castShadow = true;
+    g.add(tower);
+    for (let i = 1; i <= 3; i++) {
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(0.95, 0.07, 6, 18), towerMat);
+      ring.rotation.x = Math.PI / 2; ring.position.y = 3.4 + i * 3.4;
+      g.add(ring);
+    }
+    const dish = new THREE.Mesh(
+      new THREE.SphereGeometry(2.2, 22, 12, 0, Math.PI * 2, 0, Math.PI / 2.5),
+      new THREE.MeshStandardMaterial({ color: 0xc8d4dc, roughness: 0.35, metalness: 0.8,
+        side: THREE.DoubleSide }));
+    dish.position.y = 17.0; dish.rotation.x = -0.55;
+    g.add(dish);
+    towerTop = 15;
+  } else {
+    // EDGE：两个机柜 + 一根矮桅杆 + 三层板状天线（造型明显比中心站"轻"）
+    const cabMat = new THREE.MeshStandardMaterial({ color: 0x3a4650, roughness: 0.7, metalness: 0.35 });
+    for (let i = 0; i < 2; i++) {
+      const cab = new THREE.Mesh(new THREE.BoxGeometry(2.6, 2.1, 2.0), cabMat);
+      cab.position.set(-2.6 + i * 3.4, 2.0, 1.4); cab.castShadow = true;
+      g.add(cab);
+      const led = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.12, 0.05),
+        new THREE.MeshBasicMaterial({ color: baseCol.getHex() }));
+      led.position.set(-2.6 + i * 3.4, 2.7, 2.45);
+      g.add(led);
+    }
+    const mastMat = new THREE.MeshStandardMaterial({ color: 0x77838c, roughness: 0.6, metalness: 0.6 });
+    const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.20, 0.34, 9, 6), mastMat);
+    mast.position.y = 4.6; mast.castShadow = true;
+    g.add(mast);
+    for (let i = 0; i < 3; i++) {
+      const panel = new THREE.Mesh(new THREE.BoxGeometry(1.9, 0.22, 0.9),
+        new THREE.MeshStandardMaterial({ color: 0xb9c6d0, roughness: 0.4, metalness: 0.7 }));
+      panel.position.set(0, 5.4 + i * 1.7, 0.5);
+      panel.rotation.x = -0.35;
+      g.add(panel);
+    }
+    towerTop = 9;
   }
 
-  const towerMat = new THREE.MeshStandardMaterial({ color: 0x6a747c, roughness: 0.65, metalness: 0.55 });
-  const tower = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.55, 16, 8), towerMat);
-  tower.position.y = 8.5; tower.castShadow = true;
-  g.add(tower);
-  for (let i = 1; i <= 3; i++) {
-    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.95, 0.07, 6, 18), towerMat);
-    ring.rotation.x = Math.PI / 2; ring.position.y = 3.4 + i * 3.4;
-    g.add(ring);
-  }
-  const dish = new THREE.Mesh(
-    new THREE.SphereGeometry(2.2, 22, 12, 0, Math.PI * 2, 0, Math.PI / 2.5),
-    new THREE.MeshStandardMaterial({ color: 0xc8d4dc, roughness: 0.35, metalness: 0.8,
-      side: THREE.DoubleSide }));
-  dish.position.y = 17.0; dish.rotation.x = -0.55;
-  g.add(dish);
   const beacon = new THREE.Mesh(new THREE.SphereGeometry(0.38, 12, 12),
-    new THREE.MeshBasicMaterial({ color: C.cyan }));
-  beacon.position.y = 18.2; g.add(beacon);
+    new THREE.MeshBasicMaterial({ color: baseCol.getHex() }));
+  beacon.position.y = towerTop + 1.2; g.add(beacon);
 
-  const halo = new THREE.Mesh(new THREE.RingGeometry(12, 13.8, 72),
-    new THREE.MeshBasicMaterial({ color: C.cyan, transparent: true, opacity: 0.22,
+  const halo = new THREE.Mesh(new THREE.RingGeometry(12 * R + 1, 13.8 * R + 1, 72),
+    new THREE.MeshBasicMaterial({ color: baseCol.getHex(), transparent: true, opacity: 0.22,
       side: THREE.DoubleSide, blending: THREE.AdditiveBlending }));
-  halo.rotation.x = -Math.PI / 2; halo.position.y = 1.66;
+  halo.rotation.x = -Math.PI / 2; halo.position.y = 1.66 * R;
   g.add(halo);
 
   /* 地面站光柱：原来半径 2.6~6、高 36、加色 0.075，叠加泛光后会在近景变成一根"白柱子"，
      抢掉整个画面的视觉重心。压细、压矮、压淡，只保留"有信号在发射"的暗示。 */
-  const beam = new THREE.Mesh(new THREE.CylinderGeometry(1.1, 2.2, 13, 16, 1, true),
-    new THREE.MeshBasicMaterial({ color: C.cyan, transparent: true, opacity: 0.018,
+  const beam = new THREE.Mesh(new THREE.CylinderGeometry(1.1 * R, 2.2 * R, 13 * R, 16, 1, true),
+    new THREE.MeshBasicMaterial({ color: baseCol.getHex(), transparent: true, opacity: 0.018,
       blending: THREE.AdditiveBlending, side: THREE.DoubleSide, depthWrite: false }));
-  beam.position.y = 6.5; g.add(beam);
+  beam.position.y = 6.5 * R; g.add(beam);
 
-  const lab = makeTextSprite("地面站 · 调度服务器", { fontSize: 30, scale: 0.05 });
-  lab.position.y = 23; g.add(lab);
+  /* ---- ③ 地面圈层：颜色 = 负载色（绿→黄→红），贴地画，坡地上也不会插进山里 ---- */
+  const ringR = isCenter ? 20 : 13;
+  const ringPts = groundLoopLocal(rec.x, rec.z, ringR, 72, 0.75);
+  const ringLine = new THREE.Line(new THREE.BufferGeometry().setFromPoints(ringPts),
+    new THREE.LineBasicMaterial({ color: 0x3ddc97, transparent: true, opacity: 0.55,
+      blending: THREE.AdditiveBlending, depthWrite: false }));
+  g.add(ringLine);
+  // 圈层内侧加一层淡淡的加色圆盘，让"圈"在远景也有面积感
+  const ringGeo = new THREE.RingGeometry(ringR * 0.55, ringR, 64);
+  const ringFill = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({ color: 0x3ddc97,
+    transparent: true, opacity: 0.16, side: THREE.DoubleSide, depthWrite: false,
+    blending: THREE.AdditiveBlending }));
+  ringFill.rotation.x = -Math.PI / 2; ringFill.position.y = 0.5;
+  g.add(ringFill);
 
-  g.userData = { halo, beacon, beam };
+  /* ---- ④ 分区（脑裂）虚线描边：LineDashedMaterial 必须 computeLineDistances 才有虚线节奏 ---- */
+  const dashPts = groundLoopLocal(rec.x, rec.z, ringR + 3, 96, 0.9);
+  const dash = new THREE.Line(new THREE.BufferGeometry().setFromPoints(dashPts),
+    new THREE.LineDashedMaterial({ color: 0x9aa7b2, dashSize: 3.0, gapSize: 2.2,
+      transparent: true, opacity: 0, depthWrite: false }));
+  dash.computeLineDistances();
+  g.add(dash);
+
+  /* ---- ⑤ 负载柱：高度随 load 变化，颜色同步绿→黄→红，顶端一颗随高度浮动的"负载球" ---- */
+  const pillarBase = towerTop + 4.2;
+  const pillarMat = new THREE.MeshBasicMaterial({ color: 0x3ddc97, transparent: true, opacity: 0.9 });
+  const pillar = new THREE.Mesh(new THREE.CylinderGeometry(1.15 * R + 0.5, 1.15 * R + 0.5, 1, 14), pillarMat);
+  pillar.position.y = pillarBase + 0.5;
+  g.add(pillar);
+  const capMat = new THREE.MeshBasicMaterial({ color: 0x3ddc97, transparent: true, opacity: 0.85 });
+  const cap = new THREE.Mesh(new THREE.SphereGeometry(1.5 * R, 12, 10), capMat);
+  cap.position.y = pillarBase + 1.5;
+  g.add(cap);
+
+  /* ---- ⑥ 迁移冲击波：migrations_in/out 抬头时从站台扩散一圈，表示"有无人机在切站" ---- */
+  const shock = new THREE.Mesh(new THREE.RingGeometry(ringR, ringR + 1.4, 64),
+    new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0,
+      side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending }));
+  shock.rotation.x = -Math.PI / 2; shock.position.y = 0.7;
+  g.add(shock);
+
+  const lab = makeTextSprite(rec.name || "地面站", { fontSize: 26, scale: 0.042,
+    color: "#dff0ff" });
+  lab.position.y = pillarBase + 6;
+  g.add(lab);
+
+  /* 站体主体材质清单（站台/机柜/塔架/天线……）：离线时要整体压暗，
+     预先收好 base 色，每帧只在"在线↔离线"翻转那一次改色，不做每帧遍历 */
+  const bodyMats = [];
+  g.traverse(function (o) {
+    const m = o.material;
+    if (o.isMesh && m && m.color && !m.transparent && m !== pillarMat && m !== capMat) {
+      bodyMats.push({ mat: m, base: m.color.clone() });
+    }
+  });
+
+  g.userData = {
+    isCenter, ringR, pillarBase, towerTop, bodyMats,
+    label: lab, halo, beacon, beam, pillar, pillarMat, cap, capMat,
+    ringLine, ringLineMat: ringLine.material,
+    ringFill, ringFillMat: ringFill.material,
+    dash, dashMat: dash.material,
+    shock, shockMat: shock.material,
+    colOffline: new THREE.Color(0x8a2222), colPart: new THREE.Color(0x9aa7b2),
+    labelTxt: "", lastLabelT: -9,
+    /* 一次性释放：反复切工况/重建站点时不至于把 GPU 显存吃满 */
+    dispose: function () {
+      g.traverse(function (o) {
+        if (o.geometry) o.geometry.dispose();
+        const m = o.material;
+        if (m) {
+          if (m.map) m.map.dispose();
+          m.dispose();
+        }
+      });
+    },
+  };
   scene.add(g);
   return g;
+}
+
+/* --------------------------------------------------- 多基站：集合管理 / 降级 */
+/** 站点集合指纹：id/角色/名字/坐标/颜色任一变化才重建几何（重建 = 建一堆 three 对象） */
+function stationFingerprint(list) {
+  return list.map(function (s) {
+    return [s.id, s.role, s.name, Number(s.x).toFixed(2), Number(s.z).toFixed(2), s.color].join(":");
+  }).join("|");
+}
+
+function migSum(r) { return (Number(r.migrations_in) || 0) + (Number(r.migrations_out) || 0); }
+
+function removeStation(st) {
+  try { if (st.group.userData && st.group.userData.dispose) st.group.userData.dispose(); } catch (e) { /* 忽略 */ }
+  if (scene) scene.remove(st.group);
+}
+
+/** 无 stations 数据：退回"单站 = 老地面站位置"，外观与升级前一致 */
+function useFallbackStation(rec) {
+  STATIONS.list.forEach(removeStation);
+  STATIONS.list = []; STATIONS.byId = {};
+  const full = Object.assign({}, STATION_FALLBACK, rec || {});
+  const st = { rec: full, group: buildStation(scene, full), migPrev: null, flash: 0, offPrev: null };
+  STATIONS.list.push(st);
+  STATIONS.byId[String(full.id)] = st;
+  STATIONS.mode = "fallback";
+  STATIONS.key = "fallback";
+  station = st.group;
+  try { collectSprites(); } catch (e) { /* 收集失败不影响渲染 */ }
+}
+
+function rebuildStations(list) {
+  STATIONS.list.forEach(removeStation);
+  STATIONS.list = []; STATIONS.byId = {};
+  /* 契约保证按 id 升序，这里再排一次：即使后端顺序变了，视觉位置也不跳 */
+  const sorted = list.slice().sort(function (a, b) { return Number(a.id) - Number(b.id); });
+  sorted.forEach(function (r) {
+    const st = { rec: r, group: buildStation(scene, r), migPrev: migSum(r), flash: 0, offPrev: null };
+    STATIONS.list.push(st);
+    STATIONS.byId[String(r.id)] = st;
+  });
+  STATIONS.mode = "live";
+  STATIONS.key = stationFingerprint(sorted);
+  if (STATIONS.list.length) station = STATIONS.list[0].group;
+  try { collectSprites(); } catch (e) { /* 忽略 */ }
+}
+
+/** 每轮 /api/state：数值刷新（不重建几何）+ 迁移计数抬头时点亮冲击波 */
+function applyStationFrame(list) {
+  for (let i = 0; i < STATIONS.list.length; i++) {
+    const st = STATIONS.list[i];
+    let r = null;
+    for (let k = 0; k < list.length; k++) {
+      if (String(list[k].id) === String(st.rec.id)) { r = list[k]; break; }
+    }
+    if (!r) continue;
+    st.rec = r;
+    const m = migSum(r);
+    if (st.migPrev !== null && m > st.migPrev) st.flash = 1;   // 有无人机切进来/切出去
+    st.migPrev = m;
+  }
+}
+
+/** 与 /api/state 对齐：有 stations 走多基站，没有就整体退回单站 */
+function syncStations(live) {
+  const list = live && Array.isArray(live.stations) ? live.stations : null;
+  if (!list || !list.length) {
+    /* 单站兜底也得"活着"：圈层/负载柱跟着系统负载动，但对外语义仍是老单站 */
+    const fb = {
+      load: live && live.system_load != null ? live.system_load : 0,
+      queue_depth: live && live.queue ? (live.queue.high || 0) + (live.queue.low || 0) : 0,
+      uav_count: live && live.uav_count != null ? live.uav_count : state.drones.length,
+      online: true, partitioned: false,
+    };
+    if (STATIONS.mode !== "fallback") useFallbackStation(fb);
+    else if (STATIONS.list[0]) STATIONS.list[0].rec = Object.assign({}, STATION_FALLBACK, fb);
+    return;
+  }
+  if (stationFingerprint(list) !== STATIONS.key) rebuildStations(list);
+  else applyStationFrame(list);
+}
+
+/** 站点天线顶点（世界坐标）。id 不存在时退回老的单站顶点，调用方永远拿到有效向量 */
+function stationAnchor(id, out) {
+  out = out || _anchorTmp;
+  const st = STATIONS.byId[String(id)];
+  if (!st) { out.copy(UPLINK_TOP); return out; }
+  out.set(Number(st.rec.x) || 0,
+          st.group.position.y + st.group.userData.towerTop,
+          Number(st.rec.z) || 0);
+  return out;
+}
+
+function stationLabelText(r, load, off, part) {
+  /* 名字里通常已经带了"中心站/边缘站"，标签再重复一遍角色会变成
+     "边缘站 B · 边缘站 在线"。角色区分交给造型/配色与 os_inspect 面板，
+     这里只报状态与实时读数。 */
+  const st = off ? "离线" : (part ? "分区" : "在线");
+  const n = r.uav_count != null ? r.uav_count : 0;
+  return (r.name || "地面站") + " · " + st +
+    " · 负载 " + loadText(load) + " · " + n + " 架";
+}
+
+/**
+ * 负载文本。契约里 load 是 0~1 的利用率（示例 0.42），但后端个别版本会给出
+ * 未归一化的"积压比值"（实测 PEAK 工况返回 32.11）。直接乘 100 会显示成
+ * "3211%"，既看不懂也把绿→黄→红的读数量纲冲掉了 —— 这里 >1 时只报
+ * "100%+"，并把原始值放进括号，方便定位是后端没归一化。
+ */
+function loadText(load) {
+  const v = Number(load) || 0;
+  if (v > 1.005) return "100%+（load " + v.toFixed(2) + "）";
+  return Math.round(Math.max(0, v) * 100) + "%";
+}
+
+/** 每帧绘制：负载柱高度/颜色、圈层颜色、分区虚线、离线熄灭、迁移冲击波、标签节流刷新 */
+function updateStations(dt, t) {
+  const list = STATIONS.list;
+  if (!list.length) return;
+  STATIONS.primaryAnchor.copy(stationAnchor(list[0].rec.id, _anchorTmp));
+  for (let i = 0; i < list.length; i++) {
+    const st = list[i], u = st.group.userData, r = st.rec || {};
+    const off = r.online === false;
+    const part = !off && !!r.partitioned;
+    /* loadRaw 是后端真值，load 只用于"画"（圈层颜色/柱子高度都要截断，否则一根柱子能捅穿天空）。
+       文字标签用 loadRaw —— 否则后端给了 32.11 却显示 1.60，排障时会误导。 */
+    const loadRaw = Number(r.load) || 0;
+    const load = clamp(loadRaw, 0, 1.6);
+    const on = off ? 0 : 1;
+
+    /* ① 圈层：颜色 = 负载色；分区转灰；离线熄灭转暗红 */
+    if (off) _stColor.copy(u.colOffline);
+    else if (part) _stColor.copy(u.colPart);
+    else loadColor(load, _stColor);
+    u.ringLineMat.color.copy(_stColor);
+    u.ringFillMat.color.copy(_stColor);
+    u.ringLineMat.opacity = off ? 0.22 : (0.34 + 0.46 * Math.min(1, load) + 0.05 * Math.sin(t * 2 + i));
+    u.ringFillMat.opacity = off ? 0.05 : (0.10 + 0.16 * Math.min(1, load));
+
+    /* ② 分区虚线描边：只有 partitioned 时亮起，慢慢旋转（"这块被割开了"） */
+    u.dashMat.opacity += ((part ? 0.85 : 0) - u.dashMat.opacity) * Math.min(1, dt * 6);
+    u.dash.visible = u.dashMat.opacity > 0.02;
+    u.dash.rotation.y = t * 0.4;
+
+    /* ③ 负载柱 + 负载球：高度随 load 线性长，颜色同步绿→黄→红，过载时闪 */
+    u.pillar.visible = !off;
+    u.cap.visible = !off;
+    if (!off) {
+      const h = 1.6 + Math.min(1, load) * 17 + Math.max(0, load - 1) * 8;
+      u.pillar.scale.y = h;
+      u.pillar.position.y = u.pillarBase + h / 2;
+      loadColor(load, _stColor);
+      u.pillarMat.color.copy(_stColor);
+      u.capMat.color.copy(_stColor);
+      u.cap.position.y = u.pillarBase + h + 1.0;
+      u.cap.scale.setScalar(1 + 0.16 * Math.sin(t * 5 + i * 1.7));
+      u.pillarMat.opacity = load > 0.85 ? 0.66 + 0.34 * Math.abs(Math.sin(t * 6)) : 0.9;
+      u.capMat.opacity = u.pillarMat.opacity;
+    }
+
+    /* ④ 迁移冲击波：flash 由 applyStationFrame 置 1，0.9s 内扩散并消失 */
+    if (st.flash > 0) {
+      st.flash = Math.max(0, st.flash - dt / 0.9);
+      u.shockMat.opacity = st.flash * 0.55;
+      u.shock.scale.setScalar(1 + (1 - st.flash) * 2.2);
+    } else if (u.shockMat.opacity !== 0) {
+      u.shockMat.opacity = 0;
+    }
+
+    /* ⑤ 光晕 / 信标 / 光柱：在线才有呼吸感 */
+    u.halo.material.opacity = on * (0.16 + 0.12 * Math.sin(t * 1.9 + i));
+    u.halo.scale.setScalar(1 + 0.018 * Math.sin(t * 1.9 + i));
+    u.beacon.visible = !off;
+    if (!off) u.beacon.scale.setScalar(1 + 0.28 * Math.sin(t * 6.2 + i));
+    u.beam.material.opacity = on * (0.06 + 0.03 * Math.sin(t * 1.4 + i));
+
+    /* ⑥ 离线：把站体主体压暗一档（只在状态翻转时改一次材质颜色，不做每帧遍历） */
+    if (st.offPrev !== off) {
+      st.offPrev = off;
+      const bm = u.bodyMats || [];
+      for (let b = 0; b < bm.length; b++) bm[b].mat.color.copy(bm[b].base).multiplyScalar(off ? 0.34 : 1);
+    }
+
+    /* ⑦ 标签：站名/在线状态/负载/接入机数。重建很贵（一张 canvas + 一张 GPU 贴图），
+          变化不大就节流 1.2s 再重建 —— 与队列光柱标签同一套做法。
+          注意传的是**未截断**的原始 load：画圈层/柱子要 clamp，但文字必须报后端真值。 */
+    const txt = stationLabelText(r, loadRaw, off, part);
+    if (txt !== u.labelTxt && (t - u.lastLabelT) > 1.2) {
+      u.labelTxt = txt; u.lastLabelT = t;
+      st.group.remove(u.label);
+      try {
+        if (u.label.material) {
+          if (u.label.material.map) u.label.material.map.dispose();
+          u.label.material.dispose();
+        }
+      } catch (eLbl) { /* 忽略 */ }
+      u.label = makeTextSprite(txt, { fontSize: 26, scale: 0.042, color: "#dff0ff" });
+      u.label.position.y = u.pillarBase + 6;
+      st.group.add(u.label);
+      try { collectSprites(); } catch (eSp) { /* 忽略 */ }
+    }
+  }
+}
+
+/**
+ * 给一架无人机解析"接入哪个站" + 该链路的健康度。
+ * 切站时不是直接改目标就完事：把当前画到的端点存进 linkFrom，linkT 归零，
+ * animate() 里再用 0.6s 把它插值到新站 —— 迁移因此是"看得见的过程"。
+ * 链路健康度优先取 link_matrix[uid][station]（契约新增键），缺失时退回该机自身 health。
+ */
+function bindDroneStation(d, sof, lmx) {
+  const fb = STATIONS.list.length ? STATIONS.list[0].rec.id : STATION_FALLBACK.id;
+  let sid = sof ? Number(sof[String(d.id)]) : NaN;
+  if (!isFinite(sid) || !STATIONS.byId[String(sid)]) sid = fb;
+
+  let h = NaN;
+  const row = lmx ? lmx[String(d.id)] : null;
+  if (row) {
+    const v = row[String(sid)];
+    if (v != null && isFinite(Number(v))) h = Number(v);
+  }
+  const prevH = d.linkHealth;
+  if (isFinite(h)) d.linkHealth = h;
+
+  if (d.linkTarget !== sid) {
+    d.linkHealthFrom = prevH;          // 颜色也做渐变，不瞬间跳色
+    d.linkFrom.copy(d.linkAnchor);     // 从"当前画到哪儿"接着走：连续切站也不会闪回
+    d.linkTarget = sid;
+    d.linkT = 0;
+  }
 }
 
 function buildQueueTowers(scene) {
@@ -1422,6 +1824,10 @@ function buildFleet(scene, n) {
       ring, trail, trailPos: [], link, linkMat, bead, tag,
       busy: false, health: 100, online: true, priority: null, progress: 0,
       pos: new THREE.Vector3(cx, 40, cz), prev: new THREE.Vector3(cx, 40, cz),
+      /* 多基站接入链路状态：linkTarget = 当前接入站 id，linkFrom/linkT 负责切站插值 */
+      linkTarget: null, linkT: 1,
+      linkFrom: UPLINK_TOP.clone(), linkAnchor: UPLINK_TOP.clone(),
+      linkHealth: 100, linkHealthFrom: 100,
     });
   }
   return out;
@@ -1463,6 +1869,8 @@ function emitPoint(pc, x, z, spread) {
 
 /* ============================================================ 10. 场景 */
 let renderer, scene, camera, controls, composer;let station, towers, pc, surveyGrid, water;
+/* 注意：station 现在指向"第一座地面站"的 Group（多基站时其余站在 STATIONS.list 里），
+   单站/无数据时仍是原来的那一个，老代码（halo/beacon/beam 呼吸）照常工作。 */
 /* 升级模块句柄（初始化失败时保持 null，主场景必须继续可跑） */
 let ssaoFX = null, terrainFX = null, hudFX = null, weatherFX = null, gradeFX = null;
 /** 泛光 Pass 句柄：坏天气下要压暗泛光，否则亮雾会被 Bloom 糊成一片白 */
@@ -1655,7 +2063,9 @@ function initScene() {
   const scenery = buildScenery(scene);
   surveyGrid = buildSurveyGrid(scene);
   _step("⑥ 地面站…");
-  station = buildStation(scene);
+  /* 先按"单站 = 老位置"建一座（保证无 stations 数据时也有站可看），
+     fetchState() 拿到 live.stations 后由 syncStations() 就地升级成多基站。 */
+  useFallbackStation(null);
   towers = buildQueueTowers(scene);
   pc = buildPointCloud(scene, RENDER.pointCloudMax);
 
@@ -1924,8 +2334,14 @@ function applyState(st) {
   const n = (live && live.uav_count) || 30;
   if (state.drones.length !== n) rebuildFleet(n);
 
+  /* 多基站：与 /api/state.live 对齐（有 stations 画多站，没有退回单站；站点集合变了才重建几何） */
+  try { syncStations(live); } catch (eSt) { console.warn("[Station] 同步失败：", eSt); }
+
   const runMap = {};
   if (live && live.running_tasks) live.running_tasks.forEach(t => { runMap[t.uav_id] = t; });
+  // 每机接入站 + 链路健康度矩阵（契约新增键）；缺失时 bindDroneStation 内部有兜底
+  const sof = (live && live.station_of_uav) || null;
+  const lmx = (live && live.link_matrix) || null;
   let hs = 0, on = 0, busy = 0;
   state.drones.forEach(d => {
     const u = live && live.uav_states ? live.uav_states[String(d.id)] : null;
@@ -1935,6 +2351,7 @@ function applyState(st) {
     d.busy = !!t;
     d.priority = t ? t.priority : null;
     d.progress = t ? t.progress : 0;
+    try { bindDroneStation(d, sof, lmx); } catch (eBd) { /* 单机绑定失败不能拖垮整轮刷新 */ }
     if (d.online) { hs += d.health; on++; }
     if (d.busy) busy++;
   });
@@ -2161,23 +2578,43 @@ function animate() {
     }
     tp.needsUpdate = true;
 
-    // 数据链路
-    const want = d.busy ? 0.8 : 0.0;
-    d.linkMat.opacity += (want - d.linkMat.opacity) * Math.min(1, dt * 8);
+    // 数据链路：无人机 → 当前接入站（多基站时终点随 station_of_uav 变）
+    /* 切站插值必须**先于**透明度门限推进：否则空闲机（opacity≈0）永远停在 linkT=0，
+       等它下次接入时会从很旧的位置拉线，看不出"迁移过程"。 */
+    if (d.linkT < 1) d.linkT = Math.min(1, d.linkT + dt / HANDOVER_S);
+    const e = smoothstep(0, 1, d.linkT);
+    stationAnchor(d.linkTarget, _anchorTmp);
+    d.linkAnchor.lerpVectors(d.linkFrom, _anchorTmp, e);
+    /* 多基站下"接入"是持续状态：空闲机也留一条淡线，表示它当前挂在哪个站；
+       单站兜底仍保持升级前行为（只在传数据时亮线），老观感不变。 */
+    const multi = (STATIONS.mode === "live");
+    let want = d.busy ? 0.8 : (multi ? 0.2 : 0.0);
+    // 交接中途淡一下再回来：一眼看出"这条链路正在换站"
+    if (d.linkT < 1) want *= 0.30 + 0.70 * Math.abs(2 * d.linkT - 1);
+    d.linkMat.opacity += (want - d.linkMat.opacity) * Math.min(1, dt * 10);
     d.bead.material.opacity = d.linkMat.opacity;
     if (d.linkMat.opacity > 0.02) {
       const lp = d.link.geometry.attributes.position;
       lp.setXYZ(0, d.pos.x, d.pos.y, d.pos.z);
-      lp.setXYZ(1, UPLINK_TOP.x, UPLINK_TOP.y, UPLINK_TOP.z);
+      lp.setXYZ(1, d.linkAnchor.x, d.linkAnchor.y, d.linkAnchor.z);
       lp.needsUpdate = true;
-      const lc = d.health >= 85 ? C.ok : d.health >= 55 ? C.warn : C.bad;
+
+      /* 线色 = link_matrix[uid][接入站] 的健康度；切站过程中在"旧站健康度 → 新站健康度"
+         之间渐变，颜色也不会瞬间跳。站点离线/分区时优先用状态色压过健康度。 */
+      const tgt = STATIONS.byId[String(d.linkTarget)];
+      const hv = d.linkT < 1 ? lerp(d.linkHealthFrom, d.linkHealth, e) : d.linkHealth;
+      let lc;
+      if (tgt && tgt.rec.online === false) lc = 0x8a2222;      // 站挂了：线转暗红
+      else if (tgt && tgt.rec.partitioned) lc = 0x9aa7b2;      // 分区：线转灰
+      else lc = hv >= 85 ? C.ok : hv >= 55 ? C.warn : C.bad;
       d.linkMat.color.setHex(lc);
       d.bead.material.color.setHex(lc);
+
       const k2 = (t * 0.85 + d.phase) % 1;
       d.bead.position.set(
-        d.pos.x + (UPLINK_TOP.x - d.pos.x) * k2,
-        d.pos.y + (UPLINK_TOP.y - d.pos.y) * k2,
-        d.pos.z + (UPLINK_TOP.z - d.pos.z) * k2);
+        d.pos.x + (d.linkAnchor.x - d.pos.x) * k2,
+        d.pos.y + (d.linkAnchor.y - d.pos.y) * k2,
+        d.pos.z + (d.linkAnchor.z - d.pos.z) * k2);
     }
 
     // 点云：勘查任务时按扫描幅宽投射（世界放大 2 倍后幅宽同步加大，体现"单机探测范围大"）
@@ -2189,13 +2626,14 @@ function animate() {
   });
 
   // ---- 升级模块：地形 LOD 重定位 / HUD 箭头与瀑布图 / 天气粒子（都在渲染之前更新）----
+  try { updateStations(dt, t); } catch (eSt) { console.warn("[Station] 帧更新异常：", eSt); }
   if (terrainFX && terrainFX.update) {
     try { terrainFX.update(camera, dt); } catch (e) { terrainFX = null; console.warn("[Terrain] update 异常，已停用：", e); }
   }
   if (hudFX && hudFX.update) {
     try {
       hudFX.update(dt, {
-        t: t, live: state.live, drones: state.drones, stationTop: UPLINK_TOP,
+        t: t, live: state.live, drones: state.drones, stationTop: STATIONS.primaryAnchor,
         visibility_km: state.wx ? state.wx.visibility_km : null,
       });
     } catch (e) { hudFX = null; console.warn("[HUD] update 异常，已停用：", e); }
@@ -2230,13 +2668,8 @@ function animate() {
     });
   }
 
-  if (station) {
-    const u = station.userData;
-    u.halo.material.opacity = 0.16 + 0.12 * Math.sin(t * 1.9);
-    u.halo.scale.setScalar(1 + 0.018 * Math.sin(t * 1.9));
-    u.beacon.scale.setScalar(1 + 0.28 * Math.sin(t * 6.2));
-    if (u.beam) u.beam.material.opacity = 0.06 + 0.03 * Math.sin(t * 1.4);
-  }
+  /* 地面站的光晕/信标/光柱呼吸已并入 updateStations()（多基站时每站各有一套），
+     这里不再重复处理单站，避免两套动画打架。 */
   if (surveyGrid) surveyGrid.rotation.y = t * 0.02;
   if (water) water.material.opacity = 0.84 + 0.04 * Math.sin(t * 0.7);
 

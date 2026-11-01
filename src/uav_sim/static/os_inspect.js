@@ -83,6 +83,28 @@
     ".osScrub{width:100%;margin:8px 0}",
     ".osNote{font-size:10px;color:#7fa6c8;line-height:1.6}",
     ".osErr{color:#ff8a8a;font-size:11px}",
+    /* ---- 多基站页 ---- */
+    ".osStGrid{display:flex;flex-direction:column;gap:8px}",
+    ".osStCard{border:1px solid #1e3a55;border-radius:8px;padding:8px 10px;background:#0b1a2a;",
+    "  border-left:4px solid #4ea1ff;font-size:11px;line-height:1.6}",
+    ".osStCard.off{opacity:.62;border-left-color:#8a2222;filter:grayscale(.55)}",
+    ".osStTop{display:flex;align-items:center;gap:8px;flex-wrap:wrap}",
+    ".osStTop b{font-size:12px;color:#eaf6ff}",
+    ".osStBadge{font-size:9px;padding:1px 6px;border-radius:10px;border:1px solid #2f6fa8;",
+    "  color:#9dc4e6}",
+    ".osStBadge.center{border-color:#4ea1ff;color:#bfe6ff;background:#12233a}",
+    ".osStBadge.edge{border-color:#f5a623;color:#ffd9a3;background:#2a2314}",
+    ".osStBadge.on{border-color:#3ddc97;color:#b8ffe2;background:#0e2a20}",
+    ".osStBadge.part{border-color:#9aa7b2;color:#d5dde4;background:#1a2028}",
+    ".osStBadge.dead{border-color:#8a2222;color:#ffb3b3;background:#2a1414}",
+    ".osStLine{display:flex;gap:14px;flex-wrap:wrap;margin-top:4px;color:#bcd6ee}",
+    ".osStLine span b{color:#eaf6ff}",
+    ".osLoadWrap{margin-top:5px;height:7px;background:#10202f;border-radius:4px;overflow:hidden}",
+    ".osLoadWrap i{display:block;height:100%;transition:width .25s ease}",
+    ".osMec{border-top:1px dashed #1e3a55;margin-top:10px;padding-top:8px}",
+    ".osMecBar{display:flex;height:16px;border-radius:4px;overflow:hidden;margin:6px 0}",
+    ".osMecBar span{display:flex;align-items:center;justify-content:center;font-size:9px;color:#04121f}",
+    ".osMecE2E{display:flex;gap:14px;margin-top:4px;flex-wrap:wrap;font-size:11px;color:#bcd6ee}",
   ].join("\n");
 
   function h(tag, cls, txt) {
@@ -121,6 +143,7 @@
       '    <button data-tab="weight">权重</button>',
       '    <button data-tab="chaos">混沌</button>',
       '    <button data-tab="replay">回放</button>',
+      '    <button data-tab="station">多基站</button>',
       '  </div>',
       '  <button id="osClose">×</button>',
       '</div>',
@@ -157,6 +180,10 @@
       '    </div>',
       '    <div class="osNote" style="margin-top:8px">回放只回放"面板数据"（队列/负载/时间片/线程状态），不回放 3D 画面 —— 3D 由实时仿真驱动。</div>',
       '  </section>',
+      '  <section id="os-station">',
+      '    <div class="osStGrid" id="osStation"></div>',
+      '    <div class="osMec" id="osMec"></div>',
+      '  </section>',
       '</div>',
     ].join("");
     document.body.appendChild(panel);
@@ -171,6 +198,8 @@
     els.chaosText = panel.querySelector("#osChaosText");
     els.scrub = panel.querySelector("#osScrub");
     els.replayText = panel.querySelector("#osReplayText");
+    els.station = panel.querySelector("#osStation");
+    els.mec = panel.querySelector("#osMec");
 
     btn.addEventListener("click", function () {
       state.open = !state.open;
@@ -274,6 +303,7 @@
     else if (state.tab === "weight") renderWeight(live);
     else if (state.tab === "chaos") renderChaos(live);
     else if (state.tab === "replay") renderReplay();
+    else if (state.tab === "station") renderStation(live);
   }
 
   /* ------------------------------------------------------------ 线程透视 */
@@ -457,6 +487,123 @@
       (lo.boosted ? ' · <b style="color:#ff6b6b">饥饿提权</b>' : "") +
       (lo.degraded ? ' · <b style="color:#c084fc">弱网降权</b>' : "") +
       '</div>';
+  }
+
+  /* ------------------------------------------------------------ 多基站/MEC */
+  var roleName = function (r) {
+    return String(r).toUpperCase() === "EDGE" ? "边缘站 EDGE" : "中心站 CENTER";
+  };
+
+  // 负载 0→1 的颜色：绿→黄→红（与 3D 圈层同一套配色，面板和画面读数是同一件事）
+  function loadHex(load) {
+    var k = Math.max(0, Math.min(1, Number(load) || 0));
+    var r0 = [0x3d, 0xdc, 0x97], r1 = [0xff, 0xd1, 0x66], r2 = [0xff, 0x4d, 0x4d];
+    var a = r0, b = r1, t = k * 2;
+    if (k >= 0.5) { a = r1; b = r2; t = (k - 0.5) * 2; }
+    var c = [0, 0, 0];
+    for (var i = 0; i < 3; i++) c[i] = Math.round(a[i] + (b[i] - a[i]) * t);
+    return "rgb(" + c[0] + "," + c[1] + "," + c[2] + ")";
+  }
+
+  /* 负载文本：契约里 load 是 0~1 利用率（示例 0.42），但后端个别版本会给出未归一化的
+     积压比值（实测 PEAK 返回 32.11）。直接乘 100 会显示成 "3211%" —— 这里 >1 只报
+     "100%+"，原始值放括号里，既保住绿→黄→红的量纲，也能一眼看出是后端没归一化。 */
+  function loadPct(load) {
+    var v = Number(load) || 0;
+    if (v > 1.005) return "100%+（load " + fmt(v, 2) + "）";
+    return fmt(Math.max(0, v) * 100, 0) + "%";
+  }
+
+  function renderStation(live) {
+    var stations = live && live.stations;
+    var grid = els.station;
+    var html = "";
+    if (!stations || !stations.length) {
+      // 降级：后端未就绪 / 旧快照没有 stations 键 —— 用老字段拼一张"单站"卡片，页面绝不空转报错
+      var pool = live.pool || {}, q = live.queue || {};
+      html = '<div class="osStCard" style="border-left-color:#4ea1ff">' +
+        '<div class="osStTop"><b>地面站 · 调度服务器</b>' +
+        '<span class="osStBadge center">中心站 CENTER</span>' +
+        '<span class="osStBadge on">模拟单站（无多站数据）</span></div>' +
+        '<div class="osStLine">' +
+        '<span>线程池 <b>' + (pool.active || 0) + '</b>忙 / <b>' + (pool.idle || 0) + '</b>闲</span>' +
+        '<span>队列高/低 <b>' + (q.high || 0) + ' / ' + (q.low || 0) + '</b></span>' +
+        '<span>系统负载 <b>' + fmt(live.system_load || 0, 2) + '</b></span>' +
+        '</div>' +
+        '<div class="osNote" style="margin-top:4px">后端未下发 stations（多基站）数据，' +
+        '当前按"单站 = 原点"展示。启动多基站工况后本页会自动切换成每站一张卡片。</div>' +
+        '</div>';
+    } else {
+      for (var i = 0; i < stations.length; i++) {
+        var s = stations[i] || {};
+        var off = s.online === false;
+        var part = !off && !!s.partitioned;
+        var load = Math.max(0, Number(s.load) || 0);
+        var mig = (Number(s.migrations_in) || 0) + (Number(s.migrations_out) || 0);
+        var color = s.color || (String(s.role).toUpperCase() === "EDGE" ? "#f5a623" : "#4ea1ff");
+        var badgeState = off
+          ? '<span class="osStBadge dead">离线</span>'
+          : (part ? '<span class="osStBadge part">分区 / 脑裂</span>'
+                  : '<span class="osStBadge on">在线</span>');
+        html += '<div class="osStCard' + (off ? " off" : "") + '" style="border-left-color:' + color + '">' +
+          '<div class="osStTop">' +
+          '<b>' + (s.name || ("站点 " + s.id)) + '</b>' +
+          '<span class="osStBadge ' + (String(s.role).toUpperCase() === "EDGE" ? "edge" : "center") + '">' +
+          roleName(s.role) + '</span>' + badgeState +
+          '</div>' +
+          '<div class="osStLine">' +
+          '<span>线程 <b>' + (s.active || 0) + '</b>忙 / <b>' + (s.idle || 0) + '</b>闲 · 共 ' +
+          (s.workers || 0) + '</span>' +
+          '<span>队列 高/低/深 <b>' + (s.queue_high || 0) + ' / ' + (s.queue_low || 0) + ' / ' +
+          (s.queue_depth || 0) + '</b></span>' +
+          '<span>接入 <b>' + (s.uav_count || 0) + '</b> 架</span>' +
+          '<span>迁移 入/出 <b>' + (s.migrations_in || 0) + ' / ' + (s.migrations_out || 0) + '</b></span>' +
+          '<span>吞吐 <b>' + fmt(s.throughput, 2) + '</b> 个/s · 完成 ' + (s.done || 0) + '</span>' +
+          '</div>' +
+          '<div class="osStLine" style="margin-top:2px"><span>负载 <b style="color:' + loadHex(load) + '">' +
+          loadPct(load) + '</b></span>' +
+          '<span>迁移均耗时 <b>' + fmt(s.migration_cost_ms, 0) + '</b> ms</span>' +
+          '<span>边缘算力 <b>' + fmt(s.edge_compute_mbps, 1) + '</b> Mbps · 回传 <b>' +
+          fmt(s.backhaul_mbps, 1) + '</b> Mbps</span></div>' +
+          '<div class="osLoadWrap"><i style="width:' + Math.min(100, load * 100) +
+          '%;background:' + loadHex(load) + '"></i></div>' +
+          '</div>';
+      }
+    }
+    grid.innerHTML = html;
+    renderMec(live);
+  }
+
+  function renderMec(live) {
+    var m = live && live.mec;
+    if (!m) {
+      els.mec.innerHTML = '<div class="osNote">MEC 端-边-云分流：后端未下发 mec 数据。</div>';
+      return;
+    }
+    var edge = Number(m.edge_tasks) || 0, center = Number(m.center_tasks) || 0;
+    var total = Math.max(1, edge + center);
+    var eW = edge / total * 100, cW = center / total * 100;
+    var off = Number(m.edge_offload_ratio) || 0;
+    /* 口径说明：enabled = "轻量任务主动下沉边缘"的**策略开关**；下面的分流/时延是**度量**，
+       恒开启。多站拓扑下每机按一致性哈希有原生接入站，部分机本来就接入边缘站，
+       于是 enabled=false 时仍会看到边缘流量 —— 那是"接入亲和"，不是 MEC 卸载。 */
+    var ratioNote = m.enabled
+      ? '卸载比 ' + fmt(off * 100, 1) + '%'
+      : '边缘流量 ' + fmt(off * 100, 1) + '%（策略未开启 · 来自接入亲和）';
+    els.mec.innerHTML =
+      '<div class="osKv"><span>MEC 分流（端-边-云）</span><b>' + (m.enabled ? "已启用" : "未启用") +
+      ' · ' + ratioNote + '</b></div>' +
+      '<div class="osMecBar">' +
+      '<span style="width:' + eW + '%;background:#3ddc97">边缘 ' + edge + '</span>' +
+      '<span style="width:' + cW + '%;background:#4ea1ff">中心 ' + center + '</span>' +
+      '</div>' +
+      '<div class="osMecE2E">' +
+      '<span>边端到端 <b style="color:#3ddc97">' + fmt(m.avg_e2e_edge_ms, 0) + ' ms</b></span>' +
+      '<span>云端到端 <b style="color:#4ea1ff">' + fmt(m.avg_e2e_center_ms, 0) + ' ms</b></span>' +
+      '<span>回传占用 <b>' + fmt(m.backhaul_used_mbps, 1) + ' Mbps</b></span>' +
+      '</div>' +
+      '<div class="osNote" style="margin-top:4px">重任务（如 IMAGERY）留在边缘就近处理，' +
+      '轻任务（如 GPS/心跳）回中心站汇聚：端到端时延因此拉开差距，就是"边云协同"要证明的东西。</div>';
   }
 
   /* ------------------------------------------------------------ 混沌控制台 */

@@ -27,8 +27,11 @@ from typing import Any, Dict, List, Optional
 # 策略与场景的全局命名表（database / experiment / visualize 三方共享）
 # --------------------------------------------------------------------------
 
-#: 五种调度策略的注册名（顺序即报告中表格/图例的顺序）
-SCHEDULER_NAMES: tuple = ("fcfs", "rr", "priority", "mlfq", "dynamic")
+#: 调度策略的注册名（顺序即报告中表格/图例的顺序）。
+#: 前 5 个是**单节点**经典基线（控制变量对照用），第 6 个 `cross_node` 是
+#: 老师改造建议第五章新增的**跨节点**策略（多基站/多服务器场景下的负载均衡）。
+#: 注意：默认单站配置下 `cross_node` 会退化为单站行为，不影响既有 15 组结果的对照口径。
+SCHEDULER_NAMES: tuple = ("fcfs", "rr", "priority", "mlfq", "dynamic", "cross_node")
 
 #: 策略中文显示名（图表与报告使用）
 SCHEDULER_LABELS: Dict[str, str] = {
@@ -37,7 +40,11 @@ SCHEDULER_LABELS: Dict[str, str] = {
     "priority": "静态优先级",
     "mlfq": "多级反馈队列 MLFQ",
     "dynamic": "动态权重自适应（本方案）",
+    "cross_node": "跨节点负载均衡（最少连接+一致性哈希）",
 }
+
+#: 仅单节点经典基线（对照实验的子集；`run.py all` 等仍以 SCHEDULER_NAMES 为准）
+CLASSIC_SCHEDULER_NAMES: tuple = ("fcfs", "rr", "priority", "mlfq", "dynamic")
 
 #: 三种标准仿真工况
 SCENARIO_CODES: tuple = ("LIGHT", "NORMAL", "PEAK")
@@ -147,6 +154,7 @@ class Task:
     生命周期：NEW -> READY(入队) -> RUNNING(被调度) -> DONE
               弱网时：RUNNING -> BLOCKED -> READY(重传)
               严重弱网：READY -> CACHED(本地缓存) -> READY(链路恢复)
+              多基站：READY(站在 A) -> [迁移] -> READY(站在 B)（迁移有代价，见 station.py）
     """
 
     # ---- 静态属性（生成后不变） ----
@@ -160,6 +168,11 @@ class Task:
     segment_index: int = 0  # 分片序号，从 0 开始
     segment_total: int = 1  # 分片总数；1 表示未分片
     parent_task_id: Optional[str] = None  # 分片所属的原始任务
+    #: 当前承载该任务的服务器节点（基站）id。单站模式下恒为 1。
+    station_id: int = 1
+    #: 任务"原生归属"的节点 id —— 无人机接入点决定的默认落点。
+    #: 与 computed 的 `station_id` 不同时，说明该任务被跨节点迁移过。
+    home_station_id: int = 1
 
     # ---- 动态属性（调度过程中变化，写入 DB 用于回溯） ----
     state: TaskState = TaskState.NEW
@@ -174,6 +187,10 @@ class Task:
     link_health: float = 100.0  # 提交时刻的链路健康度 (0-100)
     cached: bool = False  # 是否进入过本地缓存
     drop_reason: Optional[str] = None  # 丢弃原因（正常完成时为 None）
+    #: 跨节点迁移次数（= 非负；迁移会带来耗时与带宽损耗，不是"瞬间搬走"）
+    migrate_count: int = 0
+    #: 累计迁移代价（仿真毫秒）：在途等待 + 因回传重传而拉长的服务时长折算。
+    migration_cost_ms: float = 0.0
 
     # ---- 派生视图 ----
 
@@ -188,6 +205,11 @@ class Task:
         if self.service_s <= 0:
             return 1.0
         return min(1.0, self.served_s / self.service_s)
+
+    @property
+    def migrated(self) -> bool:
+        """是否被跨节点迁移过（当前落点 != 原生归属点）。"""
+        return int(self.station_id) != int(self.home_station_id)
 
     def wait_ms(self, now: float) -> float:
         """当前累计等待时延（毫秒）—— 评价指标「平均等待时延」的口径。
@@ -247,6 +269,8 @@ class UAVStatus:
     tasks_done: int = 0
     tasks_dropped: int = 0
     online_seconds: float = 0.0  # 累计在线时长（仿真秒），算设备在线率用
+    #: 当前接入的服务器节点（基站）id —— 多基站场景下由接入策略决定，可随迁移变化。
+    station_id: int = 1
 
 
 @dataclass
@@ -313,6 +337,27 @@ METRIC_SPEC: Dict[str, tuple] = {
     "reject_large_count": ("超大任务拒绝次数", "次", False),
     "chunk_count": ("分片上传次数", "次", False),
     "runtime_wall_s": ("仿真实耗", "秒", False),
+    # ---- 多基站 / MEC 扩展指标（改造建议第五章；单站模式下恒为 0/等价值） ----
+    "station_max_queue_depth": ("单站最大队列深度", "个", False),
+    "station_load_imbalance": ("站间负载不均衡度", "σ/均值", False),
+    "migration_count": ("任务迁移次数", "次", False),
+    "migration_cost_ms": ("迁移平均代价", "ms", False),
+    "cross_node_comm_ms": ("跨节点通信开销", "ms", False),
+    "edge_offload_ratio": ("边缘分流比例", "%", True),
+    "avg_e2e_ms": ("端到端平均时延", "ms", False),
+    "edge_e2e_ms": ("边缘任务端到端时延", "ms", False),
+    "center_e2e_ms": ("中心任务端到端时延", "ms", False),
+    # 反事实对照：同一批任务若"全下沉边缘"/"全回中心"的端到端时延（用于权衡实验）
+    "e2e_if_edge_ms": ("全下沉边缘端到端时延", "ms", False),
+    "e2e_if_center_ms": ("全回中心端到端时延", "ms", False),
+    # 按类别拆分的反事实（干净的"该不该卸载"判据：轻量任务看边缘是否更快）
+    "e2e_light_if_edge_ms": ("轻量任务全下沉边缘时延", "ms", False),
+    "e2e_light_if_center_ms": ("轻量任务全回中心时延", "ms", False),
+    "e2e_heavy_if_edge_ms": ("重勘查全下沉边缘时延", "ms", False),
+    "e2e_heavy_if_center_ms": ("重勘查全回中心时延", "ms", False),
+    "mec_crossing_data_mb": ("边缘卸载分水岭数据量", "MB", True),
+    "mec_light_tasks": ("轻量任务数", "个", True),
+    "mec_heavy_tasks": ("重勘查任务数", "个", True),
 }
 
 
