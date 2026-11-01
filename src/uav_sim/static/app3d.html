@@ -1,0 +1,2368 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>无人机集群并发自适应调度仿真系统</title>
+<style>
+  :root{
+    --bg:#04070d; --panel:rgba(10,18,30,.72); --line:rgba(78,161,255,.26);
+    --txt:#dbe8f7; --dim:#7d90aa; --cyan:#37e2d5; --blue:#4ea1ff;
+    --amber:#f5a623; --green:#3ddc97; --red:#ff6b6b;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--txt);
+    font:13px/1.5 "Microsoft YaHei","Segoe UI",system-ui,sans-serif;user-select:none}
+  canvas{display:block}
+  /* 关键：canvas 必须有确定的 CSS 尺寸，否则 JS 改 canvas.width 会反过来撑大布局，
+     造成"每帧放大一点"的恶性循环 —— 这就是面板里那块巨大空白画布的成因 */
+  #chart{width:100%;height:82px;display:block}
+  #app{position:fixed;inset:0}
+  #top{position:fixed;left:0;right:0;top:0;height:54px;display:flex;align-items:center;gap:10px;
+    padding:0 14px;white-space:nowrap;overflow:hidden;z-index:20;
+    background:linear-gradient(180deg,rgba(4,9,16,.97),rgba(4,9,16,.55));
+    border-bottom:1px solid var(--line);backdrop-filter:blur(8px)}
+  #top .logo{width:26px;height:26px;border-radius:7px;flex:none;
+    background:radial-gradient(circle at 35% 30%,#7ef9e8,#1f6feb 70%);
+    box-shadow:0 0 14px rgba(55,226,213,.55)}
+  #top .brand{font-size:14px;font-weight:700;letter-spacing:.5px;flex:none;
+    background:linear-gradient(90deg,#7ef9e8,#4ea1ff);-webkit-background-clip:text;
+    background-clip:text;color:transparent}
+  #top .sub{font-size:11px;color:var(--dim);flex:none}
+  .ctrl{display:flex;align-items:center;gap:5px;flex:none}
+  .ctrl label{font-size:11px;color:var(--dim);white-space:nowrap}
+  select,button{font:inherit;color:var(--txt);background:rgba(18,30,46,.92);
+    border:1px solid var(--line);border-radius:7px;padding:5px 9px;outline:none;white-space:nowrap}
+  button{cursor:pointer;transition:.15s;flex:none}
+  button:hover{background:rgba(32,50,78,.95);border-color:#3d6ba8}
+  button.go{background:linear-gradient(135deg,#1f6feb,#2ea8ff);border-color:#2ea8ff;font-weight:600}
+  button.go:hover{filter:brightness(1.12)}
+  button.stop{background:rgba(120,32,32,.9);border-color:#a33}
+  button.ghost{padding:4px 8px;font-size:11px}
+  #stat{margin-left:auto;display:flex;align-items:center;gap:8px;flex:none}
+  #pillStatus{padding:3px 10px;border-radius:20px;border:1px solid var(--line);
+    background:rgba(18,30,46,.85);font-size:11px;max-width:320px;overflow:hidden;
+    text-overflow:ellipsis;white-space:nowrap}
+  #prog{width:110px;height:5px;background:#08101c;border-radius:3px;overflow:hidden;flex:none}
+  #prog>i{display:block;height:100%;width:0;
+    background:linear-gradient(90deg,#2ea8ff,#37e2d5);transition:width .2s}
+  @media (max-width:1600px){ #top .sub{display:none} #prog{width:80px} }
+
+  .panel{position:fixed;background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:10px 12px;backdrop-filter:blur(10px);box-shadow:0 8px 30px rgba(0,0,0,.5);z-index:15}
+  .panel h3{margin:0 0 8px;font-size:10.5px;letter-spacing:1.4px;color:var(--cyan);
+    font-weight:700;text-transform:uppercase;display:flex;align-items:center;gap:6px}
+  .panel h3::before{content:'';width:3px;height:11px;border-radius:2px;
+    background:linear-gradient(180deg,#37e2d5,#1f6feb)}
+  #left{left:14px;top:66px;width:216px}
+  #right{right:14px;top:66px;width:252px}
+  #chartbox{left:50%;transform:translateX(-50%);bottom:14px;width:min(720px,50vw);padding:8px 10px}
+  #hint{left:14px;bottom:14px;width:216px;font-size:11px;color:var(--dim)}
+  /* 渲染增强面板：右下角（右侧指标面板在上方，互不遮挡） */
+  #rnd{right:14px;bottom:14px;width:252px}
+  #rnd .todrow{display:flex;gap:5px;margin-top:4px;flex-wrap:wrap}
+  #rnd .ghost{font-size:11px;padding:3px 7px}
+  #rnd .kv{padding:2px 0}
+  #rnd .wv{font-variant-numeric:tabular-nums}
+  .kv{display:flex;justify-content:space-between;gap:8px;padding:3px 0;font-size:12px}
+  .kv span{color:var(--dim)}
+  .kv b{font-variant-numeric:tabular-nums;font-weight:600}
+  .sep{height:1px;background:var(--line);margin:7px 0}
+  .legend{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--dim);padding:2px 0}
+  .dot{width:9px;height:9px;border-radius:2px;flex:none}
+  .bar{height:6px;background:#08101c;border-radius:4px;overflow:hidden;margin:3px 0 6px}
+  .bar>i{display:block;height:100%;width:0;transition:width .18s}
+  #banner{position:fixed;left:50%;top:62px;transform:translateX(-50%);z-index:30;
+    background:rgba(120,32,32,.95);border:1px solid #a33;border-radius:8px;padding:8px 14px;
+    display:none;font-size:12px;max-width:70vw}
+  #loading{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+    background:radial-gradient(circle at 50% 45%,#081120,#03060b 72%);z-index:50;
+    flex-direction:column;gap:14px;transition:opacity .5s}
+  #loading .ring{width:46px;height:46px;border-radius:50%;
+    border:3px solid rgba(78,161,255,.18);border-top-color:#37e2d5;animation:spin 1s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  #loading .t{color:var(--cyan);font-size:13px;letter-spacing:3px}
+  #loading .e{color:#ff8a8a;font-size:12px;max-width:70vw;text-align:center;line-height:1.7}
+  .corner{position:fixed;width:26px;height:26px;border:1px solid rgba(55,226,213,.35);z-index:10;
+    pointer-events:none}
+  .c1{left:8px;top:60px;border-right:0;border-bottom:0}
+  .c2{right:8px;top:60px;border-left:0;border-bottom:0}
+  .c3{left:8px;bottom:8px;border-right:0;border-top:0}
+  .c4{right:8px;bottom:8px;border-left:0;border-top:0}
+#gpuBadge,#fpsBadge{font:500 10px/1 ui-monospace,Consolas,monospace;letter-spacing:.2px;
+  padding:4px 8px;border-radius:7px;border:1px solid rgba(78,161,255,.30);
+  background:rgba(10,22,34,.66);color:#9fb6cc;white-space:nowrap;max-width:210px;
+  overflow:hidden;text-overflow:ellipsis}
+#gpuBadge.hi{border-color:rgba(61,220,151,.45);color:#7ff0bf}
+#gpuBadge.mid{border-color:rgba(255,209,102,.45);color:#ffdf9b}
+#gpuBadge.cpu{border-color:rgba(255,107,107,.45);color:#ffb0b0}
+#fpsBadge{color:#8fb6d8;min-width:64px;text-align:center}
+/* 电影暗角：纯 CSS，零 GPU 成本 */
+.todrow{display:flex;gap:5px;margin-top:6px;flex-wrap:wrap}
+button.ghost.on{border-color:rgba(55,226,213,.75);color:#9ff7ee;
+  background:rgba(55,226,213,.14);box-shadow:0 0 0 1px rgba(55,226,213,.25) inset}
+#vignette{position:fixed;inset:0;pointer-events:none;z-index:6;
+  background:radial-gradient(ellipse at 50% 46%,rgba(0,0,0,0) 42%,rgba(0,0,0,.34) 100%)}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="vignette"></div>
+<i class="corner c1"></i><i class="corner c2"></i><i class="corner c3"></i><i class="corner c4"></i>
+
+<div id="top">
+  <i class="logo"></i>
+  <span class="brand">无人机集群并发自适应调度仿真系统</span>
+  <span class="sub">智慧地质勘查 · 3D 实时可视化</span>
+  <div class="ctrl" style="margin-left:16px">
+    <label>工况</label><select id="scn"></select>
+    <label>策略</label><select id="sch"></select>
+    <label>速度</label>
+    <select id="spd">
+      <option value="0.5">0.5×</option><option value="1" selected>1×</option>
+      <option value="2">2×</option><option value="4">4×</option>
+    </select>
+  </div>
+  <button class="go" id="btnStart">▶ 开始仿真</button>
+  <button class="stop" id="btnStop">■ 停止</button>
+  <div id="stat">
+    <div id="prog"><i></i></div>
+    <span id="pillStatus">未开始</span>
+    <span id="gpuBadge" title="渲染后端">GPU 检测中…</span>
+    <span id="fpsBadge">-- fps</span>
+  </div>
+</div>
+
+<div class="panel" id="left">
+  <h3>机群状态</h3>
+  <div class="kv"><span>在线 / 总数</span><b id="fOn">0 / 0</b></div>
+  <div class="kv"><span>上传中</span><b id="fBusy">0</b></div>
+  <div class="kv"><span>链路健康均值</span><b id="fHealth">-</b></div>
+  <div class="bar"><i id="fHealthBar" style="width:0;background:linear-gradient(90deg,#ff6b6b,#ffd166,#3ddc97)"></i></div>
+  <div class="sep"></div>
+  <div class="legend"><i class="dot" style="background:#3ddc97"></i>优质链路 ≥85</div>
+  <div class="legend"><i class="dot" style="background:#ffd166"></i>一般 55~85</div>
+  <div class="legend"><i class="dot" style="background:#ff6b6b"></i>弱网 &lt;55</div>
+  <div class="sep"></div>
+  <div class="kv"><span>高优队列（勘查）</span><b id="qHi">0</b></div>
+  <div class="bar"><i id="qHiBar" style="background:linear-gradient(90deg,#2f7ff5,#4ea1ff)"></i></div>
+  <div class="kv"><span>低优队列（运维）</span><b id="qLo">0</b></div>
+  <div class="bar"><i id="qLoBar" style="background:linear-gradient(90deg,#b9761a,#f5a623)"></i></div>
+  <div class="kv"><span>系统负载</span><b id="qLoad">0.00</b></div>
+  <div class="bar"><i id="qLoadBar" style="background:linear-gradient(90deg,#3ddc97,#ffd166,#ff6b6b)"></i></div>
+</div>
+
+<div class="panel" id="right">
+  <h3>实时指标</h3>
+  <div class="kv"><span>仿真时间</span><b id="mTime">0 / 0 s</b></div>
+  <div class="kv"><span>已提交 / 已完成</span><b id="mTasks">0 / 0</b></div>
+  <div class="kv"><span>吞吐量</span><b id="mThr">0.00 个/s</b></div>
+  <div class="kv"><span>弱网重传累计</span><b id="mRetry">0</b></div>
+  <div class="kv"><span>阻塞 / 待重传</span><b id="mBlock">0 / 0</b></div>
+  <div class="kv"><span>被抢占</span><b id="mPre">0</b></div>
+  <div class="kv"><span>上下文切换</span><b id="mCtx">0</b></div>
+  <div class="kv"><span>时间片 高/低</span><b id="mSlice">- / -</b></div>
+  <div class="kv"><span>限流 / 拒绝大任务</span><b id="mLim">0 / 0</b></div>
+  <div class="kv"><span>过载累计</span><b id="mOver">0 s</b></div>
+  <div class="sep"></div>
+  <h3>本次结果</h3>
+  <div class="kv"><span>完成率</span><b id="rCompl">-</b></div>
+  <div class="kv"><span>高/低优平均等待</span><b id="rWait">-</b></div>
+  <div class="kv"><span>低优饥饿率</span><b id="rStarve">-</b></div>
+</div>
+
+<div class="panel" id="chartbox">
+  <h3>就绪队列深度 / 系统负载</h3>
+  <canvas id="chart" height="82"></canvas>
+  <div class="legend" style="justify-content:space-between;margin-top:2px">
+    <span><i class="dot" style="background:#4ea1ff"></i>高优队列</span>
+    <span><i class="dot" style="background:#f5a623"></i>低优队列</span>
+    <span><i class="dot" style="background:#3ddc97"></i>系统负载</span>
+    <span>左键旋转 · 滚轮缩放 · 右键平移</span>
+  </div>
+</div>
+
+<div class="panel" id="hint">
+  <h3>机位</h3>
+  <button class="ghost" data-cam="iso">立体视角</button>
+  <button class="ghost" data-cam="top">俯视</button>
+  <button class="ghost" data-cam="station">地面站</button>
+  <button class="ghost" data-cam="pit">矿区</button>
+  <button class="ghost" data-cam="follow">跟随</button>
+  <button class="ghost" data-cam="orbit">环绕巡航</button>
+  <div class="todrow">
+    <button class="ghost" data-tod="dawn">黎明</button>
+    <button class="ghost" data-tod="noon">正午</button>
+    <button class="ghost" data-tod="dusk">黄昏</button>
+    <button class="ghost" data-tod="night">夜景</button>
+  </div>
+</div>
+
+<!-- ===== 渲染增强（3D 升级）控制台：天气与模块开关 ===== -->
+<div class="panel" id="rnd">
+  <h3>渲染增强 · 天气与模块</h3>
+  <div class="kv"><span>天气</span><b id="wName" class="wv">晴朗</b></div>
+  <div class="kv"><span>能见度</span><b id="wVis" class="wv">-</b></div>
+  <div class="kv"><span>链路衰减</span><b id="wPen" class="wv">-</b></div>
+  <div class="sep"></div>
+  <div class="kv"><span>SSAO 耗时</span><b id="wMs" class="wv">-</b></div>
+  <div class="kv"><span>地形三角形</span><b id="wTri" class="wv">-</b></div>
+  <div class="kv"><span>HUD 箭头</span><b id="wArr" class="wv">-</b></div>
+  <div class="sep"></div>
+  <div class="kv" style="font-size:11px;color:var(--dim)"><span>天气工况（改链路健康度）</span></div>
+  <div class="todrow" id="wxRow">
+    <button class="ghost" data-wx="clear">晴</button>
+    <button class="ghost" data-wx="rain">雨</button>
+    <button class="ghost" data-wx="snow">雪</button>
+    <button class="ghost" data-wx="dust">沙尘</button>
+  </div>
+  <div class="todrow" id="rndRow" style="margin-top:7px">
+    <button class="ghost" data-rnd="ssao">SSAO</button>
+    <button class="ghost" data-rnd="lod">地形LOD</button>
+    <button class="ghost" data-rnd="flow">任务流</button>
+    <button class="ghost" data-rnd="waterfall">瀑布图</button>
+    <button class="ghost" data-rnd="wx">天气粒子</button>
+  </div>
+</div>
+
+<div id="banner"></div>
+<div id="loading"><div class="ring"></div><div class="t">正在构建 3D 场景…</div></div>
+
+<script src="/static/three.min.js"></script>
+<script src="/static/OrbitControls.js"></script>
+<script src="/static/CopyShader.js"></script>
+<script src="/static/LuminosityHighPassShader.js"></script>
+<script src="/static/EffectComposer.js"></script>
+<script src="/static/RenderPass.js"></script>
+<script src="/static/ShaderPass.js"></script>
+<script src="/static/UnrealBloomPass.js"></script>
+<!-- ===== 3D 渲染升级模块（2026-11）：经典脚本 + 单一全局对象，契约见 docs/07 =====
+     ssao        真屏幕空间环境光遮蔽（替换原顶点烘焙 AO）
+     terrain_lod 地形几何 clipmap + 纹理 clipmap（近细远粗，为更大 DEM 铺路）
+     uav_model   无人机细化模型（桨叶运动模糊 / 云台跟随 / 起落架收放）
+     hud_overlay 任务流向箭头 + 队列三维瀑布图
+     weather     雨/雪/沙尘粒子 + 能见度雾衰减（与链路健康度联动） -->
+<script src="/static/ssao.js"></script>
+<script src="/static/terrain_lod.js"></script>
+<script src="/static/uav_model.js"></script>
+<script src="/static/hud_overlay.js"></script>
+<script src="/static/weather_system.js"></script>
+<script>
+"use strict";
+/* =========================================================================
+   无人机集群调度仿真 · 3D 可视化（v3 · 真实地形版）
+   ---------------------------------------------------------------------------
+   地形生成流程参考（调研结论）：
+     ① 梯度噪声 fBm（多八度）打底       —— Perlin/Simplex 的标准做法
+     ② **脊状噪声 ridged** = 1-|noise|    —— 形成真实山脊线（普通 fBm 只会是"馒头丘"）
+     ③ **域扭曲 domain warping**（Inigo Quilez）—— 用低频噪声扰动采样坐标，
+        让山脊弯曲游走，消除网格感
+     ④ **液滴水力侵蚀**（Beyer droplet 算法）—— 雨滴沿最陡方向冲刷，携带/沉积泥沙，
+        冲刷出冲沟、河谷、冲积扇；沉积用双线性泼溅，否则会有网格状伪影
+     ⑤ **热力侵蚀 / 安息角 talus**（30~40°）—— 超过休止角的陡坡自动塌落成碎屑坡，
+        否则会出现现实中不存在的垂直崖壁
+     ⑥ 坡度-高程混合着色（陡坡露岩、缓坡覆土/植被），坑底单独压灰表现裸岩粉尘
+     ⑦ 露天矿台阶与折返坡道**放在侵蚀之后**再切 —— 否则台阶会被冲刷抹平（实测踩坑）
+   露天矿几何（台阶/坡道）参考矿业工程常规参数：
+     台阶高度 10~15 m、台阶平台宽 5~8 m、坡面角 45~70°、运输坡道纵坡 8~10%
+   数据来源：GET /api/state（120ms 轮询）；位置/姿态在前端按 uav_id 确定性演算。
+   ========================================================================= */
+
+/* ==========================================================================
+   GPU 自动识别：**有独显就用独显跑满画质；只有核显降一档；没有 GPU 就退回 CPU 渲染**
+   --------------------------------------------------------------------------
+   依据 WebGL 的 WEBGL_debug_renderer_info 暴露的真实渲染器字符串：
+     · NVIDIA GeForce / RTX / GTX、AMD Radeon RX、Intel Arc 独立显卡  -> high   全画质
+     · Intel UHD / Iris、AMD APU、Apple GPU 等核显/集显                -> medium 中画质
+     · SwiftShader / llvmpipe / Microsoft Basic Render（软件光栅=CPU）  -> cpu    轻画质
+   手动覆盖：?quality=high|medium|cpu   或   ?lite=1（等价 cpu 档）
+   这一档同时决定：像素比、阴影分辨率、泛光、地形网格密度、植被/碎石数量、后处理开关。
+   ========================================================================== */
+const QS = new URLSearchParams(location.search);
+const FORCE_Q = (QS.get("quality") || "").toLowerCase();
+
+function detectGPU() {
+  const fail = { tier: "cpu", name: "未检测到 WebGL（软件渲染）", software: true, dgpu: false };
+  try {
+    const cv = document.createElement("canvas");
+    const gl2 = cv.getContext("webgl2");
+    const gl = gl2 || cv.getContext("webgl") || cv.getContext("experimental-webgl");
+    if (!gl) return fail;
+    const ext = gl.getExtension("WEBGL_debug_renderer_info");
+    const raw = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : (gl.getParameter(gl.RENDERER) || "");
+    const name = String(raw || "unknown").trim();
+    const software = /swiftshader|llvmpipe|software|basic render|microsoft basic|mesa offscreen/i.test(name);
+    const dgpu = /nvidia|geforce|rtx\s?\d|gtx|quadro|radeon\s?(rx|pro|vii)|arc\s?a\d|firepro|tesla/i.test(name);
+    const igpu = /intel|uhd|iris|hd graphics|vega|radeon\s?graphics|mali|adreno|apple\s?gpu|powervr/i.test(name);
+    let tier = software ? "cpu" : dgpu ? "high" : igpu ? "medium" : "medium";
+    if (tier === "high" && !gl2) tier = "medium";     // 只有 WebGL1 的老驱动/虚拟机，降一档
+    return { tier, name, software, dgpu, webgl2: !!gl2 };
+  } catch (e) {
+    return fail;
+  }
+}
+
+const GPU = detectGPU();
+/* LITE = 轻量档（关后处理/降精度）。注意：显式 ?quality=high|medium 时**必须**跳过 LITE，
+   否则"强制高画质"在软件渲染/虚拟机上会被 GPU 自动识别覆盖，无法用于验收截图。 */
+const LITE = QS.has("lite") || FORCE_Q === "cpu" || (GPU.tier === "cpu" && !FORCE_Q);
+const TIER = QS.has("lite") ? "cpu" : (FORCE_Q || GPU.tier);
+
+const QUALITY = {
+  high:   { label: "高", pixelRatio: 2.0,  shadows: true,  shadowMap: 2048, bloom: 0.58,
+            terrainRes: 1.0, particles: 9000, trees: 6200, rocks: 1200, ao: true, cloud: true,  postfx: true  },
+  medium: { label: "中", pixelRatio: 1.35, shadows: true,  shadowMap: 1024, bloom: 0.42,
+            terrainRes: 1.0, particles: 5000, trees: 3200, rocks: 620,  ao: true, cloud: false, postfx: true  },
+  cpu:    { label: "CPU", pixelRatio: 1.0, shadows: false, shadowMap: 512,  bloom: 0.0,
+            terrainRes: 0.5, particles: 2500, trees: 1000, rocks: 200, ao: false, cloud: false, postfx: false },
+}[TIER];
+
+/* 静态模式：只渲染几帧就停，用于无头截图（避免 rAF 无限跑） */
+const STILL = QS.has("still");
+const DEBUG = QS.has("debug");
+const BASIC = QS.has("basic");
+
+function initBadges() {
+  const gb = document.getElementById("gpuBadge");
+  let short = GPU.name;
+  const mm = GPU.name.match(/(NVIDIA[^,)]*|AMD[^,)]*|Intel[^,)]*|Apple[^,)]*|SwiftShader[^,)]*|llvmpipe[^,)]*)/i);
+  if (mm) short = mm[1];
+  short = short.replace(/Direct3D11.*$/i, "").replace(/\s+/g, " ").trim();
+  if (short.length > 34) short = short.slice(0, 32) + "…";
+  gb.className = { high: "hi", medium: "mid", cpu: "cpu" }[TIER] || "";
+  gb.textContent = "GPU: " + short + " · 画质 " + QUALITY.label;
+  gb.title = "渲染后端：" + GPU.name + "\n档位：" + TIER +
+             (QS.has("lite") ? "（?lite=1 强制）" : FORCE_Q ? "（?quality 强制）" : "（自动识别）");
+  console.log("[GPU]", GPU, "tier =", TIER);
+}
+if (document.readyState !== "loading") initBadges();
+else addEventListener("DOMContentLoaded", initBadges);
+
+const RENDER = {
+  maxPixelRatio: QUALITY.pixelRatio,
+  shadows: QUALITY.shadows,
+  shadowMap: QUALITY.shadowMap,
+  bloomStrength: QUALITY.bloom,
+  bloomRadius: 0.42,
+  bloomThreshold: 0.92,
+  pointCloudMax: QUALITY.particles,
+  ao: QUALITY.ao,
+  cloudShadow: QUALITY.cloud,
+  postfx: QUALITY.postfx,
+};
+
+/* 世界尺寸：2026-11 升级为 2 倍边长（176×128 -> 352×256）。
+   配套 dem.json 换成更大范围的真实 DEM（1024×760，14.6×10.8 km），
+   1 世界单位 ≈ 41 m 的比例保持不变 —— 所以山体高度、矿坑物理尺寸、站台等都不变，
+   只是"可作业区域"扩大到原来的 4 倍面积，30 架机有真正的转场/扫描空间。 */
+const TERRAIN_W = 352, TERRAIN_D = 256;
+/* 程序化兜底地形的网格（有 DEM 时走 DEM 自己的分辨率，这里只影响无 dem.json 的情况） */
+const HF_NX = LITE ? 240 : 512, HF_NZ = LITE ? 174 : 372;
+const CELL_X = TERRAIN_W / (HF_NX - 1);
+const CELL_Z = TERRAIN_D / (HF_NZ - 1);
+
+const PIT = { cx: -6, cz: -6, rx: 46, rz: 40, depth: 40, benchH: 6.2, benchW: 7.0 };
+const STATION_XZ = { x: 0, z: 44 };
+const PAD_H = 2.0;
+const UPLINK_TOP = new THREE.Vector3(STATION_XZ.x, 17.0, STATION_XZ.z);
+const C = { ok: 0x3ddc97, warn: 0xffd166, bad: 0xff6b6b,
+            cyan: 0x37e2d5, blue: 0x4ea1ff, amber: 0xf5a623 };
+
+const state = { drones: [], live: null, summary: {}, status: "idle", time: 0, orbitMode: false,
+                field: null, flow: null, cloudUs: [], wx: null };
+
+/* ============================================================ 1. 噪声 */
+/** 2D 梯度噪声（Perlin 风格）：比"随机值 + 双线性"更接近真实地形，且无方块感 */
+function makeGradientNoise(seed) {
+  const perm = new Uint8Array(512);
+  const p = new Uint8Array(256);
+  for (let i = 0; i < 256; i++) p[i] = i;
+  let s = seed >>> 0;
+  const rnd = () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  for (let i = 255; i > 0; i--) {
+    const j = Math.floor(rnd() * (i + 1));
+    const t = p[i]; p[i] = p[j]; p[j] = t;
+  }
+  for (let i = 0; i < 512; i++) perm[i] = p[i & 255];
+  const fade = t => t * t * t * (t * (t * 6 - 15) + 10);
+  const dot = (h, x, z) => {
+    switch (h & 7) {
+      case 0: return x + z; case 1: return -x + z; case 2: return x - z; case 3: return -x - z;
+      case 4: return x; case 5: return -x; case 6: return z; default: return -z;
+    }
+  };
+  return function noise(x, z) {
+    const Xi = Math.floor(x) & 255, Zi = Math.floor(z) & 255;
+    const xf = x - Math.floor(x), zf = z - Math.floor(z);
+    const u = fade(xf), v = fade(zf);
+    const aa = perm[perm[Xi] + Zi], ab = perm[perm[Xi] + Zi + 1];
+    const ba = perm[perm[Xi + 1] + Zi], bb = perm[perm[Xi + 1] + Zi + 1];
+    const x1 = lerp(dot(aa, xf, zf), dot(ba, xf - 1, zf), u);
+    const x2 = lerp(dot(ab, xf, zf - 1), dot(bb, xf - 1, zf - 1), u);
+    return lerp(x1, x2, v) * 0.7; // 约 [-1,1]
+  };
+}
+const lerp = (a, b, t) => a + (b - a) * t;
+const clamp = (v, a, b) => v < a ? a : (v > b ? b : v);
+const smoothstep = (e0, e1, x) => { const t = clamp((x - e0) / (e1 - e0), 0, 1); return t * t * (3 - 2 * t); };
+const NOISE = makeGradientNoise(20261031);
+
+/** 普通 fBm：多八度叠加，得到大尺度起伏 + 中小尺度细节 */
+function fbm(x, z, octaves, lacunarity, persistence) {
+  let sum = 0, amp = 1, freq = 1, norm = 0;
+  for (let i = 0; i < octaves; i++) {
+    sum += NOISE(x * freq, z * freq) * amp;
+    norm += amp; amp *= persistence; freq *= lacunarity;
+  }
+  return sum / norm;
+}
+/** 脊状噪声：1-|n| 把"谷"折成"脊"，这是真实山脉观感的来源 */
+function ridged(x, z, octaves, lacunarity, persistence) {
+  let sum = 0, amp = 1, freq = 1, norm = 0, weight = 1;
+  for (let i = 0; i < octaves; i++) {
+    let n = 1 - Math.abs(NOISE(x * freq, z * freq));
+    n *= n;
+    n *= weight;
+    weight = clamp(n * 2.0, 0, 1);   // 多重分形：让高脊更尖锐
+    sum += n * amp; norm += amp;
+    amp *= persistence; freq *= lacunarity;
+  }
+  return sum / norm;   // [0,1]
+}
+
+/* ============================================================ 2. 高程场 */
+/**
+ * 基础地形（未侵蚀）：
+ *   warped(ridged fBm) 作群山 → 挖出露天矿采坑（同心台阶）→ 切出 6 段折返式运输坡道
+ *   → 堆土场（排土场）锥体 → 地面站整平
+ */
+function baseHeight(x, z) {
+  // ---- ① 域扭曲：先用低频噪声扰动坐标，再采样，山脊就会弯曲游走 ----
+  const wx = fbm(x * 0.006 + 5.2, z * 0.006 + 1.3, 3, 2.0, 0.5) * 26;
+  const wz = fbm(x * 0.006 + 9.1, z * 0.006 + 7.4, 3, 2.0, 0.5) * 26;
+  const px = x + wx, pz = z + wz;
+
+  // ---- ② 群山：脊状噪声 + 一层普通 fBm 做基底 ----
+  const ridge = ridged(px * 0.0125, pz * 0.0125, 5, 2.05, 0.5);
+  const hilly = fbm(px * 0.020, pz * 0.020, 4, 2.0, 0.5);
+  let h = ridge * 46 + hilly * 12 - 16;
+
+  // 边缘抬升（把场景围成山谷）
+  const edge = Math.max(Math.abs(x) / (TERRAIN_W / 2), Math.abs(z) / (TERRAIN_D / 2));
+  h += smoothstep(0.68, 1.05, edge) * 40;
+
+  return h;
+}
+
+/**
+ * 露天矿采坑：**必须在侵蚀之后**再切，否则台阶会被水力侵蚀当坡面冲刷抹平
+ * （实测：先切坑再侵蚀，台阶完全消失，只剩一个平滑大坑）。
+ * 台阶参数取自矿业工程常规值：台阶高 6.2、平台宽 7.0、坡面角约 60°。
+ */
+function carvePit(x, z, h) {
+  const dx = (x - PIT.cx) / PIT.rx, dz = (z - PIT.cz) / PIT.rz;
+  const rr = Math.sqrt(dx * dx + dz * dz);
+  if (rr >= 1.10) return h;
+  const rim = h;                                     // 坑口高程（跟随原地形）
+  const dRad = rr * PIT.rx;                          // 折算到世界半径
+  const steps = Math.max(0, (PIT.rx - dRad) / PIT.benchW);
+  const level = Math.floor(steps);
+  const frac = steps - level;
+  const face = frac > 0.72 ? (frac - 0.72) / 0.28 : 0; // 平台 72% + 坡面 28%
+  let pitH = rim - level * PIT.benchH - face * PIT.benchH;
+  pitH = Math.max(pitH, h - PIT.depth);
+  const blend = smoothstep(1.10, 0.96, rr);
+  return lerp(h, pitH, blend);
+}
+
+/* 采坑内的运输坡道：6 段折返（switchback），纵坡约 8~10% */
+const RAMPS = [];
+(function buildRamps() {
+  const levels = 6;
+  for (let i = 0; i < levels; i++) {
+    const a0 = i * (Math.PI * 2 / levels) + 0.35;
+    const a1 = a0 + (Math.PI * 2 / levels) * 0.72;   // 每段跨约 43°
+    const r0 = PIT.rx * (1 - (i + 0.9) * PIT.benchW / PIT.rx);
+    const r1 = PIT.rx * (1 - (i + 0.1) * PIT.benchW / PIT.rx);
+    const y0 = -i * PIT.benchH, y1 = -(i + 1) * PIT.benchH;
+    RAMPS.push({
+      x0: PIT.cx + Math.cos(a0) * r0, z0: PIT.cz + Math.sin(a0) * r0 * (PIT.rz / PIT.rx), y0,
+      x1: PIT.cx + Math.cos(a1) * r1, z1: PIT.cz + Math.sin(a1) * r1 * (PIT.rz / PIT.rx), y1,
+      halfW: 4.2,
+    });
+  }
+})();
+
+/** 把坡道压进地形：点落在坡道走廊内时，高程向坡道中心线插值靠拢 */
+function applyRamps(x, z, h) {
+  let best = h, bestDist = 1e9;
+  for (let i = 0; i < RAMPS.length; i++) {
+    const r = RAMPS[i];
+    const vx = r.x1 - r.x0, vz = r.z1 - r.z0;
+    const len2 = vx * vx + vz * vz;
+    let t = ((x - r.x0) * vx + (z - r.z0) * vz) / len2;
+    t = clamp(t, 0, 1);
+    const px = r.x0 + vx * t, pz = r.z0 + vz * t;
+    const d = Math.hypot(x - px, z - pz);
+    if (d < r.halfW && d < bestDist) { bestDist = d; best = lerp(r.y0, r.y1, t); }
+  }
+  if (bestDist === 1e9) return h;
+  const k = smoothstep(1, 0.55, bestDist / 4.2);   // 走廊中心完全压平，边缘过渡
+  return lerp(h, best, k * 0.92);
+}
+
+/* ============================================================ 2b. 真实 DEM（抚顺西露天矿） */
+/**
+ * 真实高程数据：`src/uav_sim/static/dem.json`
+ *   来源：AWS elevation-tiles-prod 的 Mapzen Terrarium 瓦片（NASA SRTM 等多源 DEM 合成，公开免密钥）
+ *   区域：辽宁抚顺西露天矿（亚洲最大露天煤矿，坑长约 6.6 km，最深处约 -420 m）
+ *   网格：512×380，14.2 m/px，真实海拔 -277 ~ +221 m
+ *
+ * 垂直放大：1 世界单位 ≈ 41 m 水平；若 1:1，498 m 高差仅 12 个单位，近景看不出地形。
+ * 因此做 4× 垂直夸张（地形可视化常规做法），并在页面上标注。
+ */
+const DEM_URL = "/static/dem.json";
+const DEM_VEXAG = 4.0;
+
+function decodeInt16(b64) {
+  const bin = atob(b64);
+  const n = bin.length >> 1;
+  const out = new Int16Array(n);
+  for (let i = 0; i < n; i++) {
+    let v = bin.charCodeAt(i * 2) | (bin.charCodeAt(i * 2 + 1) << 8);
+    if (v >= 0x8000) v -= 0x10000;
+    out[i] = v;
+  }
+  return out;
+}
+
+function buildFieldFromDEM(dem) {
+  let N = dem.nx, M = dem.nz;
+  let raw = decodeInt16(dem.data_b64);                // 分米
+  // 轻量档 / 无头渲染：抽稀一半，面数降到 1/4（512×380 -> 256×190）
+  if (QUALITY.terrainRes < 1 && N > 300) {
+    const N2 = N >> 1, M2 = M >> 1;
+    const r2 = new Int16Array(N2 * M2);
+    for (let j = 0; j < M2; j++) for (let i = 0; i < N2; i++) r2[j * N2 + i] = raw[(j * 2) * N + i * 2];
+    raw = r2; N = N2; M = M2;
+  }
+  const metersPerUnit = dem.grid_m * dem.nx / TERRAIN_W;   // 1 世界单位 = 多少米（按原始分辨率算）
+  const mid = (dem.min_m + dem.max_m) / 2;
+  const H = new Float32Array(N * M);
+  for (let i = 0; i < N * M; i++) H[i] = (raw[i] / 10 - mid) * DEM_VEXAG / metersPerUnit;
+
+  // 地面站平台整平（真实矿区坡度大，站台需要平地）
+  for (let j = 0; j < M; j++) {
+    const z = -TERRAIN_D / 2 + j * (TERRAIN_D / (M - 1));
+    for (let i = 0; i < N; i++) {
+      const x = -TERRAIN_W / 2 + i * (TERRAIN_W / (N - 1));
+      const ds = Math.hypot(x - STATION_XZ.x, z - STATION_XZ.z);
+      if (ds < 22) H[j * N + i] = lerp(H[j * N + i], PAD_H, smoothstep(22, 10, ds));
+    }
+  }
+  console.log(`[DEM] ${N}x${M} 海拔 ${dem.min_m.toFixed(0)}~${dem.max_m.toFixed(0)}m ` +
+              `${dem.grid_m.toFixed(1)}m/px 垂直放大 ${DEM_VEXAG}x`);
+  return { H, N, M, dem };
+}
+
+function buildHeightfield() {
+  const N = HF_NX, M = HF_NZ;
+  const H = new Float32Array(N * M);
+  const cx = (N - 1) / 2, cz = (M - 1) / 2;
+
+  // ---------- ① 采样基础地形 ----------
+  for (let j = 0; j < M; j++) {
+    const z = -TERRAIN_D / 2 + j * CELL_Z;
+    for (let i = 0; i < N; i++) {
+      const x = -TERRAIN_W / 2 + i * CELL_X;
+      H[j * N + i] = baseHeight(x, z);
+    }
+  }
+
+  // ---------- ③ 液滴水力侵蚀（Beyer 算法） ----------
+  const P = { maxSteps: 52, inertia: 0.06, minSlope: 0.012, capacity: 4.0,
+              deposit: 0.28, erode: 0.34, gravity: 5.0, evaporate: 0.018 };
+  const idxH = (i, j) => H[j * N + i];
+  const sampleH = (px, pz) => {
+    const i0 = Math.floor(px), j0 = Math.floor(pz);
+    if (i0 < 0 || j0 < 0 || i0 >= N - 1 || j0 >= M - 1) return null;
+    const fx = px - i0, fz = pz - j0;
+    const h00 = idxH(i0, j0), h10 = idxH(i0 + 1, j0);
+    const h01 = idxH(i0, j0 + 1), h11 = idxH(i0 + 1, j0 + 1);
+    return {
+      h: (h00 * (1 - fx) + h10 * fx) * (1 - fz) + (h01 * (1 - fx) + h11 * fx) * fz,
+      gx: (h10 - h00) * (1 - fz) + (h11 - h01) * fz,
+      gz: (h01 - h00) * (1 - fx) + (h11 - h10) * fx,
+      i0, j0, fx, fz,
+    };
+  };
+  const splat = (i0, j0, fx, fz, amount) => {
+    H[j0 * N + i0] += amount * (1 - fx) * (1 - fz);
+    H[j0 * N + i0 + 1] += amount * fx * (1 - fz);
+    H[(j0 + 1) * N + i0] += amount * (1 - fx) * fz;
+    H[(j0 + 1) * N + i0 + 1] += amount * fx * fz;
+  };
+
+  let seed = 1234567;
+  const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+
+  const DROPLETS = LITE ? 6000 : 46000;
+  for (let d = 0; d < DROPLETS; d++) {
+    let px = 2 + rnd() * (N - 5), pz = 2 + rnd() * (M - 5);
+    let vx = 0, vz = 0, water = 1, sediment = 0;
+    for (let step = 0; step < P.maxSteps; step++) {
+      const s = sampleH(px, pz);
+      if (!s) break;
+      vx = vx * P.inertia - s.gx * (1 - P.inertia);
+      vz = vz * P.inertia - s.gz * (1 - P.inertia);
+      const speed = Math.hypot(vx, vz);
+      if (speed < 1e-5) break;
+      vx /= speed; vz /= speed;
+      const nx = px + vx, nz = pz + vz;
+      const s2 = sampleH(nx, nz);
+      if (!s2) break;
+      const dH = s2.h - s.h;
+      const cap = Math.max(-dH, P.minSlope) * speed * water * P.capacity;
+      if (dH > 0 || sediment > cap) {                       // 上坡或超载 -> 沉积
+        const dep = dH > 0 ? Math.min(dH, sediment) : (sediment - cap) * P.deposit;
+        sediment -= dep;
+        splat(s.i0, s.j0, s.fx, s.fz, dep);
+      } else {                                              // 下坡且未饱和 -> 侵蚀
+        const er = Math.min((cap - sediment) * P.erode, -dH);
+        sediment += er;
+        splat(s.i0, s.j0, s.fx, s.fz, -er);
+      }
+      px = nx; pz = nz;
+      water *= (1 - P.evaporate);
+      if (water < 0.02) break;
+    }
+    // 每 4000 滴做一次热力侵蚀（安息角），交替进行才能既有冲沟又有稳定坡面
+    if (d % 4000 === 3999) thermalErosion(H, N, M, 0.62, 0.45, 2);
+  }
+  // 收尾再做几轮热力侵蚀
+  thermalErosion(H, N, M, 0.60, 0.5, 3);
+
+  // ---------- ③' 侵蚀之后再切采坑与坡道（保证台阶锐利） ----------
+  for (let j = 0; j < M; j++) {
+    const z = -TERRAIN_D / 2 + j * CELL_Z;
+    for (let i = 0; i < N; i++) {
+      const x = -TERRAIN_W / 2 + i * CELL_X;
+      let h = carvePit(x, z, H[j * N + i]);
+      h = applyRamps(x, z, h);
+      H[j * N + i] = h;
+    }
+  }
+
+  // ---------- ④ 地面站整平（放在侵蚀之后，否则会被冲掉） ----------
+  const flatR = 22, flatR2 = 10;
+  for (let j = 0; j < M; j++) {
+    const z = -TERRAIN_D / 2 + j * CELL_Z;
+    for (let i = 0; i < N; i++) {
+      const x = -TERRAIN_W / 2 + i * CELL_X;
+      const ds = Math.hypot(x - STATION_XZ.x, z - STATION_XZ.z);
+      if (ds < flatR) {
+        const k = smoothstep(flatR, flatR2, ds);
+        H[j * N + i] = lerp(H[j * N + i], PAD_H, k);
+      }
+    }
+  }
+
+  return { H, N, M };
+}
+
+/** 热力侵蚀：坡度超过安息角就把多余物质搬到最低的邻居，形成碎屑坡（talus） */
+function thermalErosion(H, N, M, talus, amount, passes) {
+  const NB = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
+  for (let pass = 0; pass < passes; pass++) {
+    const next = H.slice();
+    for (let j = 1; j < M - 1; j++) {
+      for (let i = 1; i < N - 1; i++) {
+        const idx = j * N + i, h = H[idx];
+        let maxDrop = 0, ti = -1;
+        for (let k = 0; k < 8; k++) {
+          const ni = i + NB[k][0], nj = j + NB[k][1];
+          const drop = h - H[nj * N + ni];
+          if (drop > maxDrop) { maxDrop = drop; ti = nj * N + ni; }
+        }
+        if (maxDrop > talus && ti >= 0) {
+          const move = (maxDrop - talus) * amount * 0.5;
+          next[idx] -= move; next[ti] += move;
+        }
+      }
+    }
+    H.set(next);
+  }
+}
+
+/** 双线性采样高程（世界坐标 -> 高度），供无人机/植被/地面站贴地使用 */
+function terrainH(x, z) {
+  const F = state.field;
+  if (!F) return 0;
+  // 按"当前高度场"的实际行列数算步长（DEM 512×380 与程序化 384×280 不同）
+  const dx = TERRAIN_W / (F.N - 1), dz = TERRAIN_D / (F.M - 1);
+  const fx = (x + TERRAIN_W / 2) / dx;
+  const fz = (z + TERRAIN_D / 2) / dz;
+  const i0 = clamp(Math.floor(fx), 0, F.N - 2), j0 = clamp(Math.floor(fz), 0, F.M - 2);
+  const tx = clamp(fx - i0, 0, 1), tz = clamp(fz - j0, 0, 1);
+  const h00 = F.H[j0 * F.N + i0], h10 = F.H[j0 * F.N + i0 + 1];
+  const h01 = F.H[(j0 + 1) * F.N + i0], h11 = F.H[(j0 + 1) * F.N + i0 + 1];
+  return (h00 * (1 - tx) + h10 * tx) * (1 - tz) + (h01 * (1 - tx) + h11 * tx) * tz;
+}
+
+/* ============================================================ 3. 地形网格 */
+/** 高程范围：LOD 地形与基础地形共用（配色按 hMin/hMax 归一化） */
+function computeHeightRange() {
+  const F = state.field;
+  let mn = Infinity, mx = -Infinity;
+  for (let i = 0; i < F.H.length; i++) { const v = F.H[i]; if (v < mn) mn = v; if (v > mx) mx = v; }
+  state.hMin = mn; state.hMax = mx;
+}
+
+/** 地形构建入口：优先 LOD 模块（terrain_lod.js），模块缺失/初始化失败自动退回老实现 */
+function buildTerrain(scene) {
+  computeHeightRange();
+  if (window.UAVTerrain && typeof UAVTerrain.create === "function" && !BASIC) {
+    try {
+      const h = UAVTerrain.create({
+        THREE, scene, camera, field: state.field,
+        world: { width: TERRAIN_W, depth: TERRAIN_D },
+        tier: TIER,
+        quality: {
+          enabled: true,
+          rings: LITE ? 3 : 5,
+          baseSpacing: null,             // null = 按 DEM/高程场格距自动算
+          ringScale: 2,
+          skirtDepth: 3.0,
+          anisotropy: LITE ? 1 : 8,
+          // 环带着色只给专门的排障参数用（?loddebug=1），不要跟 ?debug=1 混在一起，
+          // 否则调试面板一开地形就变成红绿蓝三色，误以为配色坏了
+          debugTint: QS.has("loddebug"),
+        },
+        log: function (msg) { console.log("[Terrain]", msg); },
+      });
+      if (h && h.group) {
+        terrainFX = h;
+        // 云影 shader 注入每环材质：LOD 升级不能丢掉老版本的动态云影
+        (h.materials || []).forEach(applyCloudShadow);
+        console.log("[Terrain] LOD 已启用", h.stats || "");
+        return h.group;
+      }
+    } catch (e) { console.warn("[Terrain] LOD 模块失败，退回基础地形：", e); }
+  }
+  return buildTerrainBasic(scene);
+}
+
+/**
+ * 动态云影：往 MeshStandardMaterial 注入一段随时间漂移的云噪声（按世界 XZ 采样）。
+ * 比"半透明平面"干净：不会出现一块悬空的板子，也不会有平面边缘。
+ * 抽成独立函数的原因：LOD 地形有多个环材质，每环都要注入一次，uniform 句柄统一
+ * 收集到 state.cloudUs 由 animate 推进（state.cloudU 保留给老代码兼容）。
+ */
+function applyCloudShadow(mat) {
+  if (!mat || BASIC || !RENDER.cloudShadow) return;
+  mat.onBeforeCompile = (sh) => {
+    sh.uniforms.uCloudT = { value: 0 };
+    sh.vertexShader = "varying vec2 vXZ;\n" + sh.vertexShader.replace(
+      "#include <begin_vertex>",
+      "#include <begin_vertex>\n  vXZ = (modelMatrix * vec4(position,1.0)).xz;");
+    sh.fragmentShader = "uniform float uCloudT;\nvarying vec2 vXZ;\n" + `
+      float cHash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+      float cNoise(vec2 p){
+        vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+        return mix(mix(cHash(i), cHash(i + vec2(1.0, 0.0)), f.x),
+                   mix(cHash(i + vec2(0.0, 1.0)), cHash(i + vec2(1.0, 1.0)), f.x), f.y);
+      }
+      float cFbm(vec2 p){ float v = 0.0, a = 0.5;
+        for (int k = 0; k < 4; k++) { v += a * cNoise(p); p *= 2.03; a *= 0.5; } return v; }
+    ` + sh.fragmentShader.replace(
+      "#include <color_fragment>",
+      `#include <color_fragment>
+      /* 云影频率和强度都调过：世界放大 2 倍后原来的 0.011 频率太低（云块比山还大 → 远景整片发灰发糊），
+         改成 0.028 让云影变成"小团块"，强度 0.40→0.22 避免把远景压成一块脏抹布 */
+      float cl = cFbm(vXZ * 0.028 + vec2(uCloudT * 0.013, uCloudT * 0.009));
+      float cShadow = 1.0 - smoothstep(0.46, 0.74, cl) * 0.22;
+      diffuseColor.rgb *= cShadow;`);
+    state.cloudU = sh.uniforms.uCloudT;
+    state.cloudUs.push(sh.uniforms.uCloudT);
+  };
+  mat.customProgramCacheKey = () => "terrain-cloud";
+}
+
+/* ---- 以下为升级前的基础地形实现（LOD 不可用/CPU 档时兜底） ---- */
+function buildTerrainBasic(scene) {
+  const F = state.field, N = F.N, M = F.M;
+  computeHeightRange();
+  const geo = new THREE.PlaneGeometry(TERRAIN_W, TERRAIN_D, N - 1, M - 1);
+  geo.rotateX(-Math.PI / 2);
+  const pos = geo.attributes.position;
+  const col = new Float32Array(pos.count * 3);
+  const tmp = new THREE.Color();
+
+  // ---- 颜色：按坡度分离"露岩 / 覆土"，按高程分带，按汇流画河床 ----
+  const ROCK = new THREE.Color(0x3f6a62);
+  const SOIL = new THREE.Color(0x2b4f39);
+  const DEEP = new THREE.Color(0x0a2228);
+  for (let k = 0; k < pos.count; k++) {
+    {
+      // 直接读几何体坐标：PlaneGeometry 经 rotateX 后 z 方向与索引顺序相反，
+      // 若按 j*N+i 反推会得到"Z 轴镜像"的地形（踩过的坑）。
+      const x = pos.getX(k), z = pos.getZ(k);
+      const h = terrainH(x, z);
+      pos.setY(k, h);
+      // 坡度用 terrainH 的中心差分（与采样函数完全一致）
+      const eps = CELL_X;
+      const slope = Math.hypot(
+        (terrainH(x - eps, z) - terrainH(x + eps, z)) / (2 * eps),
+        (terrainH(x, z - eps) - terrainH(x, z + eps)) / (2 * eps));
+      const steep = smoothstep(0.55, 1.5, slope);       // 陡坡比例
+
+      // 高程色调：坑底深、坡中部青绿、山顶岩灰
+      // 高程归一化用"当前场"的 min/max（兼容真实 DEM 与程序化地形）
+      const t = clamp((h - state.hMin) / Math.max(1e-6, state.hMax - state.hMin), 0, 1);
+      if (t < 0.16) tmp.copy(DEEP).lerp(new THREE.Color(0x10403a), t / 0.16);
+      else if (t < 0.42) tmp.copy(new THREE.Color(0x10403a)).lerp(new THREE.Color(0x17604f), (t - 0.16) / 0.26);
+      else if (t < 0.78) tmp.copy(new THREE.Color(0x14544a)).lerp(new THREE.Color(0x1f6b5b), (t - 0.42) / 0.36);
+      else tmp.copy(new THREE.Color(0x1f6b5b)).lerp(ROCK, (t - 0.78) / 0.22);
+
+      // 陡坡露岩、缓坡覆土
+      tmp.lerp(ROCK, steep * 0.62);
+      // 采坑内部整体偏灰（裸岩 + 粉尘）
+      const inPit = smoothstep(1.05, 0.75,
+        Math.hypot((x - PIT.cx) / PIT.rx, (z - PIT.cz) / PIT.rz));
+      tmp.lerp(new THREE.Color(0x555a56), inPit * 0.55);
+
+      // 曲率 AO：取周围 4 点均值，比自身低=凹处（沟谷/坑底）→ 压暗，模拟环境光遮蔽
+      let ao = 1.0;
+      if (RENDER.ao) {
+        const d1 = terrainH(x + 1.6, z), d2 = terrainH(x - 1.6, z);
+        const d3 = terrainH(x, z + 1.6), d4 = terrainH(x, z - 1.6);
+        const avg = (d1 + d2 + d3 + d4) / 4;
+        ao = clamp(1.0 - (avg - h) * 0.42, 0.42, 1.16);
+      }
+      const shade = (0.86 + 0.20 * (0.5 + 0.5 * Math.cos(h * 0.9))) * ao;
+      col[k * 3] = tmp.r * shade; col[k * 3 + 1] = tmp.g * shade; col[k * 3 + 2] = tmp.b * shade;
+    }
+  }
+  pos.needsUpdate = true;
+  geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
+  geo.computeVertexNormals();
+
+  const mat = BASIC
+    ? new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide })
+    : new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.94, metalness: 0.04 });
+
+  applyCloudShadow(mat);
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.receiveShadow = true; mesh.castShadow = true;
+  scene.add(mesh);
+
+  // 微风化细节线（很淡，只做"测量网格"的暗示）
+  const wireGeo = new THREE.PlaneGeometry(TERRAIN_W, TERRAIN_D, 30, 22);
+  wireGeo.rotateX(-Math.PI / 2);
+  const wp = wireGeo.attributes.position;
+  for (let i = 0; i < wp.count; i++) wp.setY(i, terrainH(wp.getX(i), wp.getZ(i)) + 0.1);
+  wp.needsUpdate = true;
+  scene.add(new THREE.Mesh(wireGeo, new THREE.MeshBasicMaterial({
+    color: 0x4ea1ff, wireframe: true, transparent: true, opacity: 0.025 })));
+  return mesh;
+}
+
+/* ============================================================ 4. 采坑水面 */
+function buildPitWater(scene) {
+  const F = state.field;
+  // 找坑底最低点，在其上方 1.2 处铺水面（模拟坑底积水）
+  let minH = 1e9;
+  /* 用**高程场自己的格距**（F.N/F.M），不要用全局 CELL_X/CELL_Z（那是程序化兜底网格的格距）——
+     世界放大后二者不再相等，用错会导致坑底最低点搜索跑到世界外面去 */
+  const ddx = TERRAIN_W / (F.N - 1), ddz = TERRAIN_D / (F.M - 1);
+  for (let j = 0; j < F.M; j++) for (let i = 0; i < F.N; i++) {
+    const x = -TERRAIN_W / 2 + i * ddx, z = -TERRAIN_D / 2 + j * ddz;
+    if (Math.hypot((x - PIT.cx) / PIT.rx, (z - PIT.cz) / PIT.rz) < 0.35) {
+      minH = Math.min(minH, F.H[j * F.N + i]);
+    }
+  }
+  const y = (minH === 1e9 ? -30 : minH) + 1.5;
+  /* 水面：原来是半径 15 的亮青色圆盘，在 LOD 地形上会像一块"悬空的泳池底"。
+     这里①做大到 21 号单位让它真的铺满坑底 ②整体压暗（深水色） ③用 uv 做边缘羽化，
+     消掉那条生硬的圆边 ④降低菲涅尔强度，避免亮边被泛光放大。 */
+  const geo = new THREE.CircleGeometry(21, 64);  geo.rotateX(-Math.PI / 2);
+  const waterMat = new THREE.ShaderMaterial({
+    transparent: true,
+    uniforms: { uTime: { value: 0 }, uTint: { value: new THREE.Color(0x1f7f78) } },
+    vertexShader: `
+      varying vec3 vW;
+      varying vec2 vUv2;
+      void main(){
+        vUv2 = uv;
+        vW = (modelMatrix * vec4(position, 1.0)).xyz;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }`,
+    fragmentShader: `
+      uniform float uTime; uniform vec3 uTint; varying vec3 vW; varying vec2 vUv2;
+      void main(){
+        float w1 = sin(vW.x * 0.55 + uTime * 1.25) * 0.5 + 0.5;
+        float w2 = sin(vW.z * 0.83 - uTime * 1.05) * 0.5 + 0.5;
+        float w3 = sin((vW.x + vW.z) * 0.37 + uTime * 0.7) * 0.5 + 0.5;
+        float w = (w1 + w2 + w3) / 3.0;
+        vec3 deep = vec3(0.012, 0.055, 0.068);
+        vec3 shal = vec3(0.035, 0.175, 0.175);
+        vec3 col = mix(deep, shal, 0.26 + 0.30 * w);
+        // 菲涅尔：视线越平越反光（强度调低，避免亮边被泛光放大）
+        vec3 V = normalize(cameraPosition - vW);
+        float fres = pow(1.0 - clamp(V.y, 0.0, 1.0), 3.2);
+        col = mix(col, uTint * 0.55 + vec3(0.01, 0.04, 0.05), fres * 0.38);
+        col += 0.035 * w * uTint;
+        // 边缘羽化：圆盘边界不要出现生硬的"盘子边"
+        float rr = length(vUv2 - vec2(0.5)) * 2.0;
+        float rim = 1.0 - smoothstep(0.72, 1.0, rr) * 0.88;
+        gl_FragColor = vec4(col, 0.88 * rim);
+      }`,
+  });
+  const water = new THREE.Mesh(geo, waterMat);
+  water.position.set(PIT.cx, y, PIT.cz);
+  water.scale.set(1.0, 1, 0.88);
+  water.renderOrder = 1;
+  scene.add(water);
+  return water;
+}
+
+/* ============================================================ 5. 植被 / 碎石 / 坡道 */
+function buildScenery(scene) {
+  const F = state.field;
+  const dummy = new THREE.Object3D();
+  const color = new THREE.Color();
+
+  // ---- 针叶树：缓坡 + 中低海拔（坡度 < 0.55） ----
+  const treeGeo = (() => {
+    const g1 = new THREE.ConeGeometry(1.6, 6.0, 7);
+    g1.translate(0, 3.0, 0);
+    const g2 = new THREE.CylinderGeometry(0.22, 0.3, 2.2, 5);
+    g2.translate(0, 1.0, 0);
+    return { crown: g1, trunk: g2 };
+  })();
+  const MAX_TREE = QUALITY.trees;
+  const crownMat = new THREE.MeshStandardMaterial({ color: 0x2c5033, roughness: 0.95, flatShading: true });
+  const trunkMat = new THREE.MeshStandardMaterial({ color: 0x40342a, roughness: 0.95 });
+  const crowns = new THREE.InstancedMesh(treeGeo.crown, crownMat, MAX_TREE);
+  const trunks = new THREE.InstancedMesh(treeGeo.trunk, trunkMat, MAX_TREE);
+  crowns.castShadow = true; trunks.castShadow = true;
+  let trees = 0;
+  let seed = 99887;
+  const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+  for (let attempt = 0; attempt < MAX_TREE * 14 && trees < MAX_TREE; attempt++) {
+    const i = 8 + Math.floor(rnd() * (F.N - 16)), j = 8 + Math.floor(rnd() * (F.M - 16));
+    const x = -TERRAIN_W / 2 + i * (TERRAIN_W / (F.N - 1)), z = -TERRAIN_D / 2 + j * (TERRAIN_D / (F.M - 1));
+    const h = F.H[j * F.N + i];
+    const hL = F.H[j * F.N + i - 1], hR = F.H[j * F.N + i + 1];
+    const hD = F.H[(j - 1) * F.N + i], hU = F.H[(j + 1) * F.N + i];
+    const slope = Math.hypot((hL - hR) / (2 * CELL_X), (hD - hU) / (2 * CELL_Z));
+    // 矿区内不长树；太陡不长；太高（雪线）不长
+    const inPit = Math.hypot((x - PIT.cx) / PIT.rx, (z - PIT.cz) / PIT.rz) < 1.08;
+    if (inPit || slope > 0.62 || h < -6 || h > 30) continue;
+    const s = 0.45 + rnd() * 0.55;
+    dummy.position.set(x, h - 0.3, z);
+    dummy.scale.set(s, s * (0.85 + rnd() * 0.5), s);
+    dummy.rotation.y = rnd() * Math.PI * 2;
+    dummy.updateMatrix();
+    crowns.setMatrixAt(trees, dummy.matrix);
+    trunks.setMatrixAt(trees, dummy.matrix);
+    color.setHSL(0.28 + rnd() * 0.05, 0.28 + rnd() * 0.12, 0.16 + rnd() * 0.10);
+    crowns.setColorAt(trees, color);
+    trees++;
+  }
+  crowns.count = trees; trunks.count = trees;
+  crowns.instanceMatrix.needsUpdate = true; trunks.instanceMatrix.needsUpdate = true;
+  if (crowns.instanceColor) crowns.instanceColor.needsUpdate = true;
+  scene.add(crowns); scene.add(trunks);
+
+  // ---- 碎石：陡坡上的岩块 ----
+  const MAX_ROCK = QUALITY.rocks;
+  const rockGeo = new THREE.DodecahedronGeometry(1.0, 0);
+  const rockMat = new THREE.MeshStandardMaterial({ color: 0x6b6f68, roughness: 0.95, flatShading: true });
+  const rocks = new THREE.InstancedMesh(rockGeo, rockMat, MAX_ROCK);
+  rocks.castShadow = true;
+  let nRock = 0;
+  seed = 555;
+  for (let attempt = 0; attempt < MAX_ROCK * 10 && nRock < MAX_ROCK; attempt++) {
+    const i = 8 + Math.floor(rnd() * (F.N - 16)), j = 8 + Math.floor(rnd() * (F.M - 16));
+    const x = -TERRAIN_W / 2 + i * (TERRAIN_W / (F.N - 1)), z = -TERRAIN_D / 2 + j * (TERRAIN_D / (F.M - 1));
+    const h = F.H[j * F.N + i];
+    const hL = F.H[j * F.N + i - 1], hR = F.H[j * F.N + i + 1];
+    const hD = F.H[(j - 1) * F.N + i], hU = F.H[(j + 1) * F.N + i];
+    const slope = Math.hypot((hL - hR) / (2 * CELL_X), (hD - hU) / (2 * CELL_Z));
+    if (slope < 0.7) continue;
+    const s = 0.35 + rnd() * 1.0;
+    dummy.position.set(x, h - s * 0.35, z);
+    dummy.scale.set(s, s * (0.5 + rnd() * 0.5), s);
+    dummy.rotation.set(rnd() * 3, rnd() * 3, rnd() * 3);
+    dummy.updateMatrix();
+    rocks.setMatrixAt(nRock++, dummy.matrix);
+  }
+  rocks.count = nRock;
+  rocks.instanceMatrix.needsUpdate = true;
+  scene.add(rocks);
+
+  // ---- 运输坡道：沿 RAMPS 每段铺一条碎石带 ----
+  const roadMat = new THREE.MeshStandardMaterial({ color: 0x5b5750, roughness: 0.98 });
+  RAMPS.forEach(r => {
+    const vx = r.x1 - r.x0, vz = r.z1 - r.z0;
+    const len = Math.hypot(vx, vz);
+    const nx = -vz / len, nz = vx / len;      // 法向
+    const segs = 14;
+    const verts = [], idxs = [];
+    for (let s = 0; s <= segs; s++) {
+      const t = s / segs;
+      const px = r.x0 + vx * t, pz = r.z0 + vz * t;
+      const py = lerp(r.y0, r.y1, t);
+      const w = r.halfW * 0.86;
+      verts.push(px + nx * w, py + 0.25, pz + nz * w);
+      verts.push(px - nx * w, py + 0.25, pz - nz * w);
+    }
+    for (let s = 0; s < segs; s++) {
+      const a = s * 2, b = a + 1, c = a + 2, d = a + 3;
+      idxs.push(a, b, c, b, d, c);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
+    g.setIndex(idxs);
+    g.computeVertexNormals();
+    scene.add(new THREE.Mesh(g, roadMat));
+  });
+
+  return { trees, rocks: nRock };
+}
+
+/* ============================================================ 5b. 扫描覆盖热力图 */
+/**
+ * 把无人机实际扫过的区域画进一张 CanvasTexture，贴在地形上方。
+ * 用来直观回答"这次架次到底覆盖了测区多少面积"——这是真实航测系统必备的成果图。
+ */
+let coverage = null;
+function buildCoverage(scene) {
+  const cv = document.createElement("canvas");
+  cv.width = 896; cv.height = 640;
+  const ctx = cv.getContext("2d");
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.minFilter = THREE.LinearFilter;
+  /* 贴合精度：原来是 110×80 的粗网格，比地形网格粗得多 —— 在 LOD 地形上会和地表互相穿插，
+     出现"大片惨白/条纹"（2026-11 实测踩坑）。这里加密到 240×170 + 抬高 0.9 单位 + 多边形偏移，
+     三重手段保证它始终"贴"在地表之上而不是切进地形里。 */
+  const geo = new THREE.PlaneGeometry(TERRAIN_W, TERRAIN_D, 360, 260);
+  geo.rotateX(-Math.PI / 2);
+  const pp = geo.attributes.position;
+  for (let i = 0; i < pp.count; i++) pp.setY(i, terrainH(pp.getX(i), pp.getZ(i)) + 0.9);
+  pp.needsUpdate = true;
+  const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+    map: tex, transparent: true, opacity: 0.34, depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
+  }));
+  mesh.visible = false;
+  mesh.renderOrder = 2;
+  scene.add(mesh);
+  return { cv, ctx, tex, mesh, last: 0, marks: 0 };
+}
+
+/** 清空覆盖热力图：每次开始新仿真时调用，避免上一轮/待机期的"盖章"叠加成一片白 */
+function resetCoverage() {
+  if (!coverage) return;
+  coverage.ctx.clearRect(0, 0, coverage.cv.width, coverage.cv.height);
+  coverage.tex.needsUpdate = true;
+  coverage.mesh.visible = false;
+  coverage.marks = 0;
+}
+
+function markCoverage(x, z, r) {
+  if (!coverage) return;
+  const { ctx, cv } = coverage;
+  const px = (x + TERRAIN_W / 2) / TERRAIN_W * cv.width;
+  const py = (z + TERRAIN_D / 2) / TERRAIN_D * cv.height;
+  const rr = r / TERRAIN_W * cv.width;
+  const g = ctx.createRadialGradient(px, py, 0, px, py, rr);
+  /* 加色混合会不断累加：单次盖章必须很淡，否则几十秒后整片地表被刷成白色（初版 0.30 实测过曝） */
+  g.addColorStop(0, "rgba(90,255,236,0.11)");
+  g.addColorStop(0.55, "rgba(50,200,220,0.045)");
+  g.addColorStop(1, "rgba(0,0,0,0)");
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(px, py, rr, 0, Math.PI * 2); ctx.fill();
+  coverage.marks++;
+  coverage.tex.needsUpdate = true;
+  coverage.mesh.visible = true;
+}
+
+/* ============================================================ 5c. 远景（大地基底 + 环形山脊） */
+/**
+ * 只有一块 176×128 的地形时，场景会像"悬空的孤岛"，非常出戏。
+ * 这里补两层远景：
+ *   ① 大地基底：一块巨大的暗色圆盘垫在最低高程以下，让地形"坐"在地上
+ *   ② 环形远山：46 个低模山体在半径 230~430 处围一圈，被雾吃掉细节，只留剪影
+ */
+function buildBackdrop(scene) {
+  const F = state.field;
+  let hMin = Infinity;
+  for (let i = 0; i < F.H.length; i++) if (F.H[i] < hMin) hMin = F.H[i];
+  const baseY = hMin - 1.6;
+
+  const ground = new THREE.Mesh(
+    new THREE.CircleGeometry(2600, 80).rotateX(-Math.PI / 2),
+    new THREE.MeshStandardMaterial({ color: 0x0b2026, roughness: 1.0, metalness: 0.0 }));
+  ground.position.y = baseY;
+  ground.receiveShadow = false;
+  scene.add(ground);
+
+  const COUNT = 56;
+  const geo = new THREE.ConeGeometry(1, 1, 5, 1);   // 低模五棱锥，够远看不出
+  /* 2026-11 实测：环形山放在 260~440 太近，跟随/环绕机位下会变成压在头顶的"大块平板三角形"。
+     推到 620~1000 并压矮成"一层远山剪影"（高 45~110），配合雾只留淡淡轮廓，不再抢画面。 */
+  const mat = new THREE.MeshStandardMaterial({ color: 0x123033, roughness: 1.0, metalness: 0.0,
+    flatShading: true });
+  const ring = new THREE.InstancedMesh(geo, mat, COUNT);
+  const dm = new THREE.Object3D();
+  let seed = 4242;
+  const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+  for (let i = 0; i < COUNT; i++) {
+    const a = (i / COUNT) * Math.PI * 2 + rnd() * 0.10;
+    const r = 900 + rnd() * 700;
+    const w = 300 + rnd() * 420;
+    const h = 90 + rnd() * 150;
+    dm.position.set(Math.cos(a) * r, baseY + h / 2 - 6, Math.sin(a) * r);
+    dm.scale.set(w, h, w * (0.8 + rnd() * 0.5));
+    dm.rotation.y = rnd() * Math.PI;
+    dm.updateMatrix();
+    ring.setMatrixAt(i, dm.matrix);
+  }
+  ring.instanceMatrix.needsUpdate = true;
+  scene.add(ring);
+  return { ground, ring };
+}
+
+/* ============================================================ 6. 天空 */
+function buildSky(scene) {
+  const geo = new THREE.SphereGeometry(2800, 40, 24);
+  const mat = new THREE.ShaderMaterial({
+    side: THREE.BackSide, depthWrite: false,
+    uniforms: {
+      top: { value: new THREE.Color(0x050a16) },
+      mid: { value: new THREE.Color(0x0d1c30) },
+      bot: { value: new THREE.Color(0x1c3341) },
+    },
+    vertexShader: `varying float vY; void main(){ vY = normalize(position).y; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
+    fragmentShader: `uniform vec3 top; uniform vec3 mid; uniform vec3 bot; varying float vY;
+      void main(){ float y = vY;
+        vec3 c = y > 0.06 ? mix(mid, top, smoothstep(0.06, 0.85, y)) : mix(bot, mid, smoothstep(-0.25, 0.06, y));
+        gl_FragColor = vec4(c, 1.0); }`,
+  });
+  const skyMesh = new THREE.Mesh(geo, mat);
+  scene.add(skyMesh);
+  state.skyMat = mat;
+
+  // 星空（只在地平线以上）
+  const sg = new THREE.BufferGeometry();
+  const N = 900, arr = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++) {
+    const r = 2100 + Math.random() * 500;
+    const th = Math.random() * Math.PI * 2;
+    const ph = 0.06 + Math.random() * Math.PI * 0.46;
+    arr[i * 3] = Math.cos(th) * Math.cos(ph) * r;
+    arr[i * 3 + 1] = Math.sin(ph) * r;
+    arr[i * 3 + 2] = Math.sin(th) * Math.cos(ph) * r;
+  }
+  sg.setAttribute("position", new THREE.BufferAttribute(arr, 3));
+  scene.add(new THREE.Points(sg, new THREE.PointsMaterial({
+    color: 0xbcd4ff, size: 1.5, sizeAttenuation: true, transparent: true, opacity: 0.55,
+    depthWrite: false })));
+}
+
+/* ============================================================ 7. 地面站 */
+function makeTextSprite(text, opt) {
+  opt = opt || {};
+  const fs = opt.fontSize || 30, pad = 9;
+  const cv = document.createElement("canvas");
+  const c0 = cv.getContext("2d");
+  c0.font = "600 " + fs + "px 'Microsoft YaHei',sans-serif";
+  const w = Math.ceil(c0.measureText(text).width) + pad * 2, h = fs + pad * 2;
+  cv.width = w; cv.height = h;
+  const g = cv.getContext("2d");
+  g.font = "600 " + fs + "px 'Microsoft YaHei',sans-serif";
+  g.textBaseline = "middle";
+  g.fillStyle = opt.bg || "rgba(5,14,24,.78)";
+  g.strokeStyle = opt.border || "rgba(78,161,255,.55)";
+  g.lineWidth = 3;
+  const rr = 9;
+  g.beginPath();
+  g.moveTo(rr, 0); g.lineTo(w - rr, 0); g.quadraticCurveTo(w, 0, w, rr);
+  g.lineTo(w, h - rr); g.quadraticCurveTo(w, h, w - rr, h);
+  g.lineTo(rr, h); g.quadraticCurveTo(0, h, 0, h - rr);
+  g.lineTo(0, rr); g.quadraticCurveTo(0, 0, rr, 0); g.closePath();
+  g.fill(); g.stroke();
+  g.fillStyle = opt.color || "#a9ecff";
+  g.fillText(text, pad, h / 2 + 1);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.minFilter = THREE.LinearFilter;
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false }));
+  const s = opt.scale || 0.05;
+  sp.scale.set(w * s, h * s, 1);
+  return sp;
+}
+
+function buildStation(scene) {
+  const g = new THREE.Group();
+  g.position.set(STATION_XZ.x, PAD_H, STATION_XZ.z);
+
+  const plat = new THREE.Mesh(new THREE.CylinderGeometry(10, 11.5, 1.6, 12),
+    new THREE.MeshStandardMaterial({ color: 0x2a2f33, roughness: 0.85, metalness: 0.25 }));
+  plat.position.y = 0.8; plat.receiveShadow = true; plat.castShadow = true;
+  g.add(plat);
+
+  // 停机坪标记
+  const mark = new THREE.Mesh(new THREE.RingGeometry(6.2, 7.4, 40),
+    new THREE.MeshBasicMaterial({ color: 0xf5a623, transparent: true, opacity: 0.35,
+      side: THREE.DoubleSide }));
+  mark.rotation.x = -Math.PI / 2; mark.position.y = 1.62;
+  g.add(mark);
+
+  const rack = new THREE.Mesh(new THREE.BoxGeometry(5.4, 3.6, 3.0),
+    new THREE.MeshStandardMaterial({ color: 0x36424e, roughness: 0.6, metalness: 0.5 }));
+  rack.position.set(-4.2, 3.4, 1.6); rack.castShadow = true;
+  g.add(rack);
+  for (let i = 0; i < 6; i++) {
+    const led = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.15, 0.06),
+      new THREE.MeshBasicMaterial({ color: i % 2 ? C.ok : C.blue }));
+    led.position.set(-6.6, 2.4 + i * 0.4, 3.1);
+    g.add(led);
+  }
+
+  const towerMat = new THREE.MeshStandardMaterial({ color: 0x6a747c, roughness: 0.65, metalness: 0.55 });
+  const tower = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.55, 16, 8), towerMat);
+  tower.position.y = 8.5; tower.castShadow = true;
+  g.add(tower);
+  for (let i = 1; i <= 3; i++) {
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.95, 0.07, 6, 18), towerMat);
+    ring.rotation.x = Math.PI / 2; ring.position.y = 3.4 + i * 3.4;
+    g.add(ring);
+  }
+  const dish = new THREE.Mesh(
+    new THREE.SphereGeometry(2.2, 22, 12, 0, Math.PI * 2, 0, Math.PI / 2.5),
+    new THREE.MeshStandardMaterial({ color: 0xc8d4dc, roughness: 0.35, metalness: 0.8,
+      side: THREE.DoubleSide }));
+  dish.position.y = 17.0; dish.rotation.x = -0.55;
+  g.add(dish);
+  const beacon = new THREE.Mesh(new THREE.SphereGeometry(0.38, 12, 12),
+    new THREE.MeshBasicMaterial({ color: C.cyan }));
+  beacon.position.y = 18.2; g.add(beacon);
+
+  const halo = new THREE.Mesh(new THREE.RingGeometry(12, 13.8, 72),
+    new THREE.MeshBasicMaterial({ color: C.cyan, transparent: true, opacity: 0.22,
+      side: THREE.DoubleSide, blending: THREE.AdditiveBlending }));
+  halo.rotation.x = -Math.PI / 2; halo.position.y = 1.66;
+  g.add(halo);
+
+  /* 地面站光柱：原来半径 2.6~6、高 36、加色 0.075，叠加泛光后会在近景变成一根"白柱子"，
+     抢掉整个画面的视觉重心。压细、压矮、压淡，只保留"有信号在发射"的暗示。 */
+  const beam = new THREE.Mesh(new THREE.CylinderGeometry(1.1, 2.2, 13, 16, 1, true),
+    new THREE.MeshBasicMaterial({ color: C.cyan, transparent: true, opacity: 0.018,
+      blending: THREE.AdditiveBlending, side: THREE.DoubleSide, depthWrite: false }));
+  beam.position.y = 6.5; g.add(beam);
+
+  const lab = makeTextSprite("地面站 · 调度服务器", { fontSize: 30, scale: 0.05 });
+  lab.position.y = 23; g.add(lab);
+
+  g.userData = { halo, beacon, beam };
+  scene.add(g);
+  return g;
+}
+
+function buildQueueTowers(scene) {
+  const mk = (x, z, color, name) => {
+    const grp = new THREE.Group();
+    grp.position.set(x, terrainH(x, z) + 0.3, z);
+    const base = new THREE.Mesh(new THREE.CylinderGeometry(2.4, 2.9, 0.6, 12),
+      new THREE.MeshStandardMaterial({ color: 0x1b2024, roughness: 0.9, metalness: 0.3 }));
+    base.position.y = 0.3; grp.add(base);
+    const bar = new THREE.Mesh(new THREE.BoxGeometry(1.7, 1, 1.7),
+      /* 光柱：用饱和色 + 较高不透明度的 MeshBasic（不参与光照/泛光），
+         看起来是"定色的队列柱"而不是半透明玻璃板；亮度低于泛光阈值不会被洗白 */
+      new THREE.MeshBasicMaterial({ color: new THREE.Color(color).multiplyScalar(0.9),
+        transparent: true, opacity: 0.82, depthWrite: true }));
+    bar.castShadow = true; grp.add(bar);
+    const label = makeTextSprite(name + " 0", { fontSize: 26, scale: 0.040, color: "#d6ecff" });
+    grp.add(label);
+    scene.add(grp);
+    return { grp, bar, label, name, txt: name + " 0" };
+  };
+  return { high: mk(-44, 52, C.blue, "高优队列"), low: mk(44, 52, C.amber, "低优队列") };
+}
+
+/* ============================================================ 8. 无人机 */
+/**
+ * 无人机构建入口：优先用细化模型模块（uav_model.js：桨叶运动模糊 / 云台跟随 / 起落架收放），
+ * 模块缺失或初始化失败时退回升级前的基础模型 —— 保证 30 架机任何时候都能飞起来。
+ */
+function makeDrone() {
+  if (window.UAVModel && typeof UAVModel.create === "function") {
+    try {
+      const g = UAVModel.create({
+        THREE, tier: TIER,
+        quality: { rotorDisc: !LITE, bladeSeg: LITE ? 2 : 3, gimbal: true, gear: true, led: true, cone: true },
+        log: function (msg) { console.log("[UAV]", msg); },
+      });
+      if (g && g.userData) return g;
+    } catch (e) { console.warn("[UAV] 细化模型失败，退回基础模型：", e); }
+  }
+  return makeDroneBasic();
+}
+
+/* ---- 升级前的基础模型（兜底实现） ---- */
+function makeDroneBasic() {
+  const g = new THREE.Group();
+  const metal = new THREE.MeshStandardMaterial({ color: 0xa8b6c2, roughness: 0.38, metalness: 0.82 });
+  const dark = new THREE.MeshStandardMaterial({ color: 0x2b333a, roughness: 0.55, metalness: 0.65 });
+
+  const body = new THREE.Mesh(new THREE.BoxGeometry(2.1, 0.42, 2.1), metal);
+  g.add(body);
+  const nose = new THREE.Mesh(new THREE.BoxGeometry(0.85, 0.34, 0.9), dark);
+  nose.position.set(0, 0.04, 1.2); g.add(nose);
+  // 相机云台（下挂）
+  const gimbal = new THREE.Mesh(new THREE.SphereGeometry(0.34, 12, 10), dark);
+  gimbal.position.set(0, -0.36, 0.5); g.add(gimbal);
+
+  const rotors = [];
+  [[1, 1], [1, -1], [-1, 1], [-1, -1]].forEach(([sx, sz]) => {
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(2.3, 0.12, 0.19), metal);
+    arm.position.set(sx * 1.05, 0, sz * 1.05);
+    arm.rotation.y = Math.atan2(sz, sx);
+    g.add(arm);
+    const motor = new THREE.Mesh(new THREE.CylinderGeometry(0.23, 0.23, 0.34, 10), dark);
+    motor.position.set(sx * 2.2, 0.16, sz * 2.2); g.add(motor);
+    const rotor = new THREE.Mesh(new THREE.CylinderGeometry(0.95, 0.95, 0.045, 16),
+      new THREE.MeshStandardMaterial({ color: 0xc2d4e2, transparent: true, opacity: 0.4,
+        metalness: 0.9, roughness: 0.15 }));
+    rotor.position.set(sx * 2.2, 0.35, sz * 2.2); g.add(rotor);
+    rotors.push(rotor);
+    const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.055, 0.72, 6), dark);
+    leg.position.set(sx * 0.88, -0.56, sz * 0.88); g.add(leg);
+  });
+
+  const ledMat = new THREE.MeshBasicMaterial({ color: C.ok });
+  const led = new THREE.Mesh(new THREE.SphereGeometry(0.24, 12, 12), ledMat);
+  led.position.y = -0.3; g.add(led);
+
+  const coneMat = new THREE.MeshBasicMaterial({ color: C.cyan, transparent: true, opacity: 0,
+    blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
+  const cone = new THREE.Mesh(new THREE.ConeGeometry(4.2, 13, 18, 1, true), coneMat);
+  cone.position.y = -6.9;
+  g.add(cone);
+
+  g.userData = { rotors, led, ledMat, cone, coneMat };
+  return g;
+}
+
+/**
+ * 真实航测航线：**蛇形（boustrophedon）往返** + 恒定离地高度（AGL）+ 转弯压坡。
+ * 每个架次负责一块矩形测区，按条带（strip）往复扫描 —— 这就是航测/摄影测量的标准扫法。
+ */
+const FLIGHT = {
+  strips: 3,          // 每架机负责的条带数
+  speed: 7.0,         // 飞行速度（世界单位/秒，示意）
+  agl: 24,            // 离地高度（AGL）
+  cellX: 34,          // 每架机测区宽（世界放大 2 倍后，单机探测/测绘范围也相应加大）
+  cellZ: 30,          // 每架机测区深
+};
+function buildFleet(scene, n) {
+  const out = [];
+  const cols = 8, rows = Math.max(1, Math.ceil(n / cols));
+  /* 机群铺满整个矿区（世界 352×256），不再挤在中心 128×64 的一小块里 */
+  const x0 = -150, x1 = 150, z0 = -95, z1 = 40;
+  for (let i = 0; i < n; i++) {
+    const c = i % cols, r = Math.floor(i / cols);
+    const cx = cols === 1 ? 0 : x0 + (x1 - x0) * (c / (cols - 1));
+    const cz = rows === 1 ? 0 : z0 + (z1 - z0) * (r / (rows - 1));
+
+    const grp = makeDrone();
+    grp.scale.setScalar(1.5);
+    /* 扫描锥放大：世界做成 2 倍边长后，单机"探测/测绘覆盖范围"也要跟着变大，
+       否则从空中看每架机只盖一个小点，体现不出集群大范围作业 */
+    if (grp.userData && grp.userData.cone) grp.userData.cone.scale.set(1.8, 1.8, 1.8);
+    scene.add(grp);
+
+    const ring = new THREE.Mesh(new THREE.RingGeometry(2.2, 2.9, 26),
+      new THREE.MeshBasicMaterial({ color: C.cyan, transparent: true, opacity: 0.18,
+        side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false }));
+    ring.rotation.x = -Math.PI / 2;
+    scene.add(ring);
+
+    const trailGeo = new THREE.BufferGeometry();
+    trailGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(28 * 3), 3));
+    const trail = new THREE.Line(trailGeo, new THREE.LineBasicMaterial({
+      color: 0x2ea8ff, transparent: true, opacity: 0.28, blending: THREE.AdditiveBlending }));
+    scene.add(trail);
+
+    const linkGeo = new THREE.BufferGeometry();
+    linkGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(6), 3));
+    const linkMat = new THREE.LineBasicMaterial({ color: C.ok, transparent: true,
+      opacity: 0, blending: THREE.AdditiveBlending });
+    const link = new THREE.Line(linkGeo, linkMat);
+    scene.add(link);
+    const bead = new THREE.Mesh(new THREE.SphereGeometry(0.42, 10, 10),
+      new THREE.MeshBasicMaterial({ color: 0xd8fff0, transparent: true, opacity: 0,
+        blending: THREE.AdditiveBlending }));
+    scene.add(bead);
+
+    const tag = makeTextSprite("UAV-" + (i + 1), { fontSize: 20, scale: 0.030,
+      color: "#bfe6ff", bg: "rgba(4,12,22,.55)", border: "rgba(78,161,255,.35)" });
+    scene.add(tag);
+
+    out.push({
+      id: i + 1, group: grp, rotors: grp.userData.rotors, led: grp.userData.led,
+      ledMat: grp.userData.ledMat, cone: grp.userData.cone, coneMat: grp.userData.coneMat,
+      cell: { x: cx, z: cz }, phase: (i * 0.377) % 1,
+      ring, trail, trailPos: [], link, linkMat, bead, tag,
+      busy: false, health: 100, online: true, priority: null, progress: 0,
+      pos: new THREE.Vector3(cx, 40, cz), prev: new THREE.Vector3(cx, 40, cz),
+    });
+  }
+  return out;
+}
+
+/** 蛇形航线参数化：s ∈ [0,1) 映射到测区内的 (dx,dz)，配合大地图坐标 */
+function serpentine(u, cellW, cellD, strips) {
+  // 归一化总路径：strips 条沿 X 的横向条带，条带之间用半圆转弯
+  const seg = 1 / strips;
+  const k = Math.min(strips - 1, Math.floor(u / seg));
+  const t = (u - k * seg) / seg;
+  const z = (k + 0.5) / strips;                 // 条带中心（0..1）
+  const forward = k % 2 === 0;
+  const x = forward ? t : 1 - t;
+  return { x: (x - 0.5) * cellW, z: (z - 0.5) * cellD, strip: k, dir: forward ? 1 : -1 };
+}
+
+/* ============================================================ 9. 点云 */
+function buildPointCloud(scene, max) {
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(max * 3), 3));
+  geo.setDrawRange(0, 0);
+  const pts = new THREE.Points(geo, new THREE.PointsMaterial({
+    color: 0x7ff8ea, size: 0.34, sizeAttenuation: true, transparent: true,
+    opacity: 0.95, depthWrite: false, blending: THREE.AdditiveBlending }));
+  scene.add(pts);
+  return { geo, idx: 0, max };
+}
+function emitPoint(pc, x, z, spread) {
+  const p = pc.geo.attributes.position;
+  p.setXYZ(pc.idx % pc.max,
+    x + (Math.random() - 0.5) * spread,
+    terrainH(x, z) + 0.35 + Math.random() * 0.8,
+    z + (Math.random() - 0.5) * spread);
+  pc.idx++;
+  p.needsUpdate = true;
+  pc.geo.setDrawRange(0, Math.min(pc.idx, pc.max));
+}
+
+/* ============================================================ 10. 场景 */
+let renderer, scene, camera, controls, composer;let station, towers, pc, surveyGrid, water;
+/* 升级模块句柄（初始化失败时保持 null，主场景必须继续可跑） */
+let ssaoFX = null, terrainFX = null, hudFX = null, weatherFX = null;
+
+/**
+ * 升级模块初始化（SSAO / 天气 / HUD）。全部 try/catch 包裹：
+ * 任何一个新模块失败都不许影响主场景 —— 课程演示时"能跑"比"全都要"重要。
+ */
+function initUpgradeModules() {
+  // ① SSAO：必须在 composer 建好之后装（插在 RenderPass 之后、Bloom 之前）
+  if (composer && RENDER.ao && !BASIC && window.UAVSSAO && typeof UAVSSAO.install === "function") {
+    try {
+      ssaoFX = UAVSSAO.install({
+        THREE, renderer, scene, camera, composer, tier: TIER,
+        // radius/bias/contrast 取 SSAO 模块作者在 dev 页实测的推荐值：
+        // radius 是世界单位（视空间），0.55 在主场景尺度下几乎看不出接触阴影；2.6 + bias 0.04 才明显
+        quality: { enabled: true, strength: 0.92, radius: 2.6, samples: LITE ? 16 : 18,
+                   halfRes: true, blur: true, bias: 0.04, contrast: 1.6,
+                   minViewZ: 0.6, maxViewZ: 460 },
+        log: function (m) { console.log("[SSAO]", m); },
+      });
+      console.log("[SSAO]", ssaoFX ? "已启用（屏幕空间接触阴影）" : "本机不可用，已跳过");
+    } catch (e) { console.warn("[SSAO] 安装失败：", e); ssaoFX = null; }
+  }
+  // ② 天气：粒子 + 能见度雾（需要太阳/半球光句柄，用来做天气下的光照衰减）
+  if (window.UAVWeather && typeof UAVWeather.create === "function") {
+    try {
+      weatherFX = UAVWeather.create({
+        THREE, scene, camera, renderer, sun: state.sun, hemi: state.hemi, skyMat: state.skyMat, tier: TIER,
+        quality: { particles: LITE ? 1200 : QUALITY.particles, range: 90, sizeScale: 1, instant: STILL },
+        log: function (m) { console.log("[Weather]", m); },
+      });
+    } catch (e) { console.warn("[Weather] 初始化失败：", e); weatherFX = null; }
+  }
+  // ③ HUD：任务流向箭头 + 队列三维瀑布图
+  if (window.UAVHUD && typeof UAVHUD.create === "function") {
+    try {
+      hudFX = UAVHUD.create({
+        THREE, scene, camera, world: { width: TERRAIN_W, depth: TERRAIN_D },
+        stationTop: UPLINK_TOP, makeTextSprite: makeTextSprite, tier: TIER,
+        quality: { maxArrows: LITE ? 90 : 240, waterfallSlots: LITE ? 40 : 90,
+                   heightScale: 0.13, waterfallScale: 1.0, fpsBudgetMs: 1.5 },
+        log: function (m) { console.log("[HUD]", m); },
+      });
+    } catch (e) { console.warn("[HUD] 初始化失败：", e); hudFX = null; }
+  }
+  // ④ 时段基准交给天气模块（此后切"黎明/正午/黄昏/夜景"由 applyTOD 重新下发）
+  if (weatherFX && state.tod && TOD[state.tod]) {
+    try {
+      weatherFX.setTod({ fogColor: TOD[state.tod].fog, sunIntensity: TOD[state.tod].sunInt,
+                         exposure: TOD[state.tod].exp });
+    } catch (e) { /* 忽略：天气模块版本差异 */ }
+  }
+  syncUpgradeButtons();
+  // 收集场景里的文字 sprite（地面站/队列光柱/无人机编号/HUD 标签），之后每帧做距离自适应
+  try { collectSprites(); } catch (eSp) { console.warn("[Sprite] 收集失败：", eSp); }
+}
+
+/**
+ * 文字 sprite 的距离自适应。
+ * 原实现在世界里给 sprite 一个固定尺寸 —— 相机一贴近（矿区/跟随机位），"地面站·调度服务器"
+ * 这种标签会被放大到半个屏幕，看起来像渲染坏了。这里每帧按"相机到 sprite 的距离"等比缩放，
+ * 让它们在屏幕上尺寸基本恒定（近距离略大、远距离略小），符合 HUD 的阅读习惯。
+ */
+const SPRITES = [];
+const _spTmp = new THREE.Vector3();
+function collectSprites() {
+  SPRITES.length = 0;
+  if (!scene) return;
+  scene.traverse(function (o) {
+    if (o.isSprite) {
+      /* 基准尺寸必须分别保存宽/高：文字 sprite 是宽条 canvas（标题可达 10:1），
+         如果 x/y 用同一个系数缩放，文字会被纵向拉伸成"大方块"（2026-11 实测踩坑） */
+      if (!o.userData.__spriteBase) {
+        o.userData.__spriteBase = {
+          x: Math.max(1e-4, o.scale.x || 1),
+          y: Math.max(1e-4, o.scale.y || 1)
+        };
+      }
+      SPRITES.push(o);
+    }
+  });
+}
+function fitSprites() {
+  if (!camera) return;
+  /* REF = 设计参考距离：这些 sprite 的世界尺寸是按「立体视角（相机距离 ~190）」调的，
+     在那个距离上看起来正合适。之后按 d/REF 等比缩放，屏幕上大小就基本恒定。
+     注意：sprite 默认 sizeAttenuation=true，本身已经按 1/d 缩小，所以这里再乘 d/REF
+     得到的是"屏幕尺寸恒定"的结果（而不是又放大一次）。宽高分别乘，保持原始宽高比。 */
+  const REF = 190;
+  for (let i = 0; i < SPRITES.length; i++) {
+    const sp = SPRITES[i];
+    if (!sp.parent) continue;                 // 已经被移除的旧标签（队列光柱标签会重建）
+    sp.getWorldPosition(_spTmp);
+    const d = camera.position.distanceTo(_spTmp);
+    const k = clamp(d / REF, 0.05, 2.2);
+    const b = sp.userData.__spriteBase || { x: 1, y: 1 };
+    sp.scale.set(b.x * k, b.y * k, 1);
+  }
+}
+
+function initScene() {
+  const fail = (msg) => {
+    document.getElementById("loading").innerHTML =
+      '<div class="e">3D 场景初始化失败：' + msg +
+      '<br>请确认 WebView2/浏览器支持 WebGL2，或更新显卡驱动。</div>';
+  };
+  try {
+    renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance",
+      preserveDrawingBuffer: STILL });   // 静态模式保留缓冲，否则截图会抓到已清空的画布
+  } catch (e) { fail(e.message); return; }
+
+  renderer.setPixelRatio(Math.min(devicePixelRatio || 1, RENDER.maxPixelRatio));
+  renderer.setSize(innerWidth, innerHeight);
+  renderer.shadowMap.enabled = RENDER.shadows;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  if (THREE.sRGBEncoding) renderer.outputEncoding = THREE.sRGBEncoding;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 0.95;
+  document.getElementById("app").appendChild(renderer.domElement);
+
+  scene = new THREE.Scene();
+  scene.fog = new THREE.FogExp2(0x0b1a26, 0.0016);
+
+  camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.5, 5200);
+  camera.position.set(190, 130, 250);
+
+  controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.target.set(-10, -12, -12);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.075;
+  controls.minDistance = 50;
+  controls.maxDistance = 760;
+  controls.maxPolarAngle = Math.PI * 0.487;
+  controls.autoRotateSpeed = 0.5;
+  controls.update();
+
+  // ---- 光照：低角度太阳（长阴影更真实）+ 冷色天光 + 蓝色补光 ----
+  const hemi = new THREE.HemisphereLight(0x9ec8ff, 0x1a1a14, 0.52);
+  scene.add(hemi);
+  state.hemi = hemi;
+  const sun = new THREE.DirectionalLight(0xffe9c4, 1.00);
+  sun.position.set(240, 172, 108);
+  sun.castShadow = RENDER.shadows;
+  sun.shadow.mapSize.set(RENDER.shadowMap, RENDER.shadowMap);
+  const d = 216;
+  sun.shadow.camera.left = -d; sun.shadow.camera.right = d;
+  sun.shadow.camera.top = d; sun.shadow.camera.bottom = -d;
+  sun.shadow.camera.near = 1; sun.shadow.camera.far = 900;
+  sun.shadow.bias = -0.0011;
+  if ('normalBias' in sun.shadow) sun.shadow.normalBias = 0.05;
+  scene.add(sun);
+  state.sun = sun;
+  const fill = new THREE.DirectionalLight(0x4a86c8, 0.35);
+  fill.position.set(-220, 100, -160); scene.add(fill);
+
+  // ---- 生成地形（含侵蚀，耗时约 1s，加载页挡住） ----
+  const _step = (txt) => { const el = document.querySelector("#loading .t"); if (el) el.textContent = txt; };
+  _step("① 构建高程场…");
+  state.field = state.dem ? buildFieldFromDEM(state.dem) : buildHeightfield();
+  if (BASIC) {
+    scene.background = new THREE.Color(0x556677);
+    scene.fog = null;
+    scene.add(new THREE.AmbientLight(0xffffff, 1.0));
+  } else {
+    _step("② 天空与地形网格…");
+  buildSky(scene);
+  }
+  _step("③ 地形着色…");
+  buildTerrain(scene);
+  _step("④ 水面…");
+  water = buildPitWater(scene);
+  coverage = buildCoverage(scene);
+  buildBackdrop(scene);
+  _step("⑤ 植被与碎石…");
+  const scenery = buildScenery(scene);
+  surveyGrid = buildSurveyGrid(scene);
+  _step("⑥ 地面站…");
+  station = buildStation(scene);
+  towers = buildQueueTowers(scene);
+  pc = buildPointCloud(scene, RENDER.pointCloudMax);
+
+  /* 注意：升级模块（SSAO/天气/HUD）必须等 composer 建好、机群也建好之后再初始化，
+     而且**只能调用一次**（之前重复调用会导致 SSAO 装两遍、HUD 标题叠两份、天气粒子翻倍）。 */
+  try {
+    if (RENDER.bloomStrength <= 0) throw new Error("CPU 档关闭泛光");
+    composer = new THREE.EffectComposer(renderer);
+    composer.addPass(new THREE.RenderPass(scene, camera));
+    composer.addPass(new THREE.UnrealBloomPass(
+      new THREE.Vector2(innerWidth, innerHeight),
+      RENDER.bloomStrength, RENDER.bloomRadius, RENDER.bloomThreshold));
+  } catch (e) {
+    console.warn("泛光后处理不可用，退回直接渲染：", e);
+    composer = null;
+  }
+
+  _step("⑦ 机群…");
+  state.drones = buildFleet(scene, 30);
+  console.log(`[terrain] ${HF_NX}×${HF_NZ} 格，树 ${scenery.trees}，碎石 ${scenery.rocks}`);
+
+  // ---- 升级模块（SSAO / 天气 / HUD）：失败自动降级 ----
+  _step("⑧ 渲染增强…");
+  initUpgradeModules();
+
+  addEventListener("resize", () => {
+    camera.aspect = innerWidth / innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+    if (composer) composer.setSize(innerWidth, innerHeight);
+    if (ssaoFX && ssaoFX.setSize) { try { ssaoFX.setSize(innerWidth, innerHeight); } catch (e) {} }
+  });
+
+  const el = document.getElementById("loading");
+  el.style.opacity = "0";
+  setTimeout(() => { el.style.display = "none"; }, 500);
+
+  if (DEBUG) {
+    /* 自动化验收/CDP 调试钩子：把场景对象暴露到 window，便于无头浏览器 raycast 定位"这块像素到底是什么" */
+    try {
+      window.__DBG = { THREE: THREE, scene: scene, camera: camera, renderer: renderer,
+                       state: state, controls: controls, terrain: terrainFX, hud: hudFX,
+                       weather: weatherFX, ssao: ssaoFX,
+                       hide: function (name) {   // 临时隐藏一个场景对象/组（排障用）
+                         var n = 0;
+                         scene.traverse(function (o) {
+                           if ((o.name || "").indexOf(name) >= 0) { o.visible = false; n++; }
+                         });
+                         return n;
+                       } };
+    } catch (eDBG) { console.warn("__DBG 暴露失败", eDBG); }
+    const d = document.createElement("div");
+    d.id = "dbg";
+    d.style.cssText = "position:fixed;left:12px;top:600px;z-index:99;color:#7ef9e8;" +
+      "font:12px/1.7 monospace;background:rgba(0,0,0,.72);padding:8px 10px;border:1px solid #37e2d5;border-radius:6px;max-width:520px;white-space:pre";
+    document.body.appendChild(d);
+    try {
+      const b = new THREE.Box3().setFromObject(scene);
+      d.textContent = [
+        "children=" + scene.children.length + "  drones=" + state.drones.length,
+        "field=" + (state.field ? state.field.N + "x" + state.field.M : "null"),
+        "camera=(" + camera.position.toArray().map(v => v.toFixed(1)).join(",") + ")",
+        "sceneBox y=[" + b.min.y.toFixed(1) + "," + b.max.y.toFixed(1) + "]",
+        "renderer=" + (renderer ? "ok" : "null") + "  composer=" + (composer ? "on" : "off"),
+        "lite=" + LITE + " still=" + STILL,
+        "升级模块 SSAO=" + (ssaoFX ? "on" : "off") + " 地形LOD=" + (terrainFX ? "on" : "off")
+          + " HUD=" + (hudFX ? "on" : "off") + " 天气=" + (weatherFX ? "on" : "off"),
+        "terrain=" + (terrainFX && terrainFX.stats ? JSON.stringify(terrainFX.stats) : "-"),
+      ].join("\n");
+    } catch (e) { d.textContent = "debug 失败: " + e.message; }
+  }
+
+  // 静态模式：直接同步渲染若干帧，保证截图有内容（老版 headless 不保证 rAF 运行）
+  if (STILL) {
+    state.time = 5.5;
+    for (let i = 0; i < 6; i++) { try { animate(); } catch (e) { console.warn(e); break; } }
+    try {
+      (composer ? composer : renderer).render(scene, camera);
+      const dd = document.getElementById("dbg");
+      if (dd) dd.textContent += "\ntriangles=" + renderer.info.render.triangles + "  calls=" + renderer.info.render.calls;
+    } catch (e) {
+      const dd = document.getElementById("dbg");
+      if (dd) dd.textContent += "\nrender 异常: " + e.message;
+    }
+  }
+}
+
+/* 测区网格（贴着真实地形画） */
+function buildSurveyGrid(scene) {
+  const g = new THREE.Group();
+  const ringMat = new THREE.LineBasicMaterial({ color: C.cyan, transparent: true,
+    opacity: 0.22, blending: THREE.AdditiveBlending });
+  [26, 42, 58, 74].forEach(rad => {
+    const pts = [];
+    for (let a = 0; a <= 128; a++) {
+      const th = a / 128 * Math.PI * 2;
+      const x = PIT.cx + Math.cos(th) * rad, z = PIT.cz + Math.sin(th) * rad * 0.87;
+      pts.push(new THREE.Vector3(x, terrainH(x, z) + 0.6, z));
+    }
+    g.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), ringMat));
+  });
+  scene.add(g);
+  return g;
+}
+
+/* ---- 昼夜/时段光照预设：太阳方位 + 色温 + 天空 + 雾 + 曝光一起变 ---- */
+const TOD = {
+  dawn: { sun: [-130, 40, 96], sunCol: 0xffb27a, sunInt: 0.80, hemiKey: 0x6b8fc7, hemiInt: 0.38,
+          top: 0x070f1c, mid: 0x1b2b3d, fog: 0x1d2836, bot: 0x3a2a24, exp: 1.00, label: "黎明" },
+  noon: { sun: [96, 170, 44], sunCol: 0xfff3d6, sunInt: 1.22, hemiKey: 0x9ec8ff, hemiInt: 0.55,
+          top: 0x061425, mid: 0x123448, fog: 0x0f2a33, bot: 0x24504f, exp: 1.02, label: "正午" },
+  dusk: { sun: [150, 32, -92], sunCol: 0xff8a4c, sunInt: 0.92, hemiKey: 0x4a6a9c, hemiInt: 0.34,
+          top: 0x0a0d18, mid: 0x22203a, fog: 0x231a22, bot: 0x4a2a24, exp: 1.06, label: "黄昏" },
+  night: { sun: [60, 130, 60], sunCol: 0x6f8ecf, sunInt: 0.26, hemiKey: 0x22344d, hemiInt: 0.22,
+           top: 0x010306, mid: 0x06101a, fog: 0x05080d, bot: 0x0a1620, exp: 1.18, label: "夜景" },
+};
+function applyTOD(key) {
+  const p = TOD[key];
+  if (!p || !state.sun) return;
+  state.sun.position.set(p.sun[0], p.sun[1], p.sun[2]);
+  state.sun.color.setHex(p.sunCol);
+  state.sun.intensity = p.sunInt;
+  if (state.hemi) { state.hemi.color.setHex(p.hemiKey); state.hemi.intensity = p.hemiInt; }
+  if (state.skyMat) {
+    state.skyMat.uniforms.top.value.setHex(p.top);
+    state.skyMat.uniforms.mid.value.setHex(p.mid);
+    state.skyMat.uniforms.bot.value.setHex(p.bot);
+  }
+  if (scene && scene.fog) scene.fog.color.setHex(p.fog);
+  if (renderer) renderer.toneMappingExposure = p.exp;
+  // 天气模块保存"时段基准"，并按当前天气重新叠加
+  // （否则切黎明/黄昏时会把雨雾/沙尘的能见度效果冲掉，天气就"白选了"）
+  if (weatherFX && weatherFX.setTod) {
+    try { weatherFX.setTod({ fogColor: p.fog, sunIntensity: p.sunInt, exposure: p.exp }); }
+    catch (e) { /* 忽略：模块版本差异 */ }
+  }
+  state.tod = key;
+  document.querySelectorAll("[data-tod]").forEach(b =>
+    b.classList.toggle("on", b.dataset.tod === key));
+}
+
+const CAMS = {
+  iso: { pos: [190, 130, 250], tgt: [-10, -12, -12] },
+  top: { pos: [0.1, 430, 0], tgt: [0, 0, 0] },
+  station: { pos: [62, 72, 200], tgt: [0, 10, 44] },
+  pit: { pos: [-18, 82, 104], tgt: [PIT.cx, -16, PIT.cz] },
+};
+function bindTodButtons() {
+  document.querySelectorAll("[data-tod]").forEach(b => {
+    b.onclick = () => applyTOD(b.dataset.tod);
+  });
+}
+function bindCamButtons() {
+  document.querySelectorAll("[data-cam]").forEach(btn => {
+    btn.onclick = () => {
+      const k = btn.dataset.cam;
+      if (k === "follow") {
+        state.follow = !state.follow;
+        btn.textContent = state.follow ? "停止跟随" : "跟随";
+        return;
+      }
+      if (k === "orbit") {
+        state.orbitMode = !state.orbitMode;
+        controls.autoRotate = state.orbitMode;
+        btn.textContent = state.orbitMode ? "停止巡航" : "环绕巡航";
+        return;
+      }
+      const c = CAMS[k];
+      if (!c) return;
+      controls.autoRotate = false; state.orbitMode = false;
+      const ob = document.querySelector('[data-cam="orbit"]');
+      if (ob) ob.textContent = "环绕巡航";
+      camera.position.set(c.pos[0], c.pos[1], c.pos[2]);
+      controls.target.set(c.tgt[0], c.tgt[1], c.tgt[2]);
+      controls.update();
+    };
+  });
+}
+
+/* ======================================================================
+   渲染增强面板：模块开关 + 天气工况切换
+   ----------------------------------------------------------------------
+   天气按钮不只是换贴图：它请求后端 /api/weather?preset=xxx，运行中的仿真会
+   **立刻**把天气衰减作用到链路健康度上，进而影响动态权重调度 —— 这样"弱网
+   论证"在 3D 画面上直接看得见：雨点/沙尘 -> 链路变红 -> 任务箭头变稀 -> 指标掉。
+   ====================================================================== */
+const RND_STATE = { ssao: true, lod: true, flow: true, waterfall: true, wx: true };
+
+function syncUpgradeButtons() {
+  document.querySelectorAll("[data-rnd]").forEach(b => {
+    const k = b.dataset.rnd;
+    b.classList.toggle("on", !!RND_STATE[k]);
+    const missing = (k === "ssao" && !ssaoFX) || (k === "lod" && !terrainFX)
+      || ((k === "flow" || k === "waterfall") && !hudFX) || (k === "wx" && !weatherFX);
+    b.disabled = !!missing;
+    if (missing) b.classList.remove("on");
+  });
+}
+
+function applyUpgradeToggle(k) {
+  try {
+    if (k === "ssao" && ssaoFX && ssaoFX.setEnabled) ssaoFX.setEnabled(RND_STATE.ssao);
+    else if (k === "lod" && terrainFX && terrainFX.setEnabled) terrainFX.setEnabled(RND_STATE.lod);
+    else if (k === "wx" && weatherFX && weatherFX.setEnabled) weatherFX.setEnabled(RND_STATE.wx);
+    else if ((k === "flow" || k === "waterfall") && hudFX && hudFX.setMode) {
+      const m = (RND_STATE.flow && RND_STATE.waterfall) ? "all"
+        : RND_STATE.flow ? "flow" : RND_STATE.waterfall ? "waterfall" : "off";
+      hudFX.setMode(m);
+    }
+  } catch (e) { console.warn("[RND] 切换失败：", k, e); }
+}
+
+function bindUpgradeButtons() {
+  document.querySelectorAll("[data-rnd]").forEach(b => {
+    b.onclick = () => {
+      RND_STATE[b.dataset.rnd] = !RND_STATE[b.dataset.rnd];
+      applyUpgradeToggle(b.dataset.rnd);
+      syncUpgradeButtons();
+    };
+  });
+  document.querySelectorAll("[data-wx]").forEach(b => {
+    b.onclick = async () => {
+      const preset = b.dataset.wx;
+      document.querySelectorAll("[data-wx]").forEach(x => x.classList.toggle("on", x === b));
+      try {
+        const r = await fetch("/api/weather?preset=" + encodeURIComponent(preset), { cache: "no-store" });
+        const j = await r.json();
+        if (!j.ok) console.warn("[Weather] 切换失败：", j.msg || j);
+        if (j.weather && weatherFX && weatherFX.apply) weatherFX.apply(j.weather);
+      } catch (e) { console.warn("[Weather] 请求失败（后端可能未升级）：", e); }
+    };
+  });
+  syncUpgradeButtons();
+}
+
+/* ============================================================ 11. 数据对接 */
+async function fetchState() {
+  try {
+    const r = await fetch("/api/state", { cache: "no-store" });
+    const st = await r.json();
+    state.live = st.live || null;
+    state.summary = st.summary || {};
+    state.status = st.status;
+    const b = document.getElementById("banner");
+    if (st.error) { b.style.display = "block"; b.textContent = "仿真错误：" + st.error; }
+    else b.style.display = "none";
+    applyState(st);
+  } catch (e) { /* 服务未就绪时静默重试 */ }
+}
+function setText(id, v) { const e = document.getElementById(id); if (e) e.textContent = v; }
+
+function applyState(st) {
+  const live = st.live;
+  const map = { idle: "未开始", running: "仿真中", finished: "已完成", stopped: "已停止", error: "出错" };
+  let txt = map[st.status] || st.status;
+  if (st.scenario_label) txt += " · " + st.scenario_label + " × " + (st.scheduler_label || "");
+  setText("pillStatus", txt);
+  document.querySelector("#prog>i").style.width =
+    (live ? Math.min(100, live.sim_time / Math.max(0.001, live.duration_s) * 100) : 0) + "%";
+
+  const n = (live && live.uav_count) || 30;
+  if (state.drones.length !== n) rebuildFleet(n);
+
+  const runMap = {};
+  if (live && live.running_tasks) live.running_tasks.forEach(t => { runMap[t.uav_id] = t; });
+  let hs = 0, on = 0, busy = 0;
+  state.drones.forEach(d => {
+    const u = live && live.uav_states ? live.uav_states[String(d.id)] : null;
+    d.health = u ? u.health : 100;
+    d.online = u ? u.online : true;
+    const t = runMap[d.id];
+    d.busy = !!t;
+    d.priority = t ? t.priority : null;
+    d.progress = t ? t.progress : 0;
+    if (d.online) { hs += d.health; on++; }
+    if (d.busy) busy++;
+  });
+  const hAvg = on ? hs / on : 0;
+  setText("fOn", on + " / " + state.drones.length);
+  setText("fBusy", busy);
+  setText("fHealth", on ? hAvg.toFixed(1) : "-");
+  document.getElementById("fHealthBar").style.width = hAvg + "%";
+
+  const qh = live ? live.queue.high : 0, ql = live ? live.queue.low : 0;
+  const load = live ? live.system_load : 0;
+  setText("qHi", qh); setText("qLo", ql);
+  setText("qLoad", load.toFixed(2) + (load > 1 ? " 过载" : ""));
+  document.getElementById("qHiBar").style.width = Math.min(100, qh / 120 * 100) + "%";
+  document.getElementById("qLoBar").style.width = Math.min(100, ql / 120 * 100) + "%";
+  document.getElementById("qLoadBar").style.width = Math.min(100, load / 2 * 100) + "%";
+
+  if (live) {
+    const c = live.counters, s = live.scheduler_stats, l = live.limiter;
+    setText("mTime", live.sim_time.toFixed(1) + " / " + live.duration_s.toFixed(0) + " s");
+    setText("mTasks", c.submitted + " / " + c.done);
+    setText("mThr", (c.done / Math.max(0.001, live.sim_time)).toFixed(2) + " 个/s");
+    setText("mRetry", c.blocked);
+    setText("mBlock", c.blocked + " / " + c.retry_pending);
+    setText("mPre", c.preempted);
+    setText("mCtx", s.context_switches);
+    setText("mSlice", s.high_time_slice_ms.toFixed(0) + " / " + s.low_time_slice_ms.toFixed(0) + " ms");
+    setText("mLim", l.throttled + " / " + l.rejected_large);
+    setText("mOver", live.overload_seconds.toFixed(1) + " s");
+  }
+  const sm = st.summary || {};
+  setText("rCompl", sm.completion_rate !== undefined ? sm.completion_rate.toFixed(2) + " %" : "-");
+  setText("rWait", sm.avg_wait_high_ms !== undefined
+    ? sm.avg_wait_high_ms.toFixed(0) + " / " + sm.avg_wait_low_ms.toFixed(0) + " ms" : "-");
+  setText("rStarve", sm.starvation_rate_low !== undefined
+    ? sm.starvation_rate_low.toFixed(2) + " %" : "-");
+  // ---- 天气联动：后端 /api/state.weather → 面板读数 + 3D 天气效果 ----
+  // 天气不是纯滤镜：它是后端按工况算出的链路衰减（link_penalty），
+  // 会真的压低健康度 -> 影响动态权重 -> 影响指标。画面与指标是同一份数据。
+  const wx = st.weather || null;
+  if (wx) {
+    state.wx = wx;
+    setText("wName", wx.label || wx.preset || "-");
+    setText("wVis", (wx.visibility_km != null ? Number(wx.visibility_km).toFixed(1) + " km" : "-"));
+    setText("wPen", (wx.link_penalty != null ? "-" + Number(wx.link_penalty).toFixed(1) + " 分" : "0 分"));
+    if (weatherFX && weatherFX.apply) { try { weatherFX.apply(wx); } catch (e) { /* 忽略 */ } }
+    document.querySelectorAll("[data-wx]").forEach(b => b.classList.toggle("on", b.dataset.wx === wx.preset));
+  }
+  drawChart(live);
+}
+
+function rebuildFleet(n) {
+  state.drones.forEach(d => {
+    // 细化模型的每架独有材质（LED/锥体/桨叶/模糊盘）顺手释放，避免反复重建机群时 GPU 资源泄漏
+    try { if (d.group.userData && d.group.userData.dispose) d.group.userData.dispose(); } catch (e) {}
+    scene.remove(d.group); scene.remove(d.ring); scene.remove(d.trail);
+    scene.remove(d.link); scene.remove(d.bead); scene.remove(d.tag);
+  });
+  state.drones = buildFleet(scene, n);
+  try { collectSprites(); } catch (e) { /* sprite 收集失败不影响渲染 */ }
+}
+
+/* ============================================================ 12. 动画 */
+const clock = new THREE.Clock();
+
+/* 升级模块：无人机每帧动画上下文（**复用同一个对象**，避免 30 架 × 60fps 的 GC 抖动） */
+const AC = { t: 0, dt: 0, phase: "PAD", spin: 9, busy: false, priority: null,
+             scanning: false, health: 100, online: true, bank: 0, yawRate: 0,
+             lookTarget: new THREE.Vector3() };
+const _lookTmp = new THREE.Vector3();
+const _followWant = new THREE.Vector3();
+/**
+ * 云台注视点：扫描任务俯视地面扫描点；返航/降落看向地面站；其余看向前下方。
+ * 返回的是复用向量（调用方立即 copy，不要长期持有）。
+ */
+function lookTargetFor(d, phase, scanning, yaw) {
+  const fx = Math.sin(yaw), fz = Math.cos(yaw);
+  if (scanning && d.busy) {
+    _lookTmp.set(d.pos.x + fx * 7,
+                 terrainH(d.pos.x + fx * 10, d.pos.z + fz * 10) + 0.6,
+                 d.pos.z + fz * 7);
+  } else if (phase === "RETURN" || phase === "LAND") {
+    _lookTmp.copy(UPLINK_TOP);
+  } else {
+    _lookTmp.set(d.pos.x + fx * 12, d.pos.y - 7, d.pos.z + fz * 12);
+  }
+  return _lookTmp;
+}
+
+/* ============================================================ 完整架次流程
+   待机(PAD) → 起飞爬升(CLIMB) → 转场(TRANSIT) → 蛇形扫描(SURVEY)
+   → 返航(RETURN) → 降落(LAND) → 待机(PAD) ...
+   每架机按 id 错峰启动，形成"多机分批出动"的真实作业节奏。
+   ============================================================ */
+const SORTIE = { climb: 3.0, transit: 4.5, survey: 18.0, back: 4.5, descend: 3.5, rest: 8.0 };
+SORTIE.cycle = SORTIE.climb + SORTIE.transit + SORTIE.survey + SORTIE.back + SORTIE.descend + SORTIE.rest;
+const PAD_ALT = PAD_H + 2.4;
+
+function padPos(idx, n) {
+  const a = (idx / Math.max(1, n)) * Math.PI * 2;
+  const r = 6.2 + (idx % 3) * 1.1;
+  return { x: STATION_XZ.x + Math.cos(a) * r, z: STATION_XZ.z + Math.sin(a) * r };
+}
+
+function sortiePhase(d, t) {
+  const n = state.drones.length;
+  const off = ((d.id - 1) * (SORTIE.cycle / Math.max(1, n)) * 0.6) % SORTIE.cycle;
+  const tc = (((t + off) % SORTIE.cycle) + SORTIE.cycle) % SORTIE.cycle;
+  const pad = padPos(d.id - 1, n);
+  const T1 = SORTIE.climb;
+  const T2 = T1 + SORTIE.transit;
+  const T3 = T2 + SORTIE.survey;
+  const T4 = T3 + SORTIE.back;
+  const T5 = T4 + SORTIE.descend;
+  const su = clamp((tc - T2) / SORTIE.survey, 0, 1);
+  const sp = serpentine(su, FLIGHT.cellX, FLIGHT.cellZ, FLIGHT.strips);
+  const sx = d.cell.x + sp.x, sz = d.cell.z + sp.z;
+  const sy = terrainH(sx, sz) + FLIGHT.agl;
+  const sp0 = serpentine(0, FLIGHT.cellX, FLIGHT.cellZ, FLIGHT.strips);
+  const ex = d.cell.x + sp0.x, ez = d.cell.z + sp0.z;
+  const ey = terrainH(ex, ez) + FLIGHT.agl;
+  const cruise = PAD_ALT + 16;
+  if (tc < T1) {
+    const k = smoothstep(0, 1, tc / T1);
+    return { phase: "CLIMB", x: pad.x, z: pad.z, y: lerp(PAD_ALT, cruise, k) };
+  }
+  if (tc < T2) {
+    const k = smoothstep(0, 1, (tc - T1) / SORTIE.transit);
+    return { phase: "TRANSIT", x: lerp(pad.x, ex, k), z: lerp(pad.z, ez, k), y: lerp(cruise, ey, k) };
+  }
+  if (tc < T3) return { phase: "SURVEY", x: sx, z: sz, y: sy };
+  if (tc < T4) {
+    const k = smoothstep(0, 1, (tc - T3) / SORTIE.back);
+    return { phase: "RETURN", x: lerp(sx, pad.x, k), z: lerp(sz, pad.z, k), y: lerp(sy, cruise, k) };
+  }
+  if (tc < T5) {
+    const k = smoothstep(0, 1, (tc - T4) / SORTIE.descend);
+    return { phase: "LAND", x: pad.x, z: pad.z, y: lerp(cruise, PAD_ALT, k) };
+  }
+  return { phase: "PAD", x: pad.x, z: pad.z, y: PAD_ALT };
+}
+
+let frameCount = 0;
+let fpsFrames = 0, fpsLast = performance.now();
+function animate() {
+  frameCount++;
+  // 静态模式下渲染 4 帧后停止排帧，浏览器即可完成截图
+  if (!(STILL && frameCount > 10)) requestAnimationFrame(animate);
+  const dt = Math.min(0.05, clock.getDelta());
+  state.time += dt;
+  const t = state.time;
+  // ---- 云影（必须在 t 定义之后） / 水面随时间流动 ----
+  if (state.cloudU) state.cloudU.value = t;
+  if (state.cloudUs.length) { for (let ci = 0; ci < state.cloudUs.length; ci++) state.cloudUs[ci].value = t; }
+  if (water && water.material && water.material.uniforms && water.material.uniforms.uTime) {
+    water.material.uniforms.uTime.value = t;
+  }
+
+
+  state.drones.forEach((d, i) => {
+    // ---- 架次状态机：待机 / 起飞 / 转场 / 扫描 / 返航 / 降落 ----
+    const S = sortiePhase(d, t);
+    const scanning = (S.phase === "SURVEY");
+    const x = S.x, z = S.z, y = S.y;
+    d.phaseName = S.phase;
+    d.prev.copy(d.pos);
+    d.pos.set(x, y, z);
+
+    // 朝向：沿航向；转弯时压坡（roll ∝ 转向速率）
+    const vx = d.pos.x - d.prev.x, vz = d.pos.z - d.prev.z;
+    const vlen = Math.hypot(vx, vz);
+    let yaw = d.group.rotation.y;
+    if (vlen > 1e-4) yaw = Math.atan2(vx, vz);
+    else if (d.busy) yaw = Math.atan2(STATION_XZ.x - x, STATION_XZ.z - z);
+    d.group.rotation.y += (yaw - d.group.rotation.y) * Math.min(1, dt * 6);
+    const yawDelta = yaw - d.group.rotation.y;
+    const bank = clamp(-yawDelta * 2.2, -0.42, 0.42) + Math.sin(t * 1.7 + d.phase * 9) * 0.02;
+    d.group.rotation.z += (bank - d.group.rotation.z) * Math.min(1, dt * 4);
+    d.group.position.copy(d.pos);
+
+    const spin = (S.phase === "PAD") ? 9 : (S.phase === "LAND" || S.phase === "CLIMB") ? 18 : (d.busy ? 38 : 27);
+    // 细化模型（uav_model.js）：一次调用驱动桨叶运动模糊 / 云台跟随 / 起落架收放
+    if (d.group.userData && d.group.userData.anim) {
+      AC.t = t; AC.dt = dt; AC.phase = S.phase; AC.spin = spin;
+      AC.busy = !!d.busy; AC.priority = d.priority; AC.scanning = scanning;
+      AC.health = d.health; AC.online = d.online; AC.bank = bank;
+      AC.yawRate = dt > 1e-5 ? (yaw - d.group.rotation.y) / Math.max(1e-5, dt * 6) : 0;
+      AC.lookTarget.copy(lookTargetFor(d, S.phase, scanning, yaw));
+      try { d.group.userData.anim(dt, AC); }
+      catch (e) { d.group.userData.anim = null; console.warn("[UAV] anim 异常，本机退回基础动画：", e); }
+    } else {
+      d.rotors.forEach((r, k) => { r.rotation.y += dt * spin * (k % 2 ? 1 : -1); });
+    }
+
+    const col = !d.online ? 0x3a4453
+      : (d.health >= 85 ? C.ok : d.health >= 55 ? C.warn : C.bad);
+    d.ledMat.color.setHex(col);
+    d.led.scale.setScalar(d.busy ? 1.35 + 0.35 * Math.sin(t * 9) : 1.0);
+    d.group.visible = d.online;
+
+    // 相机扫描锥：仅勘查任务
+    const wantCone = (scanning && d.busy && d.priority === "HIGH") ? 0.055 : 0.0;
+    d.coneMat.opacity += (wantCone - d.coneMat.opacity) * Math.min(1, dt * 5);
+    d.cone.visible = d.coneMat.opacity > 0.004;
+
+    // 地面投影环
+    d.ring.position.set(x, terrainH(x, z) + 0.4, z);
+    d.ring.scale.setScalar(d.busy ? 1.3 : 1.0);
+    d.ring.material.opacity = d.busy ? 0.4 : 0.14;
+
+    d.tag.position.set(x, d.pos.y + 3.4, z);
+    d.tag.visible = camera.position.distanceTo(d.group.position) < 130;
+
+    // 尾迹
+    d.trailPos.push({ x: d.pos.x, y: d.pos.y, z: d.pos.z });
+    if (d.trailPos.length > 28) d.trailPos.shift();
+    const tp = d.trail.geometry.attributes.position;
+    for (let k = 0; k < 28; k++) {
+      const p = d.trailPos[Math.min(k, d.trailPos.length - 1)];
+      tp.setXYZ(k, p.x, p.y, p.z);
+    }
+    tp.needsUpdate = true;
+
+    // 数据链路
+    const want = d.busy ? 0.8 : 0.0;
+    d.linkMat.opacity += (want - d.linkMat.opacity) * Math.min(1, dt * 8);
+    d.bead.material.opacity = d.linkMat.opacity;
+    if (d.linkMat.opacity > 0.02) {
+      const lp = d.link.geometry.attributes.position;
+      lp.setXYZ(0, d.pos.x, d.pos.y, d.pos.z);
+      lp.setXYZ(1, UPLINK_TOP.x, UPLINK_TOP.y, UPLINK_TOP.z);
+      lp.needsUpdate = true;
+      const lc = d.health >= 85 ? C.ok : d.health >= 55 ? C.warn : C.bad;
+      d.linkMat.color.setHex(lc);
+      d.bead.material.color.setHex(lc);
+      const k2 = (t * 0.85 + d.phase) % 1;
+      d.bead.position.set(
+        d.pos.x + (UPLINK_TOP.x - d.pos.x) * k2,
+        d.pos.y + (UPLINK_TOP.y - d.pos.y) * k2,
+        d.pos.z + (UPLINK_TOP.z - d.pos.z) * k2);
+    }
+
+    // 点云：勘查任务时按扫描幅宽投射（世界放大 2 倍后幅宽同步加大，体现"单机探测范围大"）
+    if (scanning && d.busy && d.priority === "HIGH") {
+      for (let k = 0; k < 2; k++) {
+        if (Math.random() < dt * 26) emitPoint(pc, x + (Math.random() - 0.5) * 10, z, 4.0);
+      }
+    }
+  });
+
+  // ---- 升级模块：地形 LOD 重定位 / HUD 箭头与瀑布图 / 天气粒子（都在渲染之前更新）----
+  if (terrainFX && terrainFX.update) {
+    try { terrainFX.update(camera, dt); } catch (e) { terrainFX = null; console.warn("[Terrain] update 异常，已停用：", e); }
+  }
+  if (hudFX && hudFX.update) {
+    try {
+      hudFX.update(dt, {
+        t: t, live: state.live, drones: state.drones, stationTop: UPLINK_TOP,
+        visibility_km: state.wx ? state.wx.visibility_km : null,
+      });
+    } catch (e) { hudFX = null; console.warn("[HUD] update 异常，已停用：", e); }
+  }
+  if (weatherFX && weatherFX.update) { try { weatherFX.update(dt, camera); } catch (e) {} }
+  if (ssaoFX && ssaoFX.update) { try { ssaoFX.update(dt); } catch (e) {} }
+
+  // ---- 扫描覆盖热力图：**只在仿真真正运行时**盖章 ----
+  // 待机时无人机仍在做架次动画（起飞/扫描/返航），如果照样盖章，十几秒后整片地表会被加色
+  // 混合刷成惨白 —— 这就是 2026-11 实测的"画面发白发糊"，所以必须用 state.status 门控。
+  if (coverage && state.status === "running" && t - coverage.last > 0.22) {
+    coverage.last = t;
+    state.drones.forEach(d => {
+      if (d.phaseName === "SURVEY") markCoverage(d.pos.x, d.pos.z, 13);
+    });
+  }
+
+  if (station) {
+    const u = station.userData;
+    u.halo.material.opacity = 0.16 + 0.12 * Math.sin(t * 1.9);
+    u.halo.scale.setScalar(1 + 0.018 * Math.sin(t * 1.9));
+    u.beacon.scale.setScalar(1 + 0.28 * Math.sin(t * 6.2));
+    if (u.beam) u.beam.material.opacity = 0.06 + 0.03 * Math.sin(t * 1.4);
+  }
+  if (surveyGrid) surveyGrid.rotation.y = t * 0.02;
+  if (water) water.material.opacity = 0.84 + 0.04 * Math.sin(t * 0.7);
+
+  if (towers && state.live) {
+    const upd = (tw, depth) => {
+      const h = 0.8 + Math.min(1, depth / 120) * 15;
+      tw.bar.scale.y = h;
+      tw.bar.position.y = 0.6 + h / 2;
+      /* 标签文字重建很贵（每次 makeTextSprite = 一张 canvas + 一张 GPU 贴图）。
+         原来队列深度每变一次就重建一次，PEAK 工况下几乎每帧都在重建 → 画面卡顿 + 显存抖动。
+         这里做两道节流：变化幅度 <5 且距上次刷新 <1.2s 就不重建。 */
+      const nt = tw.name + " " + depth;
+      const now = t;
+      const bigChange = Math.abs(depth - (tw.lastDepth || 0)) >= 5;
+      const stale = (now - (tw.lastLabelT || 0)) > 1.2;
+      if (nt !== tw.txt && (bigChange || stale)) {
+        tw.txt = nt; tw.lastDepth = depth; tw.lastLabelT = now;
+        tw.grp.remove(tw.label);
+        /* 释放旧 sprite 的贴图/材质，避免反复重建把显存吃满 */
+        try {
+          if (tw.label.material) {
+            if (tw.label.material.map) tw.label.material.map.dispose();
+            tw.label.material.dispose();
+          }
+        } catch (eLbl) { /* 忽略 */ }
+        tw.label = makeTextSprite(nt, { fontSize: 26, scale: 0.040, color: "#d6ecff" });
+        tw.label.position.set(0, 0.6 + h + 3.0, 0);
+        tw.grp.add(tw.label);
+        if (typeof collectSprites === "function") collectSprites();
+      }
+      tw.label.position.y = 0.6 + h + 3.0;
+    };
+    upd(towers.high, state.live.queue.high);
+    upd(towers.low, state.live.queue.low);
+  }
+
+  // ---- 跟随镜头：跟 1 号机，保持固定相对偏移 ----
+  if (state.follow && state.drones.length) {
+    const d = state.drones[0];
+    controls.target.lerp(d.pos, Math.min(1, dt * 2.4));
+    _followWant.set(d.pos.x + 26, d.pos.y + 15, d.pos.z + 26);
+    camera.position.lerp(_followWant, Math.min(1, dt * 1.7));
+  }
+
+  // ---- 文字 sprite 距离自适应 + 新 sprite 收集（frameCount 每帧自增，这里约每 1.5 秒扫一遍）----
+  fitSprites();
+  if (frameCount % 90 === 0) collectSprites();
+
+  controls.update();
+  if (composer) composer.render(); else renderer.render(scene, camera);
+
+  // ---- 帧率 ----
+  fpsFrames++;
+  const nowMs = performance.now();
+  if (nowMs - fpsLast >= 500) {
+    const el = document.getElementById("fpsBadge");
+    if (el) el.textContent = Math.round(fpsFrames * 1000 / (nowMs - fpsLast)) + " fps";
+    fpsFrames = 0; fpsLast = nowMs;
+    // 升级模块的实时读数（右下"渲染增强"面板）
+    try {
+      if (ssaoFX && ssaoFX.stats && ssaoFX.stats.ms != null) setText("wMs", ssaoFX.stats.ms.toFixed(2) + " ms");
+      if (terrainFX && terrainFX.stats && terrainFX.stats.tris != null) setText("wTri", (terrainFX.stats.tris / 1000).toFixed(0) + "k");
+      if (hudFX && hudFX.stats) setText("wArr", hudFX.stats.arrows != null ? hudFX.stats.arrows : "-");
+    } catch (e) { /* 忽略 */ }
+  }
+}
+
+/* ============================================================ 13. 折线图 */
+function drawChart(live) {
+  const cv = document.getElementById("chart");
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  const w = Math.max(60, cv.clientWidth || 300), h = 82;
+  const wantW = Math.floor(w * dpr), wantH = Math.floor(h * dpr);
+  if (cv.width !== wantW && wantW < 4096) { cv.width = wantW; cv.height = wantH; }
+  const g = cv.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+  g.strokeStyle = "rgba(78,161,255,.13)"; g.lineWidth = 1;
+  for (let i = 1; i < 4; i++) { const y = h * i / 4; g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke(); }
+  if (!live || !live.history || live.history.length < 2) return;
+  const hist = live.history, dur = Math.max(1, live.duration_s);
+  const maxQ = Math.max(10, ...hist.map(d => Math.max(d.high, d.low)));
+  const X = ts => 6 + ts / dur * (w - 12);
+  const Y = v => h - 6 - v / maxQ * (h - 12);
+  const line = (get, color) => {
+    g.beginPath(); g.strokeStyle = color; g.lineWidth = 1.7;
+    hist.forEach((d, i) => { const x = X(d.ts), y = Y(get(d)); i ? g.lineTo(x, y) : g.moveTo(x, y); });
+    g.stroke();
+  };
+  line(d => d.high, "#4ea1ff");
+  line(d => d.low, "#f5a623");
+  line(d => d.load * maxQ / 2, "#3ddc97");
+}
+
+/* ============================================================ 14. 控件 */
+async function initControls() {
+  const r = await fetch("/api/state", { cache: "no-store" });
+  const st = await r.json();
+  const scn = document.getElementById("scn"), sch = document.getElementById("sch");
+  scn.innerHTML = ""; sch.innerHTML = "";
+  (st.scenarios || []).forEach(o => {
+    const e = document.createElement("option"); e.value = o.code;
+    e.textContent = o.code + " · " + o.label; scn.appendChild(e);
+  });
+  (st.schedulers || []).forEach(o => {
+    const e = document.createElement("option"); e.value = o.code;
+    e.textContent = o.label; sch.appendChild(e);
+  });
+  scn.value = "PEAK"; sch.value = "dynamic";
+}
+document.getElementById("btnStart").onclick = async () => {
+  const q = "?scenario=" + document.getElementById("scn").value
+          + "&scheduler=" + document.getElementById("sch").value
+          + "&speed=" + document.getElementById("spd").value;
+  const r = await fetch("/api/start" + q);
+  const j = await r.json();
+  if (!j.ok) alert(j.msg || "启动失败");
+  else { resetCoverage(); if (state.pc) { /* 点云保留 */ } }   // 新一轮仿真：清掉上一轮的覆盖痕迹
+};
+document.getElementById("btnStop").onclick = () => fetch("/api/stop");
+
+/* ============================================================ 15. 启动 */
+// 地形生成是同步的（约 1s），先让加载页渲染一帧再开始，避免白屏
+function showFatal(msg) {
+  const el = document.getElementById("loading");
+  if (!el) return;
+  el.style.display = "flex";
+  el.style.opacity = "1";
+  el.innerHTML = '<div class="e">3D 初始化失败：<br><b>' + String(msg).replace(/</g, "&lt;") +
+    '</b><br><br>把这一行发给开发者即可定位。</div>';
+}
+window.addEventListener("error", (e) => showFatal((e.message || "unknown") + "  @" + (e.filename || "") + ":" + (e.lineno || 0)));
+window.addEventListener("unhandledrejection", (e) => showFatal("Promise: " + (e.reason && e.reason.message ? e.reason.message : e.reason)));
+
+async function bootWithDEM() {
+  try {
+    const r = await fetch(DEM_URL, { cache: "no-cache" });
+    if (r.ok) {
+      state.dem = await r.json();
+      const el = document.querySelector("#loading .t");
+      if (el) el.textContent = "已载入真实 DEM，正在构建场景…";
+    }
+  } catch (e) {
+    console.warn("DEM 载入失败，退回程序化地形：", e);
+  }
+  // 注意：这里不能用 requestAnimationFrame —— 在无头/后台窗口里 rAF 可能永不触发，
+  // 导致场景永远不构建（实测踩坑）。setTimeout 在前后台都可靠。
+  setTimeout(() => {
+  try {
+    initScene();
+    if (renderer) {
+      bindCamButtons();
+      bindTodButtons();
+      bindUpgradeButtons();
+      applyTOD("dusk");
+      initControls();
+      fetchState();
+      setInterval(fetchState, 120);
+      animate();
+    }
+  } catch (err) {
+    console.error(err);
+    showFatal((err && err.message ? err.message : err) + "\n" + (err && err.stack ? err.stack.split("\n")[1] || "" : ""));
+  }
+  }, 30);
+}
+bootWithDEM();
+
+</script>
+</body>
+</html>

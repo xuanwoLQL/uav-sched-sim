@@ -1,0 +1,691 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>SSAO 自检页 · UAV · 3D 渲染升级</title>
+<style>
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #0d1b2a; }
+  #app { position: absolute; inset: 0; }
+  #app canvas { display: block; }
+
+  /* 左上角信息面板：验收时看 capability / 耗时 / 自检结果 */
+  #hud {
+    position: fixed; left: 14px; top: 14px; z-index: 20;
+    font: 12px/1.75 "Consolas", "Microsoft YaHei", monospace;
+    color: #cfe8ff; background: rgba(5, 14, 24, .76);
+    border: 1px solid rgba(55, 226, 213, .45); border-radius: 8px;
+    padding: 10px 12px; min-width: 330px; pointer-events: none;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, .45);
+  }
+  #hud .t { font-size: 13px; font-weight: 700; color: #7ef9e8; letter-spacing: .5px; }
+  #hud .t b { color: #ffd166; }
+  #hud .row { display: flex; justify-content: space-between; gap: 18px; }
+  #hud .row > span { color: #7d9bb0; }
+  #hud .row > b { color: #e6f4ff; font-weight: 600; }
+  #hud .ok { color: #3ddc97; }
+  #hud .bad { color: #ff6b6b; }
+  #hud .hint { margin-top: 6px; padding-top: 6px; border-top: 1px dashed rgba(120, 160, 190, .3);
+               color: #8aa7b8; font-size: 11px; line-height: 1.5; }
+
+  /* mode=compare 时左右分屏的标注 */
+  #split { display: none; position: fixed; inset: 0; z-index: 10; pointer-events: none; }
+  #split .line { position: absolute; left: 50%; top: 0; bottom: 0; width: 2px; margin-left: -1px;
+                 background: rgba(255, 209, 102, .7); }
+  #split .lab { position: absolute; bottom: 18px; padding: 4px 10px; border-radius: 5px;
+                font: 13px/1.4 "Microsoft YaHei", sans-serif; color: #ffe9c4;
+                background: rgba(5, 14, 24, .8); border: 1px solid rgba(255, 209, 102, .5); }
+  #split .l { left: 18px; }
+  #split .r { right: 18px; }
+
+  #tip {
+    position: fixed; right: 14px; bottom: 14px; z-index: 20; pointer-events: none;
+    font: 11px/1.7 "Consolas", "Microsoft YaHei", monospace; color: #8aa7b8;
+    background: rgba(5, 14, 24, .7); border: 1px solid rgba(120, 160, 190, .3);
+    border-radius: 7px; padding: 6px 10px; text-align: right;
+  }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<div id="hud">
+  <div class="t">SSAO 自检页 · mode=<b id="hMode">-</b> · quality=<b id="hQuality">-</b></div>
+  <div class="row"><span>GPU</span><b id="hGpu">-</b></div>
+  <div class="row"><span>SSAO 状态</span><b id="hState">-</b></div>
+  <div class="row"><span>SSAO 耗时（20 帧平滑）</span><b id="hMs">-</b></div>
+  <div class="row"><span>AO 分辨率</span><b id="hAo">-</b></div>
+  <div class="row"><span>样本 / 法线 / 深度</span><b id="hFmt">-</b></div>
+  <div class="row"><span>selfTest()</span><b id="hSelf">-</b></div>
+  <div class="hint">?mode=off|on|compare · ?quality=high|medium<br>
+    可调：?radius=3.2&amp;strength=0.95&amp;bias=0.04&amp;contrast=2.0&amp;samples=24&amp;halfRes=0&amp;sun=1.0&amp;exp=0.9<br>
+    近景：?cx=2&amp;cy=5&amp;cz=22&amp;tx=14&amp;ty=1&amp;tz=22</div>
+</div>
+
+<div id="split">
+  <div class="line"></div>
+  <div class="lab l">左：关闭 SSAO</div>
+  <div class="lab r">右：开启 SSAO</div>
+</div>
+
+<div id="tip">鼠标拖拽旋转 · 滚轮缩放（仅调试用，截图不受影响）</div>
+
+<!-- 与主页面完全一致的加载方式：全局脚本，非 ES Module -->
+<script src="/static/three.min.js"></script>
+<script src="/static/OrbitControls.js"></script>
+<script src="/static/CopyShader.js"></script>
+<script src="/static/LuminosityHighPassShader.js"></script>
+<script src="/static/EffectComposer.js"></script>
+<script src="/static/RenderPass.js"></script>
+<script src="/static/ShaderPass.js"></script>
+<script src="/static/UnrealBloomPass.js"></script>
+<script src="/static/ssao.js"></script>
+
+<script>
+"use strict";
+/* =============================================================================
+ * _dev_ssao.html —— SSAO 模块自检页
+ * -----------------------------------------------------------------------------
+ * 目的：用一个**最小但一眼能看懂**的场景验证真 SSAO 的接触阴影：
+ *   · 采坑三期台阶（垂直面 / 平台的 90° 内角）
+ *   · 坑沿矮墙（四面围合的内角）
+ *   · 若干箱子（箱底与地面的接触线、两箱相邻的缝隙）
+ *   · 树状圆柱（树干扎进地面处的"树根暗环"）
+ *   · 贴地悬停的小无人机（机身下方的地面暗影）
+ * 参数：
+ *   ?mode=off|on|compare     关闭 / 开启 / 左右分屏对比
+ *   ?quality=high|medium     画质档（决定采样数 / 阴影分辨率 / 像素比）
+ *   ?radius= ?strength= ?bias= ?samples= ?halfRes=0|1 ?blur=0|1
+ * 渲染完（第 2 帧）设 window.__DEV_READY__ = true，供 tools/shot.mjs 等待。
+ * ========================================================================== */
+
+const QS = new URLSearchParams(location.search);
+const MODE = (QS.get("mode") || "on").toLowerCase();              // off | on | compare
+const QUALITY = (QS.get("quality") || "high").toLowerCase();      // high | medium
+const TIER = QUALITY === "medium" ? "medium" : "high";
+
+/* 档位参数：high 24 样本 + 2048 阴影；medium 16 样本 + 1024 阴影（对齐 app3d.html 的档位思想）*/
+const PROFILE = {
+  high:   { samples: 24, halfRes: true, shadowMap: 2048, bloom: 0.26, pixelRatio: 1.5 },
+  medium: { samples: 16, halfRes: true, shadowMap: 1024, bloom: 0.16, pixelRatio: 1.25 }
+}[TIER];
+
+function num(v, dflt) {
+  // 注意：URLSearchParams.get() 缺省返回 null，Number(null)===0 —— 必须先挡掉，
+  // 否则 strength/radius 这类参数会被悄悄解析成 0（SSAO 等于没开，排查半天）。
+  if (v === null || v === undefined || v === "") return dflt;
+  const n = Number(v);
+  return isFinite(n) ? n : dflt;
+}
+
+/* SSAO 参数：dev 场景的物体尺寸是 2~44 世界单位、相机距离约 50 单位，
+ * radius=3.0 时接触阴影（台阶根部 / 箱底 / 树根 / 机身下方）最明显。
+ * 注意：radius 是【视空间世界单位】，与场景尺度直接相关——主页面（app3d.html）
+ * 地形台阶高 6.2、机身 2.1、相机距离约 200，集成时建议 radius 2.0~3.5 起步再微调；
+ * 契约里的 0.55 在这个尺度下几乎看不见，别照抄。 */
+const SSAO_Q = {
+  enabled: MODE !== "off",
+  samples: Math.round(num(QS.get("samples"), PROFILE.samples)),
+  halfRes: QS.get("halfRes") !== "0" && PROFILE.halfRes,
+  blur: QS.get("blur") !== "0",
+  strength: num(QS.get("strength"), 0.95),
+  radius: num(QS.get("radius"), 3.2),
+  bias: num(QS.get("bias"), 0.04),
+  contrast: num(QS.get("contrast"), 2.0),
+  minViewZ: 0.5,
+  maxViewZ: 420
+};
+
+let renderer, scene, camera, controls, clock;
+let composerMain = null;     // 主渲染链（on / off 都走它；compare 时是"开启"那条链）
+let composerRef = null;      // compare 时的"关闭 SSAO"对照链
+let ssao = null;             // UAVSSAO.install 返回的句柄
+let frames = 0;
+let lastHud = 0;
+let gpuName = "unknown";
+
+const $ = (id) => document.getElementById(id);
+const tmpVec2 = new THREE.Vector2();   // resize 用（每帧不用）
+
+/* ---------------------------------------------------------------------------
+ * 1. 渲染器 / 场景 / 相机
+ * ------------------------------------------------------------------------- */
+function initRenderer() {
+  renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, PROFILE.pixelRatio));
+  renderer.setSize(innerWidth, innerHeight);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  if (THREE.sRGBEncoding) renderer.outputEncoding = THREE.sRGBEncoding;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  // ?exp= 便于在无头环境里验证 tone mapping / 曝光在这条后处理链上到底有没有生效
+  renderer.toneMappingExposure = num(QS.get("exp"), 0.85);
+  $("app").appendChild(renderer.domElement);
+
+  // 取 GPU 名字写进 HUD（无头环境会显示 SwiftShader）
+  try {
+    const gl = renderer.getContext();
+    const ext = gl.getExtension("WEBGL_debug_renderer_info");
+    gpuName = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : String(gl.getParameter(gl.RENDERER));
+  } catch (e) { gpuName = "unknown"; }
+}
+
+function initScene() {
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0d1b2a);
+  scene.fog = new THREE.FogExp2(0x0d1b2a, 0.0042);
+
+  camera = new THREE.PerspectiveCamera(52, innerWidth / innerHeight, 0.5, 900);
+  // 允许用 URL 指定相机，方便拍近景验证接触阴影：?cx=2&cy=4&cz=20&tx=14&ty=1&tz=22
+  camera.position.set(
+    num(QS.get("cx"), 30), num(QS.get("cy"), 21), num(QS.get("cz"), 46));
+
+  controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.target.set(
+    num(QS.get("tx"), 8), num(QS.get("ty"), 4.5), num(QS.get("tz"), 8));
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+  controls.minDistance = 12;
+  controls.maxDistance = 190;
+  controls.maxPolarAngle = Math.PI * 0.492;   // 别钻到地面以下
+  controls.update();
+}
+
+/* ---------------------------------------------------------------------------
+ * 2. 光照：低角度暖阳（投影）+ 冷色天光 + 蓝色补光
+ *    阳光保持"偏斜但不过长"，这样箱底/台阶内角的暗边主要来自 SSAO 而不是
+ *    级联阴影，开/关对比时 SSAO 的贡献才一眼可见。
+ * ------------------------------------------------------------------------- */
+function initLights() {
+  const hemi = new THREE.HemisphereLight(0x9ec8ff, 0x2a2418, 0.30);
+  scene.add(hemi);
+
+  const sun = new THREE.DirectionalLight(0xffe6c0, num(QS.get("sun"), 1.05));
+  sun.position.set(62, 86, 44);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(PROFILE.shadowMap, PROFILE.shadowMap);
+  const d = 82;
+  sun.shadow.camera.left = -d; sun.shadow.camera.right = d;
+  sun.shadow.camera.top = d; sun.shadow.camera.bottom = -d;
+  sun.shadow.camera.near = 1; sun.shadow.camera.far = 280;
+  sun.shadow.bias = -0.0008;
+  if ("normalBias" in sun.shadow) sun.shadow.normalBias = 0.035;
+  scene.add(sun);
+
+  const fill = new THREE.DirectionalLight(0x4a86c8, 0.16);
+  fill.position.set(-70, 44, -60);
+  scene.add(fill);
+}
+
+/* ---------------------------------------------------------------------------
+ * 3. 几何小工具（材质尽量共享；这是自检页，几十个 Mesh 无所谓）
+ * ------------------------------------------------------------------------- */
+const matCache = {};
+function mat(color, opt) {
+  const key = color + "|" + JSON.stringify(opt || {});
+  if (!matCache[key]) {
+    matCache[key] = new THREE.MeshStandardMaterial(Object.assign({
+      color: color, roughness: 0.92, metalness: 0.0
+    }, opt || {}));
+  }
+  return matCache[key];
+}
+
+function box(w, h, d, color, x, y, z, opt) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat(color, opt));
+  m.position.set(x, y, z);
+  m.castShadow = true;
+  m.receiveShadow = true;
+  scene.add(m);
+  return m;
+}
+
+function cylinder(rt, rb, h, seg, color, x, y, z, opt) {
+  const m = new THREE.Mesh(new THREE.CylinderGeometry(rt, rb, h, seg), mat(color, opt));
+  m.position.set(x, y, z);
+  m.castShadow = true;
+  m.receiveShadow = true;
+  scene.add(m);
+  return m;
+}
+
+/* ---------------------------------------------------------------------------
+ * 4. 测试场景：地面 + 采坑台阶 + 坑沿矮墙 + 箱子 + 树 + 贴地无人机
+ * ------------------------------------------------------------------------- */
+function buildWorld() {
+  /* ---- 地面：大平面，能吃到 SSAO（箱底、树根、无人机下方） ---- */
+  const ground = new THREE.Mesh(
+    new THREE.PlaneGeometry(900, 900, 1, 1),
+    mat(0x3f5a4a, { roughness: 0.98 })
+  );
+  ground.rotation.x = -Math.PI / 2;
+  ground.receiveShadow = true;
+  scene.add(ground);
+
+  /* ---- 采坑台阶：三级平台逐级收缩，每级侧面与下级平台形成 90° 内角 ---- */
+  box(44, 3.2, 32, 0x546b5f, 0, 1.6, 0);          // 一级（顶面 y=3.2）
+  box(30, 3.2, 22, 0x5d7568, 3, 4.8, 2);          // 二级（顶面 y=6.4）
+  box(18, 3.2, 13, 0x4a6155, -2, 8.0, -1);        // 三级（顶面 y=9.6）
+
+  /* ---- 坑沿：四面矮墙围出浅坑，内角是最容易看出接触阴影的地方 ---- */
+  box(20, 1.8, 1.8, 0x63796d, 31, 0.9, 13.5);     // 北
+  box(20, 1.8, 1.8, 0x63796d, 31, 0.9, -1.5);     // 南
+  box(1.8, 1.8, 13.2, 0x6b8175, 21.9, 0.9, 6);    // 西
+  box(1.8, 1.8, 13.2, 0x6b8175, 40.1, 0.9, 6);    // 东
+
+  /* ---- 箱子：单箱（箱底接触线）、双箱相邻（缝隙）、台阶上的箱（平台内角）---- */
+  box(4.4, 4.4, 4.4, 0x8f6a3c, -15, 2.2, 13, { roughness: 0.85 });
+  box(2.8, 2.8, 2.8, 0x7d5a32, -10.3, 1.4, 13.6, { roughness: 0.85 });
+  box(3.2, 3.2, 3.2, 0x94703f, -6, 4.8, 8.5, { roughness: 0.85 });     // 坐在一级台阶上
+  box(2.2, 2.2, 2.2, 0x775936, 10, 1.1, 14, { roughness: 0.85 });
+  box(9, 2.2, 1.8, 0x51665a, 25, 1.1, 18);        // 独立矮墙
+
+  /* ---- 树：圆柱树干 + 多面体树冠；树干与地面相交处就是"树根暗环" ---- */
+  const crownGeo = new THREE.IcosahedronGeometry(2.5, 1);
+  const crownMat = mat(0x2f5a3a, { roughness: 1.0, flatShading: true });
+  function tree(x, z, baseY, h) {
+    cylinder(0.38, 0.62, h, 12, 0x4a3527, x, baseY + h / 2, z, { roughness: 1.0 });
+    const crown = new THREE.Mesh(crownGeo, crownMat);
+    crown.position.set(x, baseY + h + 1.4, z);
+    crown.castShadow = true;
+    crown.receiveShadow = true;
+    scene.add(crown);
+  }
+  tree(-24, 17, 0, 8.4);
+  tree(-28, -3, 0, 6.6);
+  tree(7, 6, 6.4, 5.6);       // 长在二级台阶上，树根压在平台面上
+
+  /* ---- 碎石：几块贴地多面体，接触点也能看出 AO ---- */
+  const rockGeo = new THREE.DodecahedronGeometry(1.0, 0);
+  const rockMat = mat(0x46554f, { roughness: 1.0, flatShading: true });
+  [[19, 20.5, 1.1], [21.6, 18.2, 0.8], [-20, 21, 1.3]].forEach((p) => {
+    const r = new THREE.Mesh(rockGeo, rockMat);
+    r.position.set(p[0], p[2] * 0.6, p[1]);
+    r.scale.setScalar(p[2]);
+    r.castShadow = true;
+    r.receiveShadow = true;
+    scene.add(r);
+  });
+
+  /* ---- 贴地悬停的小无人机：用盒子拼（机身 / 四臂 / 四桨盘 / 起落架 / 云台 / LED）
+   *      机身底离地约 1.2，正好落在 SSAO 半径内 → 地面出现随距离变化的小范围暗影 ---- */
+  const drone = new THREE.Group();
+  drone.position.set(8.5, 1.85, 20);
+  drone.rotation.y = 0.42;
+  drone.scale.setScalar(1.35);
+
+  const droneMat = mat(0x2c3742, { roughness: 0.42, metalness: 0.55 });
+  const armMat = mat(0x1f2831, { roughness: 0.5, metalness: 0.45 });
+  const rotorMat = mat(0x151b22, { roughness: 0.6, metalness: 0.3, transparent: true, opacity: 0.55, depthWrite: false });
+
+  const body = new THREE.Mesh(new THREE.BoxGeometry(1.9, 0.5, 1.9), droneMat);
+  body.castShadow = true; body.receiveShadow = true;
+  drone.add(body);
+
+  // 四臂 + 桨盘（臂绕 Y 轴 ±45°）
+  [[1, 1], [1, -1], [-1, 1], [-1, -1]].forEach((s) => {
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.11, 2.7), armMat);
+    arm.position.set(s[0] * 0.85, 0.06, s[1] * 0.85);
+    arm.rotation.y = (s[0] * s[1] > 0) ? -Math.PI / 4 : Math.PI / 4;
+    arm.castShadow = true;
+    drone.add(arm);
+
+    const rotor = new THREE.Mesh(new THREE.CylinderGeometry(0.86, 0.86, 0.05, 20), rotorMat);
+    rotor.position.set(s[0] * 1.85, 0.3, s[1] * 1.85);
+    rotor.castShadow = true;
+    drone.add(rotor);
+
+    const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 0.14, 8), armMat);
+    hub.position.set(s[0] * 1.85, 0.32, s[1] * 1.85);
+    drone.add(hub);
+
+    // 起落架：四根短腿，腿尖贴近地面（也是"接触阴影"的观察点）
+    const leg = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.62, 0.1), armMat);
+    leg.position.set(s[0] * 0.72, -0.5, s[1] * 0.72);
+    leg.castShadow = true;
+    drone.add(leg);
+  });
+
+  // 云台 + 镜头
+  const gimbal = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.36, 0.42), armMat);
+  gimbal.position.set(0, -0.42, 0.32);
+  gimbal.castShadow = true;
+  drone.add(gimbal);
+  const lens = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.13, 0.22, 12), mat(0x0b1016, { roughness: 0.25, metalness: 0.8 }));
+  lens.rotation.x = Math.PI / 2;
+  lens.position.set(0, -0.42, 0.58);
+  drone.add(lens);
+
+  // 机臂 LED（发光，泛光能看到；也顺便验证 SSAO 与 Bloom 共存不闪）
+  const ledMat = new THREE.MeshStandardMaterial({
+    color: 0x10333a, emissive: 0x37e2d5, emissiveIntensity: 3.2, roughness: 0.4
+  });
+  const led = new THREE.Mesh(new THREE.SphereGeometry(0.11, 10, 8), ledMat);
+  led.position.set(0, 0.3, -0.92);
+  drone.add(led);
+
+  scene.add(drone);
+
+  // 无人机下方的停机坪（略高于地面的薄板）：坪沿 + 机身下方双重接触阴影
+  box(7.2, 0.28, 6.0, 0x6f7f78, 8.5, 0.14, 20.4, { roughness: 0.8 });
+
+  return { drone: drone };
+}
+
+/* ---------------------------------------------------------------------------
+ * 5. 后处理：EffectComposer + RenderPass + UnrealBloomPass（+ SSAO）
+ *    顺序必须：RenderPass(0) → SSAO(1) → UnrealBloomPass(2)
+ * ------------------------------------------------------------------------- */
+function buildComposer() {
+  const c = new THREE.EffectComposer(renderer);
+  c.addPass(new THREE.RenderPass(scene, camera));
+  c.addPass(new THREE.UnrealBloomPass(
+    new THREE.Vector2(innerWidth, innerHeight), PROFILE.bloom, 0.5, 0.95));
+  return c;
+}
+
+function initPostFX() {
+  composerMain = buildComposer();
+
+  if (MODE === "off") {
+    $("hState").textContent = "未安装（mode=off）";
+    $("hState").className = "";
+    return;
+  }
+
+  ssao = window.UAVSSAO.install({
+    THREE: THREE,
+    renderer: renderer,
+    scene: scene,
+    camera: camera,
+    composer: composerMain,       // 内部会 insertPass(pass, 1)：RenderPass 之后、泛光之前
+    tier: TIER,
+    quality: SSAO_Q,
+    log: function (msg) { console.log(msg); }
+  });
+
+  if (!ssao) {
+    $("hState").textContent = "安装失败（见 console）";
+    $("hState").className = "bad";
+    return;
+  }
+  $("hState").textContent = "已启用";
+  $("hState").className = "ok";
+
+  // 调试视图（?debug=ao|normal|depth）
+  dbgQuad = makeDebugView();
+
+  /* 调试接口（只在本自检页暴露，供 shot.mjs --eval 抓数值）：
+   *   __SSAO_DEBUG__()   → 实际生效的 uniform 参数
+   *   __SSAO_AO_STATS__() → 读回 AO 缓冲的 min/mean/max（0~1，越小遮挡越强） */
+  window.__SSAO_DEBUG__ = function () {
+    try {
+      const p = ssao.pass;
+      const u = p.aoUniforms;
+      return {
+        radius: u.radius.value,
+        bias: u.bias.value,
+        contrast: u.contrast.value,
+        strength: p.compositeUniforms.strength.value,
+        samples: p.samples,
+        halfRes: p.halfRes,
+        blur: p.blur,
+        aoWidth: p.aoWidth,
+        aoHeight: p.aoHeight,
+        minViewZ: u.minViewZ.value,
+        maxViewZ: u.maxViewZ.value,
+        depthType: p.depthFormatName,
+        rtType: p.rtFormatName
+      };
+    } catch (e) { return { error: String(e && e.message ? e.message : e) }; }
+  };
+  window.__SSAO_AO_STATS__ = function () {
+    try {
+      const p = ssao.pass;
+      const w = p.aoWidth, h = p.aoHeight;
+      const buf = new Uint8Array(w * h * 4);
+      renderer.readRenderTargetPixels(p.aoRT, 0, 0, w, h, buf);
+      let sum = 0, min = 255, max = 0;
+      const n = w * h;
+      for (let i = 0; i < n; i++) {
+        const v = buf[i * 4];
+        sum += v;
+        if (v < min) min = v;
+        if (v > max) max = v;
+      }
+      return { mean: sum / n / 255, min: min / 255, max: max / 255, width: w, height: h };
+    } catch (e) { return { error: String(e && e.message ? e.message : e) }; }
+  };
+  window.__SSAO_SET__ = function (opts) {
+    try {
+      const p = ssao.pass;
+      if (opts && opts.radius !== undefined) {
+        p.radius = opts.radius;
+        p.aoUniforms.radius.value = opts.radius;
+        p.blurUniforms.depthSigma.value = Math.max(0.05, opts.radius * 1.2);
+      }
+      if (opts && opts.bias !== undefined) p.aoUniforms.bias.value = opts.bias;
+      if (opts && opts.blur !== undefined) p.blur = !!opts.blur;
+      if (opts && opts.strength !== undefined) p.setStrength(opts.strength);
+      return window.__SSAO_DEBUG__();
+    } catch (e) { return { error: String(e && e.message ? e.message : e) }; }
+  };
+  // 把 AO 缓冲按步长降采样成数字矩阵（行优先，0=全遮挡 1=无遮挡），用于数值排查
+  window.__SSAO_AO_DUMP__ = function (step) {
+    try {
+      const p = ssao.pass;
+      const w = p.aoWidth, h = p.aoHeight;
+      const buf = new Uint8Array(w * h * 4);
+      renderer.readRenderTargetPixels(p.aoRT, 0, 0, w, h, buf);
+      step = Math.max(1, step | 0 || 5);
+      const cols = Math.floor(w / step), rows = Math.floor(h / step);
+      const out = [];
+      // readRenderTargetPixels 的第 0 行是屏幕底部，这里翻转成"从上到下"
+      for (let r = rows - 1; r >= 0; r--) {
+        const row = [];
+        for (let c = 0; c < cols; c++) {
+          row.push(buf[((r * step) * w + c * step) * 4]);
+        }
+        out.push(row);
+      }
+      return { ok: true, w: w, h: h, step: step, cols: cols, rows: rows, data: out };
+    } catch (e) { return { ok: false, error: String(e && e.message ? e.message : e) }; }
+  };
+  window.__SSAO_PASS__ = function () { return ssao ? ssao.pass : null; };
+  // 把 AO 缓冲画成 ASCII（深色=遮挡强），方便在无头环境里直接看空间分布
+  window.__SSAO_AO_ASCII__ = function (step) {
+    const d = window.__SSAO_AO_DUMP__(step);
+    if (!d.ok) return "ERR " + d.error;
+    const ramp = " .:-=+*#%@";
+    let s = "";
+    for (let r = 0; r < d.rows; r++) {
+      let line = "";
+      for (let c = 0; c < d.cols; c++) {
+        const v = d.data[r][c] / 255;
+        line += ramp[Math.min(9, Math.max(0, Math.round((1 - v) * 9)))];
+      }
+      s += line + "\n";
+    }
+    return s;
+  };
+
+  // compare 模式：再造一条不带 SSAO 的对照链，左半屏用它渲染
+  if (MODE === "compare") {
+    composerRef = buildComposer();
+    $("split").style.display = "block";
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * 6. 渲染
+ *    compare：先用"开启"链整屏渲染，再用 scissor 只把左半屏换成"关闭"链的输出。
+ *    debug=ao|normal|depth：把 SSAO 内部缓冲直接铺满屏幕，用于排查效果
+ *    （自检页专有功能，主页面不会用）。
+ * ------------------------------------------------------------------------- */
+const DEBUG_VIEW = (QS.get("debug") || "").toLowerCase();
+let dbgQuad = null;
+
+function makeDebugView() {
+  if (!DEBUG_VIEW || !ssao) return null;
+  const pass = ssao.pass;
+  if (!pass) return null;
+  let tex, frag;
+  if (DEBUG_VIEW === "ao") {
+    tex = pass.aoRT.texture;
+    frag = [
+      "uniform sampler2D t; varying vec2 vUv;",
+      "void main(){ float a = texture2D(t, vUv).x;",
+      "  gl_FragColor = vec4(vec3(a), 1.0); }"
+    ].join("\n");
+  } else if (DEBUG_VIEW === "normal") {
+    tex = pass.normalRT.texture;
+    frag = "uniform sampler2D t; varying vec2 vUv; void main(){ gl_FragColor = vec4(texture2D(t, vUv).rgb, 1.0); }";
+  } else if (DEBUG_VIEW === "depth") {
+    tex = pass.normalRT.depthTexture;
+    frag = [
+      "uniform sampler2D t; varying vec2 vUv;",
+      "void main(){ float d = texture2D(t, vUv).x;",
+      "  float v = clamp((d - 0.9) / 0.1, 0.0, 1.0);",   // 主要看近景差异
+      "  gl_FragColor = vec4(vec3(v), 1.0); }"
+    ].join("\n");
+  } else {
+    return null;
+  }
+  const material = new THREE.ShaderMaterial({
+    uniforms: { t: { value: tex } },
+    vertexShader: "varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }",
+    fragmentShader: frag,
+    depthTest: false, depthWrite: false
+  });
+  return new THREE.FullScreenQuad(material);
+}
+
+function renderFrame() {
+  if (MODE === "compare" && composerRef) {
+    composerMain.render();                       // 右半屏（以及整屏）先画"开启"版本
+
+    // 左半屏：scissor 截断后重画"关闭 SSAO"版本
+    const halfW = Math.floor(innerWidth / 2);
+    renderer.setScissorTest(true);
+    renderer.setScissor(0, 0, halfW, innerHeight);
+    renderer.setViewport(0, 0, innerWidth, innerHeight);
+    composerRef.render();
+    renderer.setScissorTest(false);
+  } else {
+    (composerMain || renderer).render(scene, camera);
+  }
+
+  // 调试视图：把内部缓冲铺满屏幕（诊断用，不影响正常模式的画面）
+  if (dbgQuad) {
+    renderer.setRenderTarget(null);
+    renderer.autoClear = true;
+    dbgQuad.render(renderer);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * 7. HUD + 生命周期
+ * ------------------------------------------------------------------------- */
+function updateHud() {
+  $("hMode").textContent = MODE;
+  $("hQuality").textContent = QUALITY;
+  $("hGpu").textContent = gpuName.length > 42 ? gpuName.slice(0, 40) + "…" : gpuName;
+
+  if (ssao && ssao.stats) {
+    const s = ssao.stats;
+    $("hMs").textContent = s.ms.toFixed(2) + " ms";
+    $("hAo").textContent = s.aoWidth + "×" + s.aoHeight +
+      (SSAO_Q.halfRes ? "（半分辨率）" : "（全分辨率）");
+    $("hFmt").textContent = s.samples + " / " + s.rtFormat + " / " + s.depthFormat;
+  }
+}
+
+function runSelfTest() {
+  let res = null;
+  try { res = window.UAVSSAO.selfTest(); } catch (e) { res = { ok: false, checks: [], stats: {} }; }
+  const total = res.checks.length;
+  const pass = res.checks.filter((c) => c.ok).length;
+  const el = $("hSelf");
+  el.textContent = (res.ok ? "ok=true" : "ok=false") + "（" + pass + "/" + total + " 项）" +
+    " · ms=" + (res.stats && res.stats.ms ? res.stats.ms.toFixed(2) : "0");
+  el.className = res.ok ? "ok" : "bad";
+  // 失败项打到 console.warn，方便无头抓取时定位（不影响 consoleErrors）
+  if (!res.ok) {
+    res.checks.forEach((c) => { if (!c.ok) console.warn("[DEV] selfTest 失败：" + c.name + " · " + c.detail); });
+  }
+  return res;
+}
+
+function onResize() {
+  if (!renderer) return;
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  if (composerMain) composerMain.setSize(innerWidth, innerHeight);
+  if (composerRef) composerRef.setSize(innerWidth, innerHeight);
+  // 句柄的 setSize 接受 CSS 像素，内部换算 drawing buffer 像素
+  if (ssao) ssao.setSize(innerWidth, innerHeight);
+}
+
+let readyLogged = false;
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(0.05, clock.getDelta());
+
+  if (controls) controls.update();
+  if (ssao) ssao.update(dt);         // 每帧零分配；这里只同步相机 near/far 与矩阵引用
+  renderFrame();
+
+  frames++;
+  if (frames === 2) {
+    window.__DEV_READY__ = true;     // ← shot.mjs / 验收脚本等的标志
+  }
+  const now = performance.now();
+  if (now - lastHud > 220) {
+    lastHud = now;
+    updateHud();
+    if (!readyLogged && frames > 2) {
+      readyLogged = true;
+      runSelfTest();
+      console.log("[DEV] ssao ready · mode=" + MODE + " quality=" + QUALITY +
+        " · " + (ssao ? "已启用" : "未启用"));
+    }
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * 8. 启动
+ * ------------------------------------------------------------------------- */
+function main() {
+  try {
+    initRenderer();
+    initScene();
+    initLights();
+    buildWorld();
+    initPostFX();
+  } catch (e) {
+    // 自检页自己挂了要能看见原因（但不要 alert）
+    console.error("[DEV] 初始化失败：", e);
+    const hud = $("hud");
+    if (hud) hud.insertAdjacentHTML("beforeend",
+      '<div class="row"><span class="bad">初始化失败</span><b class="bad">' + (e && e.message) + "</b></div>");
+    return;
+  }
+
+  clock = new THREE.Clock();
+  addEventListener("resize", onResize);
+
+  // 先同步渲染一帧，保证 window.__DEV_READY__ 之前画布已有内容
+  try { renderFrame(); } catch (e) { console.error("[DEV] 首帧渲染失败：", e); }
+  window.__DEV_READY__ = true;
+
+  updateHud();
+  runSelfTest();
+  console.log("[DEV] ssao ready · mode=" + MODE + " quality=" + QUALITY +
+    " · " + (ssao ? "SSAO 已启用" : "SSAO 未启用"));
+  animate();
+}
+
+main();
+</script>
+</body>
+</html>

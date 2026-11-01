@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>地形 LOD 自检 · _dev_terrain</title>
+<!-- =============================================================================
+     _dev_terrain.html —— 地形 LOD（geometry clipmap + texture clipmap）自检页
+     -----------------------------------------------------------------------------
+     加载方式与主页面 app3d.html 完全一致：经典脚本 <script src>（非 ES module），
+     便于打包成桌面 exe 后离线加载。
+     自带一个最小可看场景：程序化生成的高程场（含山脊 + 一个圆形采坑台阶）、
+     与主页面同样的光/雾/色调映射、OrbitControls。
+
+     URL 参数：
+       ?nx=1024&nz=768   压力测试：生成 1024×768 高程场（世界尺寸仍 176×128）
+       ?rings=2          强制环数（<=2 时默认按 cpu 档参数，验证 CPU 档也能跑）
+       ?debug=1          每环着色（红/绿/蓝/黄），一眼看出 LOD 环带
+       ?wire=1           线框模式（看网格密度：近处细、远处粗，检查裂缝最直观）
+       ?n=0..4           相机视角：默认 / 近景 / 高空俯视 / 侧向掠射 / 远景
+       ?tier=high|medium|cpu  强制档位（默认 high；?rings<=2 时默认 cpu）
+       ?shadow=1         打开阴影（验证地形与阴影兼容性；默认关，软件光栅省性能）
+     渲染完成后设置 window.__DEV_READY__ = true，并在 console 打一行 [DEV] ... ready。
+     ========================================================================== -->
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0b1a26; }
+  body { color: #bfe9ff; font: 13px/1.6 "Microsoft YaHei", "Segoe UI", sans-serif; }
+  #app { position: fixed; inset: 0; }
+  #title {
+    position: fixed; left: 12px; top: 12px; z-index: 10; padding: 7px 12px;
+    background: rgba(4, 14, 22, .78); border: 1px solid rgba(55, 226, 213, .55);
+    border-radius: 8px; color: #a9ecff; font-size: 13px; letter-spacing: .3px;
+  }
+  #hud {
+    position: fixed; left: 12px; bottom: 12px; z-index: 10; padding: 10px 14px;
+    background: rgba(4, 12, 20, .84); border: 1px solid rgba(55, 226, 213, .45);
+    border-radius: 8px; white-space: pre; color: #9ff2e4;
+    font: 12px/1.75 Consolas, "Microsoft YaHei", monospace; min-width: 460px;
+  }
+  #hud b { color: #ffe58a; font-weight: 600; }
+  #hud .warn { color: #ff9d6b; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="title">地形 LOD 自检 · geometry clipmap + texture clipmap · <span id="tierLbl">…</span></div>
+<div id="hud">初始化…</div>
+
+<script src="/static/three.min.js"></script>
+<script src="/static/OrbitControls.js"></script>
+<script src="/static/terrain_lod.js"></script>
+<script>
+"use strict";
+/* =============================================================================
+   参数解析
+   ========================================================================== */
+var QS = new URLSearchParams(location.search);
+function qint(name, def) {
+  var v = parseInt(QS.get(name), 10);
+  return isFinite(v) && v > 0 ? v : def;
+}
+var TIER_RAW = (QS.get("tier") || "").toLowerCase();
+var RINGS = qint("rings", 0);
+var TIER = (TIER_RAW === "high" || TIER_RAW === "medium" || TIER_RAW === "cpu")
+  ? TIER_RAW
+  : (RINGS > 0 && RINGS <= 2 ? "cpu" : "high");
+/* 高/中档用 384×280（≈ 主页面程序化高度场），cpu 档用 192×140（≈ LITE 场），
+   这样三档的三角形预算才有可比性。显式 ?nx/?nz 优先。 */
+var DEF_NX = TIER === "cpu" ? 192 : 384;
+var DEF_NZ = TIER === "cpu" ? 140 : 280;
+var NX = qint("nx", DEF_NX);
+var NZ = qint("nz", DEF_NZ);
+var DEBUG = QS.has("debug");
+var WIRE = QS.has("wire");
+/* 阴影默认开（高/中档），?noshadow=1 关（软件光栅更省）；cpu 档默认关 */
+var SHADOW = QS.has("shadow") ? true : (QS.has("noshadow") ? false : TIER !== "cpu");
+var VIEW = clampInt(qint("n", 0), 0, 4);
+
+function clampInt(v, a, b) { return v < a ? a : (v > b ? b : v); }
+function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+function lerp(a, b, t) { return a + (b - a) * t; }
+function smoothstep(e0, e1, x) {
+  var t = clamp((x - e0) / (e1 - e0), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+
+/* =============================================================================
+   场景常量：与 app3d.html 保持一致，便于截图对比
+   ========================================================================== */
+var WORLD_W = 352, WORLD_D = 256;          // 世界尺寸（与主页面 v2 TERRAIN_W/D 相同）
+var PIT = { cx: -6, cz: -6, rx: 46, rz: 40, depth: 27, benchH: 7.5 };  // 采坑（同主页面位置）
+var STATION_XZ = { x: 0, z: 44 };          // 地面站（同主页面）
+var PAD_H = 2.0;
+
+/* 机位与主页面 CAMS 一致（iso / top / station / pit），另加一个远景机位看外延带 */
+var VIEWS = [
+  { name: "默认机位 iso（与 app3d 一致）", pos: [190, 130, 250], tgt: [-10, -12, -12] },
+  { name: "俯视 top（看环带/纹理连续性）", pos: [0.1, 430, 0], tgt: [0, 0, 0] },
+  { name: "地面站 station",               pos: [62, 72, 200],  tgt: [0, 10, 44] },
+  { name: "矿区 pit",                     pos: [-18, 82, 104], tgt: [-6, -16, -6] },
+  { name: "远景（世界外远机位）",          pos: [200, 260, 420], tgt: [0, -10, 0] }
+];
+
+/* =============================================================================
+   程序化高程场：山脊（ridged fBm）+ 圆形采坑台阶（模拟露天矿）
+   —— 目的不是好看，而是同时覆盖：大起伏、陡坡、平坦台面、台阶边缘，
+      这样 LOD 的接缝/裙边/抽样误差都能被一张图暴露出来。
+   ========================================================================== */
+function makeField(N, M) {
+  var H = new Float32Array(N * M);
+  var dx = WORLD_W / (N - 1), dz = WORLD_D / (M - 1);
+
+  /* 确定性哈希（无 Math.random，保证同 URL 截图可复现） */
+  function hash2(ix, iy, seed) {
+    var n = ix * 374761393 + iy * 668265263 + seed * 1442695040;
+    n = (n ^ (n >> 13)) * 1274126177;
+    n = n ^ (n >> 16);
+    return ((n >>> 0) % 1000003) / 1000003;
+  }
+  function vnoise(x, y, seed) {
+    var x0 = Math.floor(x), y0 = Math.floor(y);
+    var fx = x - x0, fy = y - y0;
+    var sx = fx * fx * (3 - 2 * fx), sy = fy * fy * (3 - 2 * fy);
+    var v00 = hash2(x0, y0, seed), v10 = hash2(x0 + 1, y0, seed);
+    var v01 = hash2(x0, y0 + 1, seed), v11 = hash2(x0 + 1, y0 + 1, seed);
+    return (v00 * (1 - sx) + v10 * sx) * (1 - sy) + (v01 * (1 - sx) + v11 * sx) * sy;
+  }
+  function fbm(x, y, seed) {
+    var v = 0, a = 0.5, f = 1;
+    for (var o = 0; o < 4; o++) {
+      v += a * vnoise(x * f, y * f, seed + o * 17);
+      f *= 2.0; a *= 0.5;
+    }
+    return v;
+  }
+
+  for (var j = 0; j < M; j++) {
+    var z = -WORLD_D / 2 + j * dz;
+    for (var i = 0; i < N; i++) {
+      var x = -WORLD_W / 2 + i * dx;
+      /* ① 大起伏 + ② 脊状噪声（1-|2n-1| 形成山脊线）+ ③ 中/细尺度细节 */
+      var big = fbm(x * 0.016, z * 0.016, 101);
+      var rid = 1 - Math.abs(2 * fbm(x * 0.028, z * 0.028, 211) - 1);
+      var h = 20 * rid + 11 * (big - 0.5) +
+              4.0 * (fbm(x * 0.09, z * 0.09, 313) - 0.5) +
+              1.2 * (fbm(x * 0.28, z * 0.28, 419) - 0.5);
+
+      /* ④ 圆形采坑：坑缘隆起 + 台阶式下挖（台阶 7.5 世界单位 ≈ 10~15 m × 4 夸张） */
+      var r = Math.sqrt(((x - PIT.cx) / PIT.rx) * ((x - PIT.cx) / PIT.rx) +
+                        ((z - PIT.cz) / PIT.rz) * ((z - PIT.cz) / PIT.rz));
+      h += 5.0 * smoothstep(1.4, 1.0, r);
+      if (r < 1.02) {
+        var d = 27 * smoothstep(1.0, 0.28, r);
+        d = Math.floor(d / PIT.benchH) * PIT.benchH;   // 台阶化：露天矿台阶平台
+        h -= d;
+      }
+
+      /* ⑤ 地面站平台整平（与 app3d.html 同一位置/半径，方便对比老地形） */
+      var ds = Math.sqrt((x - STATION_XZ.x) * (x - STATION_XZ.x) +
+                         (z - STATION_XZ.z) * (z - STATION_XZ.z));
+      if (ds < 22) h = lerp(h, PAD_H, smoothstep(22, 10, ds));
+
+      H[j * N + i] = h;
+    }
+  }
+  return { H: H, N: N, M: M };
+}
+
+/* 与 app3d.html 的 terrainH 完全同公式（用于验证 handle.heightAt 一致性） */
+var devField = null;
+function terrainH(x, z) {
+  var F = devField;
+  if (!F) return 0;
+  var dx = WORLD_W / (F.N - 1), dz = WORLD_D / (F.M - 1);
+  var fx = (x + WORLD_W / 2) / dx, fz = (z + WORLD_D / 2) / dz;
+  var i0 = clamp(Math.floor(fx), 0, F.N - 2), j0 = clamp(Math.floor(fz), 0, F.M - 2);
+  var tx = clamp(fx - i0, 0, 1), tz = clamp(fz - j0, 0, 1);
+  var h00 = F.H[j0 * F.N + i0], h10 = F.H[j0 * F.N + i0 + 1];
+  var h01 = F.H[(j0 + 1) * F.N + i0], h11 = F.H[(j0 + 1) * F.N + i0 + 1];
+  return (h00 * (1 - tx) + h10 * tx) * (1 - tz) + (h01 * (1 - tx) + h11 * tx) * tz;
+}
+
+/* =============================================================================
+   three.js 场景（与主页面的渲染设置相同：ACES 色调映射 / sRGB 输出 / 指数雾）
+   ========================================================================== */
+var renderer, scene, camera, controls, handle = null;
+var hudEl = document.getElementById("hud");
+var tierLbl = document.getElementById("tierLbl");
+var hudLast = 0, firstFrame = true, lastT = performance.now();
+var heightMaxErr = -1, heightSamples = 0;
+
+function setupScene() {
+  var fail = function (msg) {
+    hudEl.className = "warn";
+    hudEl.textContent = "3D 场景初始化失败：" + msg;
+  };
+  try {
+    renderer = new THREE.WebGLRenderer({
+      antialias: true, powerPreference: "high-performance", preserveDrawingBuffer: true
+    });
+  } catch (e) { fail(e.message); return false; }
+
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.shadowMap.enabled = !!SHADOW;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  if (THREE.sRGBEncoding) renderer.outputEncoding = THREE.sRGBEncoding;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 0.95;
+  document.getElementById("app").appendChild(renderer.domElement);
+
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0b1a26);
+  scene.fog = new THREE.FogExp2(0x0b1a26, 0.0016);
+
+  camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.5, 2600);
+  var v = VIEWS[VIEW];
+  camera.position.set(v.pos[0], v.pos[1], v.pos[2]);
+
+  controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.target.set(v.tgt[0], v.tgt[1], v.tgt[2]);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.075;
+  controls.minDistance = 8;
+  controls.maxDistance = 720;
+  controls.maxPolarAngle = Math.PI * 0.495;
+  controls.update();
+
+  /* 光照：与 app3d.html 同一套（半球光 + 低角度暖阳 + 蓝色补光） */
+  scene.add(new THREE.HemisphereLight(0x9ec8ff, 0x1a1a14, 0.52));
+  var sun = new THREE.DirectionalLight(0xffe9c4, 1.0);
+  sun.position.set(120, 86, 54);
+  if (SHADOW) {
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(1024, 1024);
+    var d = 108;
+    sun.shadow.camera.left = -d; sun.shadow.camera.right = d;
+    sun.shadow.camera.top = d; sun.shadow.camera.bottom = -d;
+    sun.shadow.camera.near = 1; sun.shadow.camera.far = 460;
+    sun.shadow.bias = -0.0011;
+    if ("normalBias" in sun.shadow) sun.shadow.normalBias = 0.05;
+  }
+  scene.add(sun);
+  var fill = new THREE.DirectionalLight(0x4a86c8, 0.35);
+  fill.position.set(-110, 50, -80);
+  scene.add(fill);
+  return true;
+}
+
+/* =============================================================================
+   构建 LOD 地形
+   ========================================================================== */
+function buildTerrainLOD() {
+  devField = makeField(NX, NZ);
+  var t0 = performance.now();
+  handle = window.UAVTerrain.create({
+    THREE: THREE,
+    scene: scene,
+    camera: camera,
+    field: devField,
+    world: { width: WORLD_W, depth: WORLD_D },
+    tier: TIER,
+    quality: {
+      enabled: true,
+      rings: RINGS || 0,            // 0 = 按档位默认（high/medium 4 环、cpu 2 环）
+      baseSpacing: null,            // 按 DEM 格自动算
+      ringScale: 2,
+      skirtDepth: 3.0,
+      anisotropy: TIER === "cpu" ? 1 : 8,
+      debugTint: DEBUG
+    },
+    log: function (msg) { console.log("[Terrain]", msg); }
+  });
+  var createMs = performance.now() - t0;
+  if (!handle) {
+    hudEl.className = "warn";
+    hudEl.textContent = "UAVTerrain.create() 返回 null —— 模块没加载成功或初始化失败。";
+    return;
+  }
+  handle.setDebug(DEBUG);
+  window.__DEV_HANDLE__ = handle;      // 自检页方便用 --eval 抓 stats / 抓顶点属性做验证
+  window.__DEV_CAM__ = camera;
+  rebuildWire();
+
+  /* 高度一致性：handle.heightAt 必须与 app3d.html 的 terrainH 完全一致 */
+  var maxErr = 0;
+  for (var k = 0; k < 800; k++) {
+    var x = (Math.random() - 0.5) * WORLD_W * 1.4;
+    var z = (Math.random() - 0.5) * WORLD_D * 1.4;   // 故意采样部分世界外（clamp 行为）
+    var e = Math.abs(handle.heightAt(x, z) - terrainH(x, z));
+    if (e > maxErr) maxErr = e;
+  }
+  heightMaxErr = maxErr;
+  heightSamples = 800;
+  console.log("[DEV] heightAt vs terrainH 最大误差 =", maxErr, "（" + heightSamples + " 点）");
+  console.log("[DEV] 场 " + NX + "×" + NZ + " · create " + createMs.toFixed(0) + " ms",
+    handle.stats);
+}
+
+/* =============================================================================
+   ?wire=1：用每环「实际提交绘制的三角形」重建一个 LineSegments 叠加层。
+   为什么不直接 material.wireframe=true？—— 因为顶点缓冲按容量预分配、用
+   drawRange 控制绘制范围，three 的 wireframe 会按 index 数组全长生成线框，
+   会把容量里没用的旧数据也画出来（假线）。手工按 drawRange 取三角形最准确。
+   ========================================================================== */
+var wireGroup = null, wireKey = "", wireStatsKey = "";
+function disposeWire() {
+  if (!wireGroup) return;
+  scene.remove(wireGroup);
+  wireGroup.children.forEach(function (ch) {
+    if (ch.geometry && ch.geometry !== null) {
+      try { ch.geometry.setIndex(null); ch.geometry.dispose(); } catch (e) { /* 忽略 */ }
+    }
+  });
+  wireGroup = null;
+}
+function rebuildWire() {
+  disposeWire();
+  if (!WIRE || !handle) return;
+  var lineMat = new THREE.LineBasicMaterial({
+    color: 0x8ff5e6, transparent: true, opacity: 0.45, depthWrite: false
+  });
+  var g = new THREE.Group();
+  var tris = 0;
+  handle.group.children.forEach(function (mesh) {
+    var geo = mesh.geometry;
+    if (!geo || !geo.index || !geo.attributes.position) return;
+    var n = geo.drawRange.count || 0;
+    if (n <= 0) return;
+    var ia = geo.index.array;
+    var seg = new Uint32Array(n * 2);       // 每个三角形 3 条边 = 6 个索引 = 2n
+    for (var t = 0; t < n; t += 3) {
+      var a = ia[t], b = ia[t + 1], c = ia[t + 2];
+      var o = (t / 3) * 6;
+      seg[o] = a; seg[o + 1] = b;
+      seg[o + 2] = b; seg[o + 3] = c;
+      seg[o + 4] = c; seg[o + 5] = a;
+      tris++;
+    }
+    var lg = new THREE.BufferGeometry();
+    lg.setAttribute("position", geo.attributes.position);
+    lg.setIndex(new THREE.BufferAttribute(seg, 1));
+    g.add(new THREE.LineSegments(lg, lineMat));
+  });
+  scene.add(g);
+  wireGroup = g;
+  wireKey = tris + "|" + (handle.stats.ringSpacing || []).join(",") + "|" + handle.stats.tris;
+}
+
+/* =============================================================================
+   HUD：把 stats（三角形数/环数/drawCalls）打到角落，截图里能直接读
+   ========================================================================== */
+function updateHud() {
+  if (!hudEl) return;
+  if (!handle) return;
+  var s = handle.stats;
+  var spacing = (s.ringSpacing || []).join(" / ");
+  var lines = [];
+  lines.push("tier=<b>" + TIER + "</b>  环数=<b>" + s.rings + "</b>  间距 " + spacing);
+  lines.push("顶点 <b>" + (s.verts || 0) + "</b>   三角形 <b>" + (s.tris || 0) +
+    "</b>   drawCalls <b>" + (s.drawCalls || 0) + "</b>   update <b>" +
+    (s.updateMs ? s.updateMs.toFixed(1) : "0.0") + " ms</b>");
+  lines.push("高程场 <b>" + NX + "×" + NZ + "</b>   世界 <b>" + WORLD_W + "×" + WORLD_D +
+    "</b>   基础格距 " + (s.baseSpacing != null ? s.baseSpacing.toFixed(3) : "-") +
+    "   视角 #" + VIEW + "（" + VIEWS[VIEW].name + "）");
+  lines.push("heightAt ≡ terrainH：最大误差 <b>" + (heightMaxErr >= 0 ?
+    heightMaxErr.toExponential(1) : "?") + "</b>（" + heightSamples + " 点，含世界外 clamp）");
+  lines.push("GPU 三角 " + (renderer ? renderer.info.render.triangles : "-") +
+    "   调用 " + (renderer ? renderer.info.render.calls : "-") +
+    "   构建 " + (s.buildMs ? s.buildMs.toFixed(0) : "-") + " ms" +
+    (DEBUG ? "\n<b>debug 环带着色：</b>红=0 绿=1 蓝=2 黄=3（由内到外）" : ""));
+  lines.push("<span style='color:#7fd9ff'>?n=0..4  ?rings=2  ?debug=1  ?wire=1(实际三角形线框)  ?nx=1024&amp;nz=768  ?tier=cpu  ?noshadow=1</span>");
+  hudEl.innerHTML = lines.join("\n");
+}
+
+/* =============================================================================
+   主循环
+   ========================================================================== */
+function animate() {
+  requestAnimationFrame(animate);
+  var now = performance.now();
+  var dt = Math.min(0.1, (now - lastT) / 1000);
+  lastT = now;
+
+  try {
+    if (controls) controls.update();
+    if (handle && handle.update) handle.update(camera, dt);
+    if (WIRE && handle) {
+      /* 相机移动导致环重建后，线框叠加层跟着重建（几何变了） */
+      var wk = handle.stats.tris + "|" + (handle.stats.ringSpacing || []).join(",");
+      if (wk !== wireStatsKey) { wireStatsKey = wk; rebuildWire(); }
+    }
+    if (renderer && scene && camera) renderer.render(scene, camera);
+  } catch (e) {
+    console.warn("[DEV] 渲染异常：", e);
+  }
+
+  if (firstFrame) {
+    firstFrame = false;
+    window.__DEV_READY__ = true;
+    console.log("[DEV] UAVTerrain ready", window.UAVTerrain ? window.UAVTerrain.version : "?",
+      handle ? handle.stats : null);
+  }
+  if (now - hudLast > 200) { hudLast = now; updateHud(); }
+}
+
+/* =============================================================================
+   启动
+   ========================================================================== */
+function boot() {
+  tierLbl.textContent = TIER + " 档 · " + NX + "×" + NZ + " 场" +
+    (DEBUG ? " · debug 着色" : "") + (WIRE ? " · 线框" : "");
+  if (typeof window.UAVTerrain !== "object" || !window.UAVTerrain ||
+      typeof window.UAVTerrain.create !== "function") {
+    hudEl.className = "warn";
+    hudEl.textContent = "/static/terrain_lod.js 未加载成功（window.UAVTerrain 不存在）";
+    return;
+  }
+  if (!setupScene()) return;
+  buildTerrainLOD();
+  window.addEventListener("resize", function () {
+    if (!renderer || !camera) return;
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+  animate();
+}
+
+boot();
+</script>
+</body>
+</html>

@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>UAVModel 自检转台 · _dev_uav</title>
+<!-- 用 data: 空图标避免浏览器请求 /favicon.ico 产生 404 控制台错误（验收要求 consoleErrors=[]） -->
+<link rel="icon" href="data:,">
+<style>
+  :root{
+    --bg:#04070d; --panel:rgba(10,18,30,.78); --line:rgba(78,161,255,.26);
+    --txt:#dbe8f7; --dim:#7d90aa; --cyan:#37e2d5; --green:#3ddc97; --red:#ff8b8b;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--txt);
+    font:13px/1.55 "Microsoft YaHei","Segoe UI",system-ui,sans-serif;user-select:none}
+  #app{position:fixed;inset:0}
+  canvas{display:block}
+  .panel{position:fixed;background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:10px 13px;backdrop-filter:blur(10px);box-shadow:0 8px 30px rgba(0,0,0,.5);z-index:15}
+  .panel h3{margin:0 0 7px;font-size:10.5px;letter-spacing:1.5px;color:var(--cyan);font-weight:700;
+    text-transform:uppercase;display:flex;align-items:center;gap:6px}
+  .panel h3::before{content:'';width:3px;height:11px;border-radius:2px;
+    background:linear-gradient(180deg,#37e2d5,#1f6feb)}
+  #stats{left:14px;top:14px;width:332px}
+  #tips{left:14px;bottom:14px;width:318px;font-size:11px;color:var(--dim)}
+  .kv{display:flex;justify-content:space-between;gap:10px;padding:2px 0;font-size:12px}
+  .kv span{color:var(--dim)}
+  .kv b{font-variant-numeric:tabular-nums;font-weight:600;color:#cfe4f7}
+  .kv b.hi{color:var(--green)} .kv b.bad{color:var(--red)}
+  .sep{height:1px;background:var(--line);margin:7px 0}
+  #err{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:50;display:none;
+    max-width:70vw;background:rgba(120,32,32,.95);border:1px solid #a33;border-radius:10px;
+    padding:14px 18px;font-size:13px;line-height:1.8;color:#ffd9d9;white-space:pre-wrap}
+  #tag{position:fixed;right:14px;top:14px;z-index:15;font:500 11px/1.5 ui-monospace,Consolas,monospace;
+    color:#8fb6d8;background:rgba(10,22,34,.66);border:1px solid rgba(78,161,255,.3);
+    border-radius:9px;padding:7px 11px;text-align:right}
+  kbd{font:inherit;color:#9ff7ee;background:rgba(55,226,213,.12);border:1px solid rgba(55,226,213,.35);
+    border-radius:4px;padding:0 4px}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="err"></div>
+
+<div id="tag">
+  自检页（非主场景）<br>
+  <span style="color:#5c748c">UAVModel · 桨叶运动模糊 / 云台跟随 / 起落架收放</span>
+</div>
+
+<div class="panel" id="stats">
+  <h3>UAVModel 自检 · 参数</h3>
+  <div class="kv"><span>档位 / 机数</span><b id="sTier">-</b></div>
+  <div class="kv"><span>架次阶段 phase</span><b id="sPhase">-</b></div>
+  <div class="kv"><span>转速标度 spin</span><b id="sSpin">-</b></div>
+  <div class="kv"><span>起落架 gear</span><b id="sGear">-</b></div>
+  <div class="sep"></div>
+  <div class="kv"><span>Mesh / 架 · 三角 / 架</span><b id="sMesh">-</b></div>
+  <div class="kv"><span>Mesh 总数（机群）</span><b id="sMeshAll">-</b></div>
+  <div class="kv"><span>draw calls · triangles</span><b id="sCalls">-</b></div>
+  <div class="kv"><span>FPS · 每帧耗时</span><b id="sFps">-</b></div>
+  <div class="kv"><span>anim 耗时 / 帧</span><b id="sAnim">-</b></div>
+  <div class="sep"></div>
+  <div class="kv"><span>桨叶透明度 α</span><b id="sBlade">-</b></div>
+  <div class="kv"><span>模糊盘不透明度 α</span><b id="sDisc">-</b></div>
+  <div class="kv"><span>云台 yaw / pitch</span><b id="sGimbal">-</b></div>
+  <div class="kv"><span>云台指向误差</span><b id="sAim">-</b></div>
+  <div class="kv"><span>selfTest()</span><b id="sTest">-</b></div>
+</div>
+
+<div class="panel" id="tips">
+  <h3>怎么看这个页面</h3>
+  <div>· 鼠标左键拖拽 = 环绕；滚轮 = 缩放（OrbitControls）</div>
+  <div>· URL 参数：<kbd>?phase=PAD|CLIMB|TRANSIT|SURVEY|RETURN|LAND</kbd></div>
+  <div>· <kbd>?spin=9|18|27|38</kbd> 覆盖转速；<kbd>?gear=0|1</kbd> 强制起落架收/放</div>
+  <div>· <kbd>?cam=side|top|front|iso</kbd> 机位；<kbd>?n=30</kbd> 30 架同屏看性能</div>
+  <div>· <kbd>?tier=high|medium|cpu</kbd> 档位；<kbd>?cone=1</kbd> 显示扫描锥</div>
+  <div style="margin-top:5px;color:#5c748c">低转速（spin=9）看桨叶；巡航/高负载看半透明模糊盘。</div>
+</div>
+
+<!-- 加载顺序与主页面一致：three → OrbitControls → 本模块（都是经典脚本，非 module） -->
+<script src="/static/three.min.js"></script>
+<script src="/static/OrbitControls.js"></script>
+<script src="/static/uav_model.js"></script>
+<script>
+/* =============================================================================
+ * _dev_uav.html —— UAVModel 自检页
+ * 单机特写 + 环绕相机 + 网格地面 + 平行光阴影；支持 6 种架次阶段 / 4 个转速 /
+ * 起落架两态 / 30 架同屏性能观察。
+ * 验收命令见 docs/07 §5：
+ *   node tools/shot.mjs --url ".../_dev_uav.html?phase=SURVEY&spin=38&cam=side" ...
+ * ========================================================================== */
+(function () {
+  "use strict";
+
+  var QS = new URLSearchParams(location.search);
+  function q(name, def) { var v = QS.get(name); return (v === null || v === "") ? def : v; }
+  function qint(name, def) {
+    var v = parseInt(q(name, ""), 10);
+    return isFinite(v) ? v : def;
+  }
+  function showErr(msg) {
+    var e = document.getElementById("err");
+    e.textContent = "自检页初始化失败：\n" + msg;
+    e.style.display = "block";
+    console.error("[DEV] " + msg);
+  }
+
+  var PHASES = ["PAD", "CLIMB", "TRANSIT", "SURVEY", "RETURN", "LAND"];
+  var phaseArg = (q("phase", "SURVEY") || "").toUpperCase();
+  var PHASE = PHASES.indexOf(phaseArg) >= 0 ? phaseArg : "SURVEY";
+  var TIER = q("tier", "high");
+  var N = Math.max(1, Math.min(60, qint("n", 1)));
+  var FLEET = N > 1;
+  var CAM = q("cam", "side");
+  var CONE = qint("cone", 0) === 1;
+  var GEAR_OVERRIDE = QS.has("gear") ? (qint("gear", 1) ? 1 : 0) : null;
+  var SPIN_OVERRIDE = QS.has("spin") ? Math.max(0, Math.min(80, qint("spin", 27))) : null;
+
+  /* 架次阶段 → 默认转速（与 app3d.html 旧逻辑一致：PAD 9 / 起降 18 / 巡航 27 / 忙碌 38） */
+  function spinForPhase(ph) {
+    if (ph === "PAD") return 9;
+    if (ph === "LAND" || ph === "CLIMB") return 18;
+    if (ph === "SURVEY") return 38;      // 勘查任务通常高负载
+    return 27;                            // TRANSIT / RETURN 巡航
+  }
+  function busyForPhase(ph) { return ph === "SURVEY" || ph === "TRANSIT"; }
+  function isGround(ph) { return ph === "PAD" || ph === "LAND"; }
+
+  if (typeof THREE === "undefined") { showErr("three.min.js 没有加载成功"); return; }
+  if (typeof window.UAVModel !== "object" || typeof window.UAVModel.create !== "function") {
+    showErr("window.UAVModel 不存在（/static/uav_model.js 没加载成功？）"); return;
+  }
+
+  /* ------------------------------------------------------------ 渲染器 / 场景 */
+  var renderer = new THREE.WebGLRenderer({ antialias: !FLEET, powerPreference: "high-performance" });
+  renderer.setPixelRatio(FLEET ? 1 : Math.min(2, window.devicePixelRatio || 1));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.outputEncoding = THREE.sRGBEncoding;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 0.92;
+  document.getElementById("app").appendChild(renderer.domElement);
+
+  var scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x060b14);
+  // 30 架同屏时机位拉得很远，雾要相应变淡，否则整片机群被雾吃掉
+  scene.fog = new THREE.FogExp2(0x060b14, FLEET ? 0.0042 : 0.0115);
+
+  var camera = new THREE.PerspectiveCamera(42, window.innerWidth / window.innerHeight, 0.1, 500);
+  var controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.075;
+  controls.rotateSpeed = 0.75;
+  controls.autoRotate = false;
+
+  /* ------------------------------------------------------------ 光照（单机特写要看清金属高光） */
+  var hemi = new THREE.HemisphereLight(0xa9dcff, 0x0c1720, 0.62);
+  scene.add(hemi);
+
+  var sun = new THREE.DirectionalLight(0xdcefff, 1.15);
+  sun.position.set(13, 19, 9);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(FLEET ? 1024 : 2048, FLEET ? 1024 : 2048);
+  sun.shadow.camera.near = 1;
+  sun.shadow.camera.far = 90;
+  sun.shadow.camera.left = FLEET ? -42 : -14;
+  sun.shadow.camera.right = FLEET ? 42 : 14;
+  sun.shadow.camera.top = FLEET ? 42 : 14;
+  sun.shadow.camera.bottom = FLEET ? -42 : -14;
+  sun.shadow.bias = -0.0006;
+  sun.shadow.normalBias = 0.02;
+  if (FLEET) sun.position.set(22, 30, 16);
+  scene.add(sun);
+
+  var fill = new THREE.DirectionalLight(0x3f7ea8, 0.42);
+  fill.position.set(-14, 9, -16);
+  scene.add(fill);
+
+  var rim = new THREE.DirectionalLight(0x8fd8ff, 0.4);
+  rim.position.set(-4, 12, -20);
+  scene.add(rim);
+
+  /* ------------------------------------------------------------ 地面 + 网格（阴影承接面） */
+  var ground = new THREE.Mesh(
+    new THREE.PlaneGeometry(220, 220),
+    new THREE.MeshStandardMaterial({ color: 0x0a1420, roughness: 0.96, metalness: 0.04 })
+  );
+  ground.rotation.x = -Math.PI / 2;
+  ground.receiveShadow = true;
+  scene.add(ground);
+
+  var grid = new THREE.GridHelper(120, 120, 0x2c6285, 0x12303f);
+  grid.position.y = 0.012;
+  grid.material.transparent = true;
+  grid.material.opacity = 0.42;
+  scene.add(grid);
+
+  /* ------------------------------------------------------------ 无人机（单机或 30 架） */
+  var drones = [];          // { root, ctx, phase }
+  var lookTarget = new THREE.Vector3(4.2, 0.07, 2.4);
+  var singleGroundY = 1.4;  // 起落架放下时，机身中心离地高度（= 腿长 × 1.5）
+  var singleFlyY = 6.0;
+
+  var marker = null, aimLine = null, padRing = null;
+  if (!FLEET) {
+    // 注视点标记：SURVEY 时云台应指向这里（截图里用来证明"云台指向正确"）
+    marker = new THREE.Mesh(
+      new THREE.RingGeometry(0.45, 0.7, 40),
+      new THREE.MeshBasicMaterial({ color: 0x37e2d5, transparent: true, opacity: 0.9,
+        side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false })
+    );
+    marker.rotation.x = -Math.PI / 2;
+    marker.position.copy(lookTarget);
+    scene.add(marker);
+
+    var aimGeo = new THREE.BufferGeometry();
+    aimGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(6), 3));
+    aimLine = new THREE.Line(aimGeo, new THREE.LineBasicMaterial({
+      color: 0x37e2d5, transparent: true, opacity: 0.32, blending: THREE.AdditiveBlending }));
+    scene.add(aimLine);
+
+    // 停机坪提示环（PAD/LAND 时贴地）
+    padRing = new THREE.Mesh(
+      new THREE.RingGeometry(2.4, 2.9, 44),
+      new THREE.MeshBasicMaterial({ color: 0x4ea1ff, transparent: true, opacity: 0.22,
+        side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false })
+    );
+    padRing.rotation.x = -Math.PI / 2;
+    padRing.position.set(0, 0.02, 0);
+    scene.add(padRing);
+  }
+
+  function makeCtx(phase) {
+    return {
+      t: 0,
+      phase: phase,
+      spin: spinForPhase(phase),
+      busy: busyForPhase(phase),
+      priority: "HIGH",
+      scanning: phase === "SURVEY",
+      health: 92,
+      online: true,
+      bank: 0,
+      yawRate: 0,
+      lookTarget: lookTarget,
+      gearOverride: GEAR_OVERRIDE
+    };
+  }
+
+  function createDrone(tier) {
+    return window.UAVModel.create({
+      tier: tier,
+      quality: { shadows: true },
+      log: function (m) { console.log("[UAV] " + m); }
+    });
+  }
+
+  if (!FLEET) {
+    var root = createDrone(TIER);
+    if (!root) { showErr("UAVModel.create() 返回 null"); return; }
+    root.scale.setScalar(1.5);                     // 与主页面 buildFleet 一致
+    root.position.set(0, isGround(PHASE) ? singleGroundY : singleFlyY, 0);
+    scene.add(root);
+    var ctx = makeCtx(PHASE);
+    if (SPIN_OVERRIDE !== null) ctx.spin = SPIN_OVERRIDE;
+    drones.push({ root: root, ctx: ctx, phase: PHASE, baseY: root.position.y });
+  } else {
+    /* 30 架同屏：6 列 × 5 行，各机分到不同架次阶段（一次截图看全 6 种状态） */
+    var cols = 6;
+    for (var i = 0; i < N; i++) {
+      var ph = PHASES[i % PHASES.length];
+      var r = createDrone(TIER);
+      if (!r) { showErr("UAVModel.create() 第 " + (i + 1) + " 架返回 null"); return; }
+      var c = i % cols, row = Math.floor(i / cols);
+      // 间距 8.4：旋翼直径约 6.6（1.5 缩放后），必须留够间隙否则 30 架会互相穿插
+      var x = (c - (cols - 1) / 2) * 8.4;
+      var z = (row - 2) * 8.4;
+      var y = 5.2 + (i % 3) * 0.9;
+      r.scale.setScalar(1.5);
+      r.position.set(x, y, z);
+      r.rotation.y = (i * 0.63) % (Math.PI * 2);     // 朝向有差异，云台看起来更自然
+      scene.add(r);
+      var c2 = makeCtx(ph);
+      c2.lookTarget = new THREE.Vector3(x + 2.2, 0.1, z + 1.6);
+      drones.push({ root: r, ctx: c2, phase: ph, baseY: y });
+    }
+  }
+
+  /* ------------------------------------------------------------ 相机机位预设 */
+  var camTargetY = (FLEET ? 6.2 : (drones[0].baseY + 0.15));
+  (function setupCamera() {
+    var d = FLEET ? 72 : 12.4;
+    var tgt = new THREE.Vector3(0, camTargetY, 0);
+    var pos = new THREE.Vector3();
+    if (CAM === "top") pos.set(0.6, tgt.y + d * 1.15, d * 0.2);   // 略微偏一点，避免正上方 lookAt 万向锁
+    else if (CAM === "front") pos.set(0.9, tgt.y + d * 0.16, d * 0.98);
+    else if (CAM === "iso") pos.set(d * 0.62, tgt.y + d * 0.5, d * 0.64);
+    else pos.set(d * 0.88, tgt.y + d * 0.42, d * 0.18);   // side：从 +X 侧上方（能看全桨盘）
+    camera.position.copy(pos);
+    controls.target.copy(tgt);
+    controls.minDistance = FLEET ? 12 : 4.5;
+    controls.maxDistance = FLEET ? 180 : 70;
+    controls.update();
+  })();
+
+  /* ------------------------------------------------------------ 每帧：模拟主循环会传的 ctx */
+  var clock = new THREE.Clock();
+  var t = 0;
+  var frames = 0, ready = false;
+  var fpsAcc = 0, fpsFrames = 0, fps = 0;
+  var animMs = 0, animFrames = 0, animMsAvg = 0;
+  var meshAll = 0;
+  drones.forEach(function (d) {
+    meshAll += d.root.userData.stats.meshes;
+  });
+
+  function updateSingleCtx(ctx, dt, tt) {
+    ctx.t = tt;
+    if (SPIN_OVERRIDE !== null) ctx.spin = SPIN_OVERRIDE;
+    else ctx.spin = spinForPhase(ctx.phase);
+    if (GEAR_OVERRIDE === null) ctx.gearOverride = undefined;
+    // 主循环里这些量来自 /api/state；自检页给固定值，保证截图可复现
+    ctx.health = 92;
+    ctx.online = true;
+    ctx.scanning = ctx.phase === "SURVEY";
+    ctx.busy = busyForPhase(ctx.phase);
+  }
+
+  function updateLedAndCone(d) {
+    var u = d.root.userData;
+    var col = 0x3ddc97;                              // 模拟主循环：健康度→LED 颜色
+    u.ledMat.color.setHex(col);
+    u.led.scale.setScalar(d.ctx.busy ? 1.3 + 0.28 * Math.sin(t * 9 + d.baseY) : 1.0);
+    // 扫描锥：只有 SURVEY 且打开 ?cone=1 时显示（颜色/透明度本应由主循环设置）
+    var wantCone = (CONE && d.ctx.phase === "SURVEY") ? 0.05 : 0.0;
+    u.coneMat.opacity += (wantCone - u.coneMat.opacity) * Math.min(1, 0.016 * 5);
+    u.cone.visible = u.coneMat.opacity > 0.004;
+  }
+
+  var lastT = performance.now();
+  function frame() {
+    requestAnimationFrame(frame);
+    var now = performance.now();
+    var wallDt = Math.min(0.25, (now - lastT) / 1000);
+    lastT = now;
+    var dt = Math.min(0.05, clock.getDelta());
+    t += dt;
+
+    var t0 = performance.now();
+    for (var i = 0; i < drones.length; i++) {
+      var d = drones[i];
+      if (FLEET) {
+        d.ctx.t = t;
+        d.ctx.spin = spinForPhase(d.ctx.phase);
+        d.ctx.busy = busyForPhase(d.ctx.phase);
+        d.ctx.scanning = d.ctx.phase === "SURVEY";
+        // 轻微上下浮动，画面不死板（位置在 anim 之前设置好，云台才能用对世界坐标）
+        d.root.position.y = d.baseY + Math.sin(t * 1.15 + i * 0.9) * 0.18;
+      } else {
+        updateSingleCtx(d.ctx, dt, t);
+        if (!isGround(d.ctx.phase)) {
+          d.root.position.y = d.baseY + Math.sin(t * 1.25) * 0.06;
+        }
+      }
+      d.root.userData.anim(dt, d.ctx);
+      updateLedAndCone(d);
+    }
+    animMs += performance.now() - t0;
+    animFrames++;
+
+    /* 注视点标记 / 瞄准线：只在 SURVEY 且真有 lookTarget 时显示 */
+    if (marker) {
+      var showAim = drones[0].ctx.phase === "SURVEY";
+      marker.visible = showAim;
+      aimLine.visible = showAim;
+      if (showAim) {
+        marker.scale.setScalar(1 + 0.06 * Math.sin(t * 3.2));
+        marker.material.opacity = 0.6 + 0.25 * Math.sin(t * 3.2);
+        var gp = aimLine.geometry.attributes.position;
+        gp.setXYZ(0, drones[0].root.position.x, drones[0].root.position.y - 0.6, drones[0].root.position.z);
+        gp.setXYZ(1, lookTarget.x, lookTarget.y, lookTarget.z);
+        gp.needsUpdate = true;
+      }
+      padRing.visible = isGround(drones[0].ctx.phase);
+    }
+
+    controls.update();
+    renderer.render(scene, camera);
+
+    frames++;
+    fpsAcc += wallDt; fpsFrames++;
+    if (fpsAcc >= 0.35) {
+      fps = fpsFrames / Math.max(1e-6, fpsAcc);
+      animMsAvg = animMs / Math.max(1, animFrames);
+      fpsAcc = 0; fpsFrames = 0; animMs = 0; animFrames = 0;
+      updateHud();
+    }
+    if (!ready && frames >= 3) {
+      ready = true;
+      window.__DEV_READY__ = true;
+      var info = {
+        page: "_dev_uav.html",
+        tier: TIER,
+        n: drones.length,
+        phase: FLEET ? "MIXED" : PHASE,
+        spin: FLEET ? "per-phase" : (SPIN_OVERRIDE !== null ? SPIN_OVERRIDE : spinForPhase(PHASE)),
+        gear: GEAR_OVERRIDE,
+        cam: CAM,
+        meshesPerDrone: drones[0].root.userData.stats.meshes,
+        trisPerDrone: drones[0].root.userData.stats.tris,
+        meshesTotal: meshAll
+      };
+      console.log("[DEV] UAVModel ready " + JSON.stringify(info));
+    }
+  }
+
+  /* ------------------------------------------------------------ HUD 文本 */
+  var lastTest = null;
+  function updateHud() {
+    var d0 = drones[0];
+    var u = d0.root.userData;
+    var gearAmt = 0;
+    if (u.gear && u.gear.length) gearAmt = 1 - Math.abs(u.gear[0].rotation.x) / 1.42;
+    var gimbal = u.gimbal
+      ? "yaw " + (u.gimbal.yaw.rotation.y * 180 / Math.PI).toFixed(1) + "° / pitch " +
+        (-u.gimbal.pitch.rotation.x * 180 / Math.PI).toFixed(1) + "°"
+      : "无";
+    var bladeOp = (function () {
+      var m = u.rotors[0].children[0].material;
+      return m && m.opacity !== undefined ? m.opacity : null;
+    })();
+
+    setText("sTier", TIER + " · " + drones.length + " 架");
+    setText("sPhase", FLEET ? "混合（6 阶段轮转）" : d0.ctx.phase);
+    setText("sSpin", FLEET ? "按阶段" : String(d0.ctx.spin));
+    setText("sGear", gearAmt > 0.5 ? "放下（" + gearAmt.toFixed(2) + "）" : "收起（" + (1 - gearAmt).toFixed(2) + "）");
+    setText("sMesh", u.stats.meshes + " / " + u.stats.tris);
+    setText("sMeshAll", String(meshAll));
+    var ri = renderer.info.render;
+    setText("sCalls", ri.calls + " · " + ri.triangles);
+    setText("sFps", fps.toFixed(1) + " fps · " + (1000 / Math.max(0.001, fps)).toFixed(1) + " ms");
+    setText("sAnim", animMsAvg.toFixed(2) + " ms");
+    setText("sBlade", bladeOp === null ? "-" : bladeOp.toFixed(2));
+    var discOp = "-";
+    if (u.rotors[0].children.length > 1) {
+      var dm = u.rotors[0].children[1].material;
+      if (dm && dm.uniforms && dm.uniforms.uOpacity) discOp = dm.uniforms.uOpacity.value.toFixed(2);
+    }
+    setText("sDisc", discOp);
+    setText("sGimbal", gimbal);
+    /* 云台指向误差：把"期望角"独立算一遍（与模块内部公式无关），差值 = 跟随误差。
+       验证"云台指向正确"用的就是这个数 —— SURVEY 稳态时应 < 1.5°。 */
+    var aimTxt = "-";
+    if (u.gimbal && d0.ctx.phase === "SURVEY" && d0.ctx.lookTarget) {
+      var lt = d0.ctx.lookTarget, pp = d0.root.position;
+      var ddx = lt.x - pp.x, ddy = lt.y - pp.y, ddz = lt.z - pp.z;
+      var rootYaw = d0.root.rotation.y;
+      var lx = ddx * Math.cos(rootYaw) - ddz * Math.sin(rootYaw);
+      var lz = ddx * Math.sin(rootYaw) + ddz * Math.cos(rootYaw);
+      var wantYaw = Math.atan2(lx, lz);
+      var wantPitch = Math.atan2(ddy, Math.max(1e-4, Math.hypot(lx, lz)));
+      wantPitch = Math.max(-85 * Math.PI / 180, Math.min(20 * Math.PI / 180, wantPitch));
+      var actYaw = u.gimbal.yaw.rotation.y;
+      var actPitch = -u.gimbal.pitch.rotation.x;
+      var dYaw = Math.abs(actYaw - wantYaw) * 180 / Math.PI;
+      var dPitch = Math.abs(actPitch - wantPitch) * 180 / Math.PI;
+      aimTxt = "Δyaw " + dYaw.toFixed(2) + "° / Δpitch " + dPitch.toFixed(2) + "°";
+    }
+    setText("sAim", aimTxt);
+    if (!lastTest) {
+      try {
+        lastTest = window.UAVModel.selfTest();
+        var bad = lastTest.checks.filter(function (c) { return !c.ok; }).length;
+        setText("sTest", "ok=" + lastTest.ok + " · " + lastTest.checks.length + " 项" +
+          (bad ? "（" + bad + " 项失败）" : ""));
+        console.log("[DEV] selfTest", JSON.stringify(lastTest));
+      } catch (e) {
+        setText("sTest", "异常：" + (e && e.message ? e.message : e));
+      }
+    }
+  }
+  function setText(id, txt) {
+    var el = document.getElementById(id);
+    if (el) el.textContent = txt;
+  }
+
+  /* ------------------------------------------------------------ 窗口尺寸 */
+  window.addEventListener("resize", function () {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  /* 启动 */
+  if (!drones.length) showErr("没有创建出任何无人机");
+  else {
+    requestAnimationFrame(frame);
+    // 兜底：即使 rAF 被节流，1.2s 后也置位 __DEV_READY__，避免截图脚本空等
+    setTimeout(function () {
+      if (!ready) {
+        ready = true;
+        window.__DEV_READY__ = true;
+        console.log("[DEV] UAVModel ready (fallback timer)");
+      }
+    }, 1200);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,48 @@
+# ---- Python ----
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---- 运行产出（可重新生成，不入库） ----
+results/
+charts/
+logs/
+
+# ---- 敏感信息 ----
+# config.yaml 含本机数据库口令；仓库只跟踪脱敏的 config.example.yaml。
+# 首次克隆后：copy config.example.yaml config.yaml 再填口令，
+# 或者只设环境变量 UAV_DB_PASSWORD（优先级更高）。
+config.yaml
+
+# ---- 调试 / 归档产物（开发过程留下，不属于交付物） ----
+# 注：2026-11 已把 shots/、build/、_check.js、_tdbg.py、_backup/ 移出仓库
+#（见 D:\study\uav_sched_sim-archive）。测试需要的"改动前实现"已转正为
+# tests/fixtures/link_monitor_prechange.py，随测试一起入库。
+shots/
+archive/
+*.tmp
+
+# ---- CUDA 构建产物（gpu/ 只提交源码与脚本） ----
+gpu/*.exe
+gpu/tmpxft_*
+gpu/*.cudafe1.*
+gpu/*.module_id*
+gpu/*.obj
+gpu/*.exp
+gpu/*.lib
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini

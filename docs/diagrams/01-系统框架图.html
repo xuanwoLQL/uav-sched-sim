@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>系统框架图 · 无人机集群调度仿真</title>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&family=Noto+Serif:ital@0;1&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --color-paper:  #f5f5f5;
+    --color-paper2: #ececec;
+    --color-ink:    #2d3142;
+    --color-muted:  #4f5d75;
+    --color-soft:   #5a6580;
+    --color-accent: #bf4520;
+    --font-sans:  'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+    --font-serif: 'Instrument Serif', 'Noto Serif', serif;
+    --font-mono:  'Geist Mono', ui-monospace, monospace;
+  }
+  body {
+    font-family: var(--font-sans);
+    background: var(--color-paper);
+    color: var(--color-ink);
+    min-height: 100vh; display: flex; align-items: flex-start; justify-content: center;
+    padding: 3rem 2rem;
+  }
+  .frame { max-width: 1120px; width: 100%; }
+  .diagram-container { width: 100%; overflow-x: auto; }
+  .eyebrow {
+    font-family: var(--font-mono); font-size: 0.66rem; font-weight: 500;
+    letter-spacing: 0.18em; text-transform: uppercase; color: var(--color-muted);
+    margin-bottom: 0.5rem;
+  }
+  h1 {
+    font-family: var(--font-serif); font-size: clamp(1.5rem, 2.4vw + 0.75rem, 2rem);
+    font-weight: 400; letter-spacing: -0.02em; line-height: 1.15;
+    color: var(--color-ink); margin-bottom: 0.35rem;
+  }
+  .dek { font-size: 0.82rem; color: var(--color-soft); margin-bottom: 1.5rem; max-width: 62ch; }
+  svg { width: 100%; min-width: 1000px; display: block; }
+  @media print {
+    .diagram-container { overflow-x: visible; }
+    svg { min-width: 0; }
+  }
+</style>
+</head>
+<body>
+<div class="frame">
+  <p class="eyebrow">Architecture · 系统框架</p>
+  <h1>无人机集群并发自适应调度仿真系统</h1>
+  <p class="dek">五层结构：无人机端生产者线程 → 仿真内核（队列 / 限流 / 链路）→ 调度策略；
+     内核向下供实验评测层采样，评测层负责落库与出图，3D 桌面软件则直接读内核快照。</p>
+
+  <div class="diagram-container">
+    <svg viewBox="0 0 1000 660" xmlns="http://www.w3.org/2000/svg" role="img"
+         aria-labelledby="arch-title arch-desc">
+      <title id="arch-title">无人机集群调度仿真系统五层框架</title>
+      <desc id="arch-desc">展示无人机端线程、仿真内核、五种调度策略、实验评测层、MySQL 存储、命令行入口与三维桌面软件之间的调用与数据流向。</desc>
+      <defs>
+        <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+        <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#bf4520"/></marker>
+      </defs>
+
+      <rect width="100%" height="100%" fill="#f5f5f5"/>
+
+      <!-- ============ arrows first ============ -->
+      <!-- A 无人机端 -> B 仿真内核 : submit_task -->
+      <line x1="240" y1="160" x2="300" y2="160" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+      <rect x="248" y="140" width="48" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="272" y="149" fill="#5a6580" font-size="8" font-family="'Geist Mono', monospace"
+            text-anchor="middle" letter-spacing="0.06em">SUBMIT</text>
+
+      <!-- B -> C : step 决策 -->
+      <line x1="544" y1="152" x2="596" y2="152" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+      <rect x="552" y="132" width="36" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="570" y="141" fill="#5a6580" font-size="8" font-family="'Geist Mono', monospace"
+            text-anchor="middle" letter-spacing="0.06em">STEP</text>
+
+      <!-- C -> B : dispatch 回填（被动/返回，虚线） -->
+      <line x1="596" y1="200" x2="548" y2="200" stroke="#4f5d75" stroke-width="1"
+            stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+      <rect x="548" y="208" width="56" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="576" y="217" fill="#5a6580" font-size="8" font-family="'Geist Mono', monospace"
+            text-anchor="middle" letter-spacing="0.06em">DISPATCH</text>
+
+      <!-- B -> D : raw 结果 -->
+      <line x1="424" y1="232" x2="424" y2="308" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+      <rect x="436" y="262" width="28" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="450" y="271" fill="#5a6580" font-size="8" font-family="'Geist Mono', monospace"
+            text-anchor="middle" letter-spacing="0.06em">RAW</text>
+
+      <!-- F CLI -> D -->
+      <line x1="240" y1="356" x2="300" y2="356" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+      <rect x="252" y="336" width="36" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="270" y="345" fill="#5a6580" font-size="8" font-family="'Geist Mono', monospace"
+            text-anchor="middle" letter-spacing="0.06em">RUN</text>
+
+      <!-- D -> E : save_run -->
+      <line x1="544" y1="356" x2="596" y2="356" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+      <rect x="552" y="336" width="36" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="570" y="345" fill="#5a6580" font-size="8" font-family="'Geist Mono', monospace"
+            text-anchor="middle" letter-spacing="0.06em">SAVE</text>
+
+      <!-- D -> G : snapshot / 产物 -->
+      <line x1="424" y1="400" x2="424" y2="468" stroke="#bf4520" stroke-width="1" marker-end="url(#arrow-accent)"/>
+      <rect x="436" y="428" width="64" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="468" y="437" fill="#5a6580" font-size="8" font-family="'Geist Mono', monospace"
+            text-anchor="middle" letter-spacing="0.06em">SNAPSHOT</text>
+
+      <!-- G -> B : 实时读取（跨层，虚线，绕左侧） -->
+      <path d="M304 520 H272 V180 H300" fill="none" stroke="#4f5d75" stroke-width="1"
+            stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+      <rect x="216" y="248" width="48" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="240" y="257" fill="#5a6580" font-size="8" font-family="'Geist Mono', monospace"
+            text-anchor="middle" letter-spacing="0.06em">LIVE</text>
+
+      <!-- ============ nodes ============ -->
+      <!-- A 无人机端 -->
+      <rect x="40" y="128" width="200" height="88" rx="6" fill="#f5f5f5"/>
+      <rect x="40" y="128" width="200" height="88" rx="6" fill="rgba(79,93,117,0.10)" stroke="#5a6580" stroke-width="1"/>
+      <rect x="48" y="134" width="28" height="12" rx="2" fill="transparent" stroke="rgba(90,101,128,0.40)" stroke-width="0.8"/>
+      <text x="62" y="143" fill="rgba(90,101,128,0.8)" font-size="7" font-family="'Geist Mono', monospace"
+            text-anchor="middle" letter-spacing="0.08em">EDGE</text>
+      <text x="140" y="176" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Microsoft YaHei', sans-serif" text-anchor="middle">无人机端 ×30 线程</text>
+      <text x="140" y="193" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">UAVWorker.run()</text>
+
+      <!-- B 仿真内核（focal） -->
+      <rect x="304" y="112" width="240" height="120" rx="6" fill="#f5f5f5"/>
+      <rect x="304" y="112" width="240" height="120" rx="6" fill="rgba(191,69,32,0.08)" stroke="#bf4520" stroke-width="1.2"/>
+      <rect x="312" y="118" width="28" height="12" rx="2" fill="transparent" stroke="rgba(191,69,32,0.40)" stroke-width="0.8"/>
+      <text x="326" y="127" fill="rgba(191,69,32,0.9)" font-size="7" font-family="'Geist Mono', monospace"
+            text-anchor="middle" letter-spacing="0.08em">CORE</text>
+      <text x="424" y="166" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Microsoft YaHei', sans-serif" text-anchor="middle">仿真内核 Simulator</text>
+      <text x="424" y="184" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">MultiLevelQueue / ResourceLimiter</text>
+      <text x="424" y="200" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">LinkMonitor · 8 worker threads</text>
+      <text x="424" y="216" fill="#5a6580" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">仿真时钟 time_scale</text>
+
+      <!-- C 调度策略 -->
+      <rect x="600" y="128" width="200" height="88" rx="6" fill="#f5f5f5"/>
+      <rect x="600" y="128" width="200" height="88" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+      <rect x="608" y="134" width="28" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+      <text x="622" y="143" fill="rgba(45,49,66,0.8)" font-size="7" font-family="'Geist Mono', monospace"
+            text-anchor="middle" letter-spacing="0.08em">POLICY</text>
+      <text x="700" y="172" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Microsoft YaHei', sans-serif" text-anchor="middle">调度策略 ×5</text>
+      <text x="700" y="189" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">fcfs rr priority mlfq</text>
+      <text x="700" y="204" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">dynamic（本方案）</text>
+
+      <!-- F CLI -->
+      <rect x="40" y="312" width="200" height="88" rx="6" fill="#f5f5f5"/>
+      <rect x="40" y="312" width="200" height="88" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+      <rect x="48" y="318" width="28" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+      <text x="62" y="327" fill="rgba(45,49,66,0.8)" font-size="7" font-family="'Geist Mono', monospace"
+            text-anchor="middle" letter-spacing="0.08em">CLI</text>
+      <text x="140" y="360" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Microsoft YaHei', sans-serif" text-anchor="middle">命令行入口</text>
+      <text x="140" y="377" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">run.py all / one</text>
+      <text x="140" y="392" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">calibrate / sensitivity</text>
+
+      <!-- D 实验评测层 -->
+      <rect x="304" y="312" width="240" height="88" rx="6" fill="#f5f5f5"/>
+      <rect x="304" y="312" width="240" height="88" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+      <rect x="312" y="318" width="28" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+      <text x="326" y="327" fill="rgba(45,49,66,0.8)" font-size="7" font-family="'Geist Mono', monospace"
+            text-anchor="middle" letter-spacing="0.08em">EVAL</text>
+      <text x="424" y="356" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Microsoft YaHei', sans-serif" text-anchor="middle">实验评测层</text>
+      <text x="424" y="373" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">ExperimentRunner.run_one()</text>
+      <text x="424" y="388" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">compute_metrics() · 24 项指标</text>
+
+      <!-- E 存储层 -->
+      <rect x="600" y="312" width="200" height="88" rx="6" fill="#f5f5f5"/>
+      <rect x="600" y="312" width="200" height="88" rx="6" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="1"/>
+      <rect x="608" y="318" width="28" height="12" rx="2" fill="transparent" stroke="rgba(79,93,117,0.40)" stroke-width="0.8"/>
+      <text x="622" y="327" fill="rgba(79,93,117,0.85)" font-size="7" font-family="'Geist Mono', monospace"
+            text-anchor="middle" letter-spacing="0.08em">STORE</text>
+      <text x="700" y="356" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Microsoft YaHei', sans-serif" text-anchor="middle">存储层</text>
+      <text x="700" y="373" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">MySQL 8 · uav_sched_sim</text>
+      <text x="700" y="388" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">8 表/视图 · CSV · JSON</text>
+
+      <!-- G 3D 桌面软件 -->
+      <rect x="304" y="472" width="240" height="96" rx="6" fill="#f5f5f5"/>
+      <rect x="304" y="472" width="240" height="96" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+      <rect x="312" y="478" width="28" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+      <text x="326" y="487" fill="rgba(45,49,66,0.8)" font-size="7" font-family="'Geist Mono', monospace"
+            text-anchor="middle" letter-spacing="0.08em">UI</text>
+      <text x="424" y="516" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Microsoft YaHei', sans-serif" text-anchor="middle">3D 桌面软件</text>
+      <text x="424" y="534" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">app.py · pywebview / WebView2</text>
+      <text x="424" y="550" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">Three.js · /api/state 120ms</text>
+
+      <!-- ============ legend ============ -->
+      <line x1="40" y1="596" x2="960" y2="596" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+      <text x="40" y="614" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">图例</text>
+
+      <line x1="96" y1="611" x2="132" y2="611" stroke="#4f5d75" stroke-width="1"/>
+      <text x="140" y="614" fill="#5a6580" font-size="9" font-family="'Geist', 'Microsoft YaHei', sans-serif">调用 / 数据流</text>
+
+      <line x1="252" y1="611" x2="288" y2="611" stroke="#4f5d75" stroke-width="1" stroke-dasharray="5,4"/>
+      <text x="296" y="614" fill="#5a6580" font-size="9" font-family="'Geist', 'Microsoft YaHei', sans-serif">跨层读取（非落库路径）</text>
+
+      <line x1="476" y1="611" x2="512" y2="611" stroke="#bf4520" stroke-width="1"/>
+      <text x="520" y="614" fill="#5a6580" font-size="9" font-family="'Geist', 'Microsoft YaHei', sans-serif">核心链路</text>
+
+      <rect x="628" y="604" width="14" height="14" rx="2" fill="rgba(191,69,32,0.08)" stroke="#bf4520" stroke-width="1"/>
+      <text x="650" y="614" fill="#5a6580" font-size="9" font-family="'Geist', 'Microsoft YaHei', sans-serif">全系统唯一的中枢模块</text>
+    </svg>
+  </div>
+</div>
+</body>
+</html>

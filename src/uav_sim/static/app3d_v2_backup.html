@@ -1,0 +1,944 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>无人机集群并发自适应调度仿真系统</title>
+<style>
+  :root{
+    --bg:#04070d; --panel:rgba(10,18,30,.72); --line:rgba(78,161,255,.26);
+    --txt:#dbe8f7; --dim:#7d90aa; --cyan:#37e2d5; --blue:#4ea1ff;
+    --amber:#f5a623; --green:#3ddc97; --red:#ff6b6b;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--txt);
+    font:13px/1.5 "Microsoft YaHei","Segoe UI",system-ui,sans-serif;user-select:none}
+  canvas{display:block}
+  /* 关键：canvas 必须有确定的 CSS 尺寸，否则 JS 改 canvas.width 会反过来撑大布局，
+     造成"每帧放大一点"的恶性循环 —— 这就是面板里那块巨大空白画布的成因 */
+  #chart{width:100%;height:82px;display:block}
+  #app{position:fixed;inset:0}
+  #top{position:fixed;left:0;right:0;top:0;height:54px;display:flex;align-items:center;gap:10px;
+    padding:0 14px;white-space:nowrap;overflow:hidden;z-index:20;
+    background:linear-gradient(180deg,rgba(4,9,16,.97),rgba(4,9,16,.55));
+    border-bottom:1px solid var(--line);backdrop-filter:blur(8px)}
+  #top .logo{width:26px;height:26px;border-radius:7px;flex:none;
+    background:radial-gradient(circle at 35% 30%,#7ef9e8,#1f6feb 70%);
+    box-shadow:0 0 14px rgba(55,226,213,.55)}
+  #top .brand{font-size:14px;font-weight:700;letter-spacing:.5px;flex:none;
+    background:linear-gradient(90deg,#7ef9e8,#4ea1ff);-webkit-background-clip:text;
+    background-clip:text;color:transparent}
+  #top .sub{font-size:11px;color:var(--dim);flex:none}
+  .ctrl{display:flex;align-items:center;gap:5px;flex:none}
+  .ctrl label{font-size:11px;color:var(--dim);white-space:nowrap}
+  select,button{font:inherit;color:var(--txt);background:rgba(18,30,46,.92);
+    border:1px solid var(--line);border-radius:7px;padding:5px 9px;outline:none;white-space:nowrap}
+  button{cursor:pointer;transition:.15s;flex:none}
+  button:hover{background:rgba(32,50,78,.95);border-color:#3d6ba8}
+  button.go{background:linear-gradient(135deg,#1f6feb,#2ea8ff);border-color:#2ea8ff;font-weight:600}
+  button.go:hover{filter:brightness(1.12)}
+  button.stop{background:rgba(120,32,32,.9);border-color:#a33}
+  button.ghost{padding:4px 8px;font-size:11px}
+  #stat{margin-left:auto;display:flex;align-items:center;gap:8px;flex:none}
+  #pillStatus{padding:3px 10px;border-radius:20px;border:1px solid var(--line);
+    background:rgba(18,30,46,.85);font-size:11px;max-width:320px;overflow:hidden;
+    text-overflow:ellipsis;white-space:nowrap}
+  #prog{width:110px;height:5px;background:#08101c;border-radius:3px;overflow:hidden;flex:none}
+  #prog>i{display:block;height:100%;width:0;
+    background:linear-gradient(90deg,#2ea8ff,#37e2d5);transition:width .2s}
+  @media (max-width:1600px){ #top .sub{display:none} #prog{width:80px} }
+
+  .panel{position:fixed;background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:10px 12px;backdrop-filter:blur(10px);box-shadow:0 8px 30px rgba(0,0,0,.5);z-index:15}
+  .panel h3{margin:0 0 8px;font-size:10.5px;letter-spacing:1.4px;color:var(--cyan);
+    font-weight:700;text-transform:uppercase;display:flex;align-items:center;gap:6px}
+  .panel h3::before{content:'';width:3px;height:11px;border-radius:2px;
+    background:linear-gradient(180deg,#37e2d5,#1f6feb)}
+  #left{left:14px;top:66px;width:216px}
+  #right{right:14px;top:66px;width:252px}
+  #chartbox{left:50%;transform:translateX(-50%);bottom:14px;width:min(720px,50vw);padding:8px 10px}
+  #hint{left:14px;bottom:14px;width:216px;font-size:11px;color:var(--dim)}
+  .kv{display:flex;justify-content:space-between;gap:8px;padding:3px 0;font-size:12px}
+  .kv span{color:var(--dim)}
+  .kv b{font-variant-numeric:tabular-nums;font-weight:600}
+  .sep{height:1px;background:var(--line);margin:7px 0}
+  .legend{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--dim);padding:2px 0}
+  .dot{width:9px;height:9px;border-radius:2px;flex:none}
+  .bar{height:6px;background:#08101c;border-radius:4px;overflow:hidden;margin:3px 0 6px}
+  .bar>i{display:block;height:100%;width:0;transition:width .18s}
+  #banner{position:fixed;left:50%;top:62px;transform:translateX(-50%);z-index:30;
+    background:rgba(120,32,32,.95);border:1px solid #a33;border-radius:8px;padding:8px 14px;
+    display:none;font-size:12px;max-width:70vw}
+  #loading{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+    background:radial-gradient(circle at 50% 45%,#081120,#03060b 72%);z-index:50;
+    flex-direction:column;gap:14px;transition:opacity .5s}
+  #loading .ring{width:46px;height:46px;border-radius:50%;
+    border:3px solid rgba(78,161,255,.18);border-top-color:#37e2d5;animation:spin 1s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  #loading .t{color:var(--cyan);font-size:13px;letter-spacing:3px}
+  #loading .e{color:#ff8a8a;font-size:12px;max-width:70vw;text-align:center;line-height:1.7}
+  .corner{position:fixed;width:26px;height:26px;border:1px solid rgba(55,226,213,.35);z-index:10;
+    pointer-events:none}
+  .c1{left:8px;top:60px;border-right:0;border-bottom:0}
+  .c2{right:8px;top:60px;border-left:0;border-bottom:0}
+  .c3{left:8px;bottom:8px;border-right:0;border-top:0}
+  .c4{right:8px;bottom:8px;border-left:0;border-top:0}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<i class="corner c1"></i><i class="corner c2"></i><i class="corner c3"></i><i class="corner c4"></i>
+
+<div id="top">
+  <i class="logo"></i>
+  <span class="brand">无人机集群并发自适应调度仿真系统</span>
+  <span class="sub">智慧地质勘查 · 3D 实时可视化</span>
+  <div class="ctrl" style="margin-left:16px">
+    <label>工况</label><select id="scn"></select>
+    <label>策略</label><select id="sch"></select>
+    <label>速度</label>
+    <select id="spd">
+      <option value="0.5">0.5×</option><option value="1" selected>1×</option>
+      <option value="2">2×</option><option value="4">4×</option>
+    </select>
+  </div>
+  <button class="go" id="btnStart">▶ 开始仿真</button>
+  <button class="stop" id="btnStop">■ 停止</button>
+  <div id="stat">
+    <div id="prog"><i></i></div>
+    <span id="pillStatus">未开始</span>
+  </div>
+</div>
+
+<div class="panel" id="left">
+  <h3>机群状态</h3>
+  <div class="kv"><span>在线 / 总数</span><b id="fOn">0 / 0</b></div>
+  <div class="kv"><span>上传中</span><b id="fBusy">0</b></div>
+  <div class="kv"><span>链路健康均值</span><b id="fHealth">-</b></div>
+  <div class="bar"><i id="fHealthBar" style="width:0;background:linear-gradient(90deg,#ff6b6b,#ffd166,#3ddc97)"></i></div>
+  <div class="sep"></div>
+  <div class="legend"><i class="dot" style="background:#3ddc97"></i>优质链路 ≥85</div>
+  <div class="legend"><i class="dot" style="background:#ffd166"></i>一般 55~85</div>
+  <div class="legend"><i class="dot" style="background:#ff6b6b"></i>弱网 &lt;55</div>
+  <div class="sep"></div>
+  <div class="kv"><span>高优队列（勘查）</span><b id="qHi">0</b></div>
+  <div class="bar"><i id="qHiBar" style="background:linear-gradient(90deg,#2f7ff5,#4ea1ff)"></i></div>
+  <div class="kv"><span>低优队列（运维）</span><b id="qLo">0</b></div>
+  <div class="bar"><i id="qLoBar" style="background:linear-gradient(90deg,#b9761a,#f5a623)"></i></div>
+  <div class="kv"><span>系统负载</span><b id="qLoad">0.00</b></div>
+  <div class="bar"><i id="qLoadBar" style="background:linear-gradient(90deg,#3ddc97,#ffd166,#ff6b6b)"></i></div>
+</div>
+
+<div class="panel" id="right">
+  <h3>实时指标</h3>
+  <div class="kv"><span>仿真时间</span><b id="mTime">0 / 0 s</b></div>
+  <div class="kv"><span>已提交 / 已完成</span><b id="mTasks">0 / 0</b></div>
+  <div class="kv"><span>吞吐量</span><b id="mThr">0.00 个/s</b></div>
+  <div class="kv"><span>弱网重传累计</span><b id="mRetry">0</b></div>
+  <div class="kv"><span>阻塞 / 待重传</span><b id="mBlock">0 / 0</b></div>
+  <div class="kv"><span>被抢占</span><b id="mPre">0</b></div>
+  <div class="kv"><span>上下文切换</span><b id="mCtx">0</b></div>
+  <div class="kv"><span>时间片 高/低</span><b id="mSlice">- / -</b></div>
+  <div class="kv"><span>限流 / 拒绝大任务</span><b id="mLim">0 / 0</b></div>
+  <div class="kv"><span>过载累计</span><b id="mOver">0 s</b></div>
+  <div class="sep"></div>
+  <h3>本次结果</h3>
+  <div class="kv"><span>完成率</span><b id="rCompl">-</b></div>
+  <div class="kv"><span>高/低优平均等待</span><b id="rWait">-</b></div>
+  <div class="kv"><span>低优饥饿率</span><b id="rStarve">-</b></div>
+</div>
+
+<div class="panel" id="chartbox">
+  <h3>就绪队列深度 / 系统负载</h3>
+  <canvas id="chart" height="82"></canvas>
+  <div class="legend" style="justify-content:space-between;margin-top:2px">
+    <span><i class="dot" style="background:#4ea1ff"></i>高优队列</span>
+    <span><i class="dot" style="background:#f5a623"></i>低优队列</span>
+    <span><i class="dot" style="background:#3ddc97"></i>系统负载</span>
+    <span>左键旋转 · 滚轮缩放 · 右键平移</span>
+  </div>
+</div>
+
+<div class="panel" id="hint">
+  <h3>机位</h3>
+  <button class="ghost" data-cam="iso">立体视角</button>
+  <button class="ghost" data-cam="top">俯视</button>
+  <button class="ghost" data-cam="station">地面站</button>
+  <button class="ghost" data-cam="orbit">环绕巡航</button>
+</div>
+
+<div id="banner"></div>
+<div id="loading"><div class="ring"></div><div class="t">正在构建 3D 场景…</div></div>
+
+<script src="/static/three.min.js"></script>
+<script src="/static/OrbitControls.js"></script>
+<script src="/static/CopyShader.js"></script>
+<script src="/static/LuminosityHighPassShader.js"></script>
+<script src="/static/EffectComposer.js"></script>
+<script src="/static/RenderPass.js"></script>
+<script src="/static/ShaderPass.js"></script>
+<script src="/static/UnrealBloomPass.js"></script>
+<script>
+"use strict";
+/* =========================================================================
+   无人机集群调度仿真 · 3D 可视化
+   ---------------------------------------------------------------------------
+   调研后的技术选型：
+     * 结构参考 droneMD / DIAMANTS 这类集群仿真平台：逻辑与可视化分离 ——
+       调度逻辑在 Python（Simulator），本页只负责渲染与交互；
+     * Three.js 性能共识：控制 draw call、pixelRatio ≤ 1.5、阴影贴图别开太大、
+       用点/线代替大量小网格；
+     * 观感主要靠 UnrealBloomPass 泛光：只有自发光元素（LED/链路/光柱/文字）
+       泛光，地形不泛光，避免整体糊白。
+   数据来源：GET /api/state（120ms 轮询）。位置/姿态在前端按 uav_id 确定性演算。
+   ========================================================================= */
+
+const RENDER = {
+  maxPixelRatio: 1.5,
+  shadows: true,
+  bloomStrength: 0.55,
+  bloomRadius: 0.42,
+  bloomThreshold: 0.92,
+  terrainSegX: 150,
+  terrainSegZ: 110,
+  pointCloudMax: 9000,
+};
+
+const TERRAIN_W = 176, TERRAIN_D = 128;
+const STATION_XZ = { x: 0, z: 40 };
+const PAD_H = 1.6;
+const UPLINK_TOP = new THREE.Vector3(STATION_XZ.x, 16.5, STATION_XZ.z);
+const C = { ok: 0x3ddc97, warn: 0xffd166, bad: 0xff6b6b,
+            cyan: 0x37e2d5, blue: 0x4ea1ff, amber: 0xf5a623 };
+
+const state = { drones: [], live: null, summary: {}, status: "idle", time: 0, orbitMode: false };
+
+/* ---------------------------------------------------------- 1. 地形 */
+/**
+ * 地形高度 = 有限带宽正弦波叠加。
+ *
+ * 为什么不用 fBm（第一版实测踩坑）：
+ *   对 64x64 随机网格做双线性插值 + 4 个八度，最高八度在 176 单位内约 18 个周期，
+ *   而顶点间距 1.4 单位 —— 采样不足产生混叠：相邻顶点 fBm 分量实测
+ *   从 +7.25 跳到 -6.83（Δ≈14），渲染出来是满屏白色尖刺。
+ *   改用 4 组正弦波后，最高频率波长约 41 单位（≈29 个顶点/波长），
+ *   相邻顶点高差压到 2 以内，地形平滑且仍有多层次起伏。
+ */
+function terrainBase(x, z) {
+  let h = 0;
+  h += 6.4 * Math.sin(x * 0.0225 + 1.30) * Math.cos(z * 0.0280 + 0.70);
+  h += 3.1 * Math.sin(x * 0.0490 + z * 0.0320 + 2.10);
+  h += 1.7 * Math.cos(x * 0.0860 - 0.40) * Math.sin(z * 0.0740 + 1.90);
+  h += 0.8 * Math.sin(x * 0.1520 + z * 0.1210 + 0.50);
+  return h;
+}
+function smoothstep(e0, e1, x) {
+  const t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0)));
+  return t * t * (3 - 2 * t);
+}
+function terrainH(x, z) {
+  let h = terrainBase(x, z);
+  const r = Math.hypot(x * 0.88, z * 1.04);
+  const pit = smoothstep(54, 5, r);
+  h -= 21 * pit * pit;
+  h += 2.2 * Math.sin(r * 0.30) * pit;
+  const edge = Math.max(Math.abs(x) / (TERRAIN_W / 2), Math.abs(z) / (TERRAIN_D / 2));
+  h += smoothstep(0.62, 1.02, edge) * 30;
+  const ds = Math.hypot(x - STATION_XZ.x, z - STATION_XZ.z);
+  if (ds < 22) {
+    const k = smoothstep(22, 10, ds);
+    h = h * (1 - k) + PAD_H * k;
+  }
+  return h;
+}
+function heightColor(h, out) {
+  const c = out || new THREE.Color();
+  if (h < -16) c.setHex(0x06131b);
+  else if (h < -8) c.setHex(0x0a2029);
+  else if (h < -2) c.setHex(0x0e2f34);
+  else if (h < 4) c.setHex(0x12403c);
+  else if (h < 10) c.setHex(0x184e45);
+  else if (h < 16) c.setHex(0x1f5b4d);
+  else if (h < 22) c.setHex(0x28654f);
+  else if (h < 28) c.setHex(0x3d7360);
+  else if (h < 34) c.setHex(0x64826f);
+  else c.setHex(0x8d9d94);
+  c.multiplyScalar(0.52);   // 压暗地形反照率：避免被泛光整片烧白
+  return c;
+}
+
+function buildTerrain(scene) {
+  const geo = new THREE.PlaneGeometry(TERRAIN_W, TERRAIN_D, RENDER.terrainSegX, RENDER.terrainSegZ);
+  geo.rotateX(-Math.PI / 2);
+  const pos = geo.attributes.position;
+  const col = new Float32Array(pos.count * 3);
+  const tmp = new THREE.Color();
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i), z = pos.getZ(i);
+    const h = terrainH(x, z);
+    pos.setY(i, h);
+    heightColor(h, tmp);
+    const band = 0.5 + 0.5 * Math.cos(h * 1.6);
+    const k = 0.74 + 0.13 * band;
+    col[i * 3] = tmp.r * k; col[i * 3 + 1] = tmp.g * k; col[i * 3 + 2] = tmp.b * k;
+  }
+  pos.needsUpdate = true;
+  geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
+  geo.computeVertexNormals();
+
+  const terrain = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
+    vertexColors: true, roughness: 0.94, metalness: 0.04 }));
+  terrain.receiveShadow = true;
+  scene.add(terrain);
+
+  const wireGeo = new THREE.PlaneGeometry(TERRAIN_W, TERRAIN_D, 30, 22);
+  wireGeo.rotateX(-Math.PI / 2);
+  const wp = wireGeo.attributes.position;
+  for (let i = 0; i < wp.count; i++) wp.setY(i, terrainH(wp.getX(i), wp.getZ(i)) + 0.12);
+  wp.needsUpdate = true;
+  scene.add(new THREE.Mesh(wireGeo, new THREE.MeshBasicMaterial({
+    color: 0x2ea8ff, wireframe: true, transparent: true, opacity: 0.032 })));
+  return terrain;
+}
+
+function buildSurveyGrid(scene) {
+  const g = new THREE.Group();
+  const ringMat = new THREE.LineBasicMaterial({ color: C.cyan, transparent: true,
+    opacity: 0.30, blending: THREE.AdditiveBlending });
+  [12, 20, 28, 36, 44].forEach(rad => {
+    const pts = [];
+    for (let a = 0; a <= 128; a++) {
+      const th = a / 128 * Math.PI * 2;
+      const x = Math.cos(th) * rad, z = Math.sin(th) * rad * 1.12;
+      pts.push(new THREE.Vector3(x, terrainH(x, z) + 0.25, z));
+    }
+    g.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), ringMat));
+  });
+  for (let k = 0; k < 12; k++) {
+    const th = k / 12 * Math.PI * 2, pts = [];
+    for (let s = 6; s <= 46; s += 4) {
+      const x = Math.cos(th) * s, z = Math.sin(th) * s * 1.12;
+      pts.push(new THREE.Vector3(x, terrainH(x, z) + 0.25, z));
+    }
+    g.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),
+      new THREE.LineBasicMaterial({ color: 0x1f6feb, transparent: true, opacity: 0.16 })));
+  }
+  scene.add(g);
+  return g;
+}
+
+/* ---------------------------------------------------------- 2. 地面站 */
+function makeTextSprite(text, opt) {
+  opt = opt || {};
+  const fs = opt.fontSize || 30, pad = 9;
+  const cv = document.createElement("canvas");
+  const c0 = cv.getContext("2d");
+  c0.font = "600 " + fs + "px 'Microsoft YaHei',sans-serif";
+  const w = Math.ceil(c0.measureText(text).width) + pad * 2, h = fs + pad * 2;
+  cv.width = w; cv.height = h;
+  const g = cv.getContext("2d");
+  g.font = "600 " + fs + "px 'Microsoft YaHei',sans-serif";
+  g.textBaseline = "middle";
+  g.fillStyle = opt.bg || "rgba(5,14,24,.78)";
+  g.strokeStyle = opt.border || "rgba(78,161,255,.55)";
+  g.lineWidth = 3;
+  const rr = 9;
+  g.beginPath();
+  g.moveTo(rr, 0); g.lineTo(w - rr, 0); g.quadraticCurveTo(w, 0, w, rr);
+  g.lineTo(w, h - rr); g.quadraticCurveTo(w, h, w - rr, h);
+  g.lineTo(rr, h); g.quadraticCurveTo(0, h, 0, h - rr);
+  g.lineTo(0, rr); g.quadraticCurveTo(0, 0, rr, 0); g.closePath();
+  g.fill(); g.stroke();
+  g.fillStyle = opt.color || "#a9ecff";
+  g.fillText(text, pad, h / 2 + 1);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.minFilter = THREE.LinearFilter;
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false }));
+  const s = opt.scale || 0.05;
+  sp.scale.set(w * s, h * s, 1);
+  return sp;
+}
+
+function buildStation(scene) {
+  const g = new THREE.Group();
+  g.position.set(STATION_XZ.x, PAD_H, STATION_XZ.z);
+
+  const plat = new THREE.Mesh(new THREE.CylinderGeometry(9.5, 11, 1.5, 10),
+    new THREE.MeshStandardMaterial({ color: 0x18293a, roughness: 0.75, metalness: 0.35 }));
+  plat.position.y = 0.75; plat.receiveShadow = true; plat.castShadow = true;
+  g.add(plat);
+
+  const rack = new THREE.Mesh(new THREE.BoxGeometry(5.0, 3.4, 2.8),
+    new THREE.MeshStandardMaterial({ color: 0x22364c, roughness: 0.5, metalness: 0.65 }));
+  rack.position.set(-3.8, 3.2, 1.4); rack.castShadow = true;
+  g.add(rack);
+  for (let i = 0; i < 6; i++) {
+    const led = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.14, 0.06),
+      new THREE.MeshBasicMaterial({ color: i % 2 ? C.ok : C.blue }));
+    led.position.set(-6.0, 2.2 + i * 0.38, 2.86);
+    g.add(led);
+  }
+
+  const towerMat = new THREE.MeshStandardMaterial({ color: 0x35536e, roughness: 0.55, metalness: 0.7 });
+  const tower = new THREE.Mesh(new THREE.CylinderGeometry(0.30, 0.52, 15, 8), towerMat);
+  tower.position.y = 8.0; tower.castShadow = true;
+  g.add(tower);
+  for (let i = 1; i <= 3; i++) {
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.95, 0.07, 6, 18), towerMat);
+    ring.rotation.x = Math.PI / 2; ring.position.y = 3.2 + i * 3.3;
+    g.add(ring);
+  }
+  const dish = new THREE.Mesh(
+    new THREE.SphereGeometry(2.1, 22, 12, 0, Math.PI * 2, 0, Math.PI / 2.5),
+    new THREE.MeshStandardMaterial({ color: 0xc2dbec, roughness: 0.3, metalness: 0.85,
+      side: THREE.DoubleSide }));
+  dish.position.y = 16.0; dish.rotation.x = -0.55;
+  g.add(dish);
+  const beacon = new THREE.Mesh(new THREE.SphereGeometry(0.36, 12, 12),
+    new THREE.MeshBasicMaterial({ color: C.cyan }));
+  beacon.position.y = 17.0;
+  g.add(beacon);
+
+  const halo = new THREE.Mesh(new THREE.RingGeometry(11.5, 13.2, 72),
+    new THREE.MeshBasicMaterial({ color: C.cyan, transparent: true, opacity: 0.28,
+      side: THREE.DoubleSide, blending: THREE.AdditiveBlending }));
+  halo.rotation.x = -Math.PI / 2; halo.position.y = 0.14;
+  g.add(halo);
+
+  const beam = new THREE.Mesh(new THREE.CylinderGeometry(2.4, 5.2, 34, 24, 1, true),
+    new THREE.MeshBasicMaterial({ color: C.cyan, transparent: true, opacity: 0.10,
+      blending: THREE.AdditiveBlending, side: THREE.DoubleSide, depthWrite: false }));
+  beam.position.y = 17;
+  g.add(beam);
+
+  const lab = makeTextSprite("地面站 · 调度服务器", { fontSize: 30, scale: 0.05 });
+  lab.position.y = 21.5;
+  g.add(lab);
+
+  g.userData = { halo, beacon, beam };
+  scene.add(g);
+  return g;
+}
+
+/* ---------------------------------------------------------- 3. 队列柱 */
+function buildQueueTowers(scene) {
+  const mk = (x, z, color, name) => {
+    const grp = new THREE.Group();
+    grp.position.set(x, terrainH(x, z) + 0.3, z);
+    const base = new THREE.Mesh(new THREE.CylinderGeometry(2.4, 2.9, 0.6, 12),
+      new THREE.MeshStandardMaterial({ color: 0x14273b, roughness: 0.8, metalness: 0.4 }));
+    base.position.y = 0.3; grp.add(base);
+    const bar = new THREE.Mesh(new THREE.BoxGeometry(3.0, 1, 3.0),
+      new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.75,
+        transparent: true, opacity: 0.92, roughness: 0.3, metalness: 0.2 }));
+    bar.castShadow = true;
+    grp.add(bar);
+    const label = makeTextSprite(name + " 0", { fontSize: 26, scale: 0.040, color: "#d6ecff" });
+    grp.add(label);
+    scene.add(grp);
+    return { grp, bar, label, name, txt: name + " 0" };
+  };
+  return { high: mk(-20, 24, C.blue, "高优队列"), low: mk(20, 24, C.amber, "低优队列") };
+}
+
+/* ---------------------------------------------------------- 4. 无人机 */
+function makeDrone() {
+  const g = new THREE.Group();
+  const metal = new THREE.MeshStandardMaterial({ color: 0x93aec4, roughness: 0.4, metalness: 0.8 });
+  const dark = new THREE.MeshStandardMaterial({ color: 0x24384c, roughness: 0.5, metalness: 0.7 });
+
+  const body = new THREE.Mesh(new THREE.BoxGeometry(2.1, 0.42, 2.1), metal);
+  // 不投影：阴影贴图覆盖 200+ 单位时，小无人机的影子会糊成黑斑（实测）
+  body.castShadow = false; g.add(body);
+  const nose = new THREE.Mesh(new THREE.BoxGeometry(0.85, 0.34, 0.9), dark);
+  nose.position.set(0, 0.04, 1.2); g.add(nose);
+
+  const rotors = [];
+  [[1, 1], [1, -1], [-1, 1], [-1, -1]].forEach(([sx, sz]) => {
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(2.3, 0.12, 0.19), metal);
+    arm.position.set(sx * 1.05, 0, sz * 1.05);
+    arm.rotation.y = Math.atan2(sz, sx);
+    g.add(arm);
+
+    const motor = new THREE.Mesh(new THREE.CylinderGeometry(0.23, 0.23, 0.34, 10), dark);
+    motor.position.set(sx * 2.2, 0.16, sz * 2.2); g.add(motor);
+
+    const rotor = new THREE.Mesh(new THREE.CylinderGeometry(0.95, 0.95, 0.045, 16),
+      new THREE.MeshStandardMaterial({ color: 0xb9d4e6, transparent: true, opacity: 0.5,
+        metalness: 0.9, roughness: 0.15 }));
+    rotor.position.set(sx * 2.2, 0.35, sz * 2.2); g.add(rotor);
+    rotors.push(rotor);
+
+    const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.055, 0.72, 6), dark);
+    leg.position.set(sx * 0.88, -0.56, sz * 0.88); g.add(leg);
+  });
+
+  const ledMat = new THREE.MeshBasicMaterial({ color: C.ok });
+  const led = new THREE.Mesh(new THREE.SphereGeometry(0.24, 12, 12), ledMat);
+  led.position.y = -0.3; g.add(led);
+
+  const coneMat = new THREE.MeshBasicMaterial({ color: C.cyan, transparent: true, opacity: 0,
+    blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
+  const cone = new THREE.Mesh(new THREE.ConeGeometry(4.2, 13, 18, 1, true), coneMat);
+  cone.position.y = -6.9;
+  g.add(cone);
+
+  g.userData = { rotors, led, ledMat, cone, coneMat };
+  return g;
+}
+
+function buildFleet(scene, n) {
+  const out = [];
+  const cols = 6, rows = Math.max(1, Math.ceil(n / cols));
+  const x0 = -62, x1 = 62, z0 = -50, z1 = 16;
+  for (let i = 0; i < n; i++) {
+    const c = i % cols, r = Math.floor(i / cols);
+    const cx = cols === 1 ? 0 : x0 + (x1 - x0) * (c / (cols - 1));
+    const cz = rows === 1 ? 0 : z0 + (z1 - z0) * (r / (rows - 1));
+
+    const grp = makeDrone();
+    grp.scale.setScalar(1.5);
+    grp.position.set(cx, 24, cz);
+    scene.add(grp);
+
+    const ring = new THREE.Mesh(new THREE.RingGeometry(2.2, 2.9, 26),
+      new THREE.MeshBasicMaterial({ color: C.cyan, transparent: true, opacity: 0.22,
+        side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false }));
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.set(cx, terrainH(cx, cz) + 0.3, cz);
+    scene.add(ring);
+
+    const trailGeo = new THREE.BufferGeometry();
+    trailGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(24 * 3), 3));
+    const trail = new THREE.Line(trailGeo, new THREE.LineBasicMaterial({
+      color: 0x2ea8ff, transparent: true, opacity: 0.30, blending: THREE.AdditiveBlending }));
+    scene.add(trail);
+
+    const linkGeo = new THREE.BufferGeometry();
+    linkGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(6), 3));
+    const linkMat = new THREE.LineBasicMaterial({ color: C.ok, transparent: true,
+      opacity: 0, blending: THREE.AdditiveBlending });
+    const link = new THREE.Line(linkGeo, linkMat);
+    scene.add(link);
+    const bead = new THREE.Mesh(new THREE.SphereGeometry(0.42, 10, 10),
+      new THREE.MeshBasicMaterial({ color: 0xd8fff0, transparent: true, opacity: 0,
+        blending: THREE.AdditiveBlending }));
+    scene.add(bead);
+
+    const tag = makeTextSprite("UAV-" + (i + 1), { fontSize: 20, scale: 0.030,
+      color: "#bfe6ff", bg: "rgba(4,12,22,.55)", border: "rgba(78,161,255,.35)" });
+    scene.add(tag);
+
+    out.push({ id: i + 1, group: grp, rotors: grp.userData.rotors, led: grp.userData.led,
+      ledMat: grp.userData.ledMat, cone: grp.userData.cone, coneMat: grp.userData.coneMat,
+      cell: { x: cx, z: cz }, phase: (i * 0.618) % 1,
+      alt: 19 + r * 1.35 + (i % 3) * 1.1,
+      ring, trail, trailPos: [], link, linkMat, bead, tag,
+      busy: false, health: 100, online: true, priority: null, progress: 0 });
+  }
+  return out;
+}
+
+/* ---------------------------------------------------------- 5. 点云 */
+function buildPointCloud(scene, max) {
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(max * 3), 3));
+  geo.setDrawRange(0, 0);
+  const pts = new THREE.Points(geo, new THREE.PointsMaterial({
+    color: 0x6ff5e6, size: 0.42, sizeAttenuation: true, transparent: true,
+    opacity: 0.9, depthWrite: false, blending: THREE.AdditiveBlending }));
+  scene.add(pts);
+  return { geo, idx: 0, max };
+}
+function emitPoint(pc, x, z, spread) {
+  const p = pc.geo.attributes.position;
+  p.setXYZ(pc.idx % pc.max,
+    x + (Math.random() - 0.5) * spread,
+    terrainH(x, z) + 0.4 + Math.random() * 1.1,
+    z + (Math.random() - 0.5) * spread);
+  pc.idx++;
+  p.needsUpdate = true;
+  pc.geo.setDrawRange(0, Math.min(pc.idx, pc.max));
+}
+
+/* ---------------------------------------------------------- 6. 场景 */
+let renderer, scene, camera, controls, composer;
+let station, towers, pc, surveyGrid;
+
+function initScene() {
+  const fail = (msg) => {
+    document.getElementById("loading").innerHTML =
+      '<div class="e">3D 场景初始化失败：' + msg +
+      '<br>请确认 WebView2/浏览器支持 WebGL2，或更新显卡驱动。</div>';
+  };
+  try {
+    renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+  } catch (e) { fail(e.message); return; }
+
+  renderer.setPixelRatio(Math.min(devicePixelRatio || 1, RENDER.maxPixelRatio));
+  renderer.setSize(innerWidth, innerHeight);
+  renderer.shadowMap.enabled = RENDER.shadows;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  if (THREE.sRGBEncoding) renderer.outputEncoding = THREE.sRGBEncoding;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 0.92;
+  document.getElementById("app").appendChild(renderer.domElement);
+
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x04070d);
+  scene.fog = new THREE.FogExp2(0x03060c, 0.0021);
+
+  camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.5, 2400);
+  camera.position.set(74, 60, 96);
+
+  controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.target.set(0, 5, 2);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.075;
+  controls.minDistance = 26;
+  controls.maxDistance = 330;
+  controls.maxPolarAngle = Math.PI * 0.485;
+  controls.autoRotateSpeed = 0.55;
+  controls.update();
+
+  scene.add(new THREE.HemisphereLight(0x8fd0ff, 0x08161c, 0.36));
+  const sun = new THREE.DirectionalLight(0xfff3e0, 0.82);
+  sun.position.set(85, 120, 60);
+  sun.castShadow = RENDER.shadows;
+  sun.shadow.mapSize.set(2048, 2048);
+  const d = 82;
+  sun.shadow.camera.left = -d; sun.shadow.camera.right = d;
+  sun.shadow.camera.top = d; sun.shadow.camera.bottom = -d;
+  sun.shadow.camera.near = 1; sun.shadow.camera.far = 420;
+  sun.shadow.bias = -0.0012;
+  if ('normalBias' in sun.shadow) sun.shadow.normalBias = 0.04;
+  scene.add(sun);
+  const fill = new THREE.DirectionalLight(0x3ea8ff, 0.28);
+  fill.position.set(-90, 60, -70);
+  scene.add(fill);
+
+  buildTerrain(scene);
+  surveyGrid = buildSurveyGrid(scene);
+  station = buildStation(scene);
+  towers = buildQueueTowers(scene);
+  pc = buildPointCloud(scene, RENDER.pointCloudMax);
+
+  const sg = new THREE.BufferGeometry();
+  const SN = 800, arr = new Float32Array(SN * 3);
+  for (let i = 0; i < SN; i++) {
+    const r = 480 + Math.random() * 320;
+    const th = Math.random() * Math.PI * 2;
+    const ph = Math.random() * Math.PI * 0.40;
+    arr[i * 3] = Math.cos(th) * Math.cos(ph) * r;
+    arr[i * 3 + 1] = Math.sin(ph) * r + 30;
+    arr[i * 3 + 2] = Math.sin(th) * Math.cos(ph) * r;
+  }
+  sg.setAttribute("position", new THREE.BufferAttribute(arr, 3));
+  scene.add(new THREE.Points(sg, new THREE.PointsMaterial({ color: 0x9fc7ff, size: 1.8,
+    sizeAttenuation: true, transparent: true, opacity: 0.7, depthWrite: false })));
+
+  try {
+    composer = new THREE.EffectComposer(renderer);
+    composer.addPass(new THREE.RenderPass(scene, camera));
+    composer.addPass(new THREE.UnrealBloomPass(
+      new THREE.Vector2(innerWidth, innerHeight),
+      RENDER.bloomStrength, RENDER.bloomRadius, RENDER.bloomThreshold));
+  } catch (e) {
+    console.warn("泛光后处理不可用，退回直接渲染：", e);
+    composer = null;
+  }
+
+  state.drones = buildFleet(scene, 30);
+
+  addEventListener("resize", () => {
+    camera.aspect = innerWidth / innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+    if (composer) composer.setSize(innerWidth, innerHeight);
+  });
+
+  const el = document.getElementById("loading");
+  el.style.opacity = "0";
+  setTimeout(() => { el.style.display = "none"; }, 500);
+}
+
+const CAMS = {
+  iso: { pos: [74, 60, 96], tgt: [0, 5, 2] },
+  top: { pos: [0.1, 190, 10], tgt: [0, 0, 2] },
+  station: { pos: [26, 34, 96], tgt: [0, 8, 34] },
+};
+function bindCamButtons() {
+  document.querySelectorAll("[data-cam]").forEach(btn => {
+    btn.onclick = () => {
+      const k = btn.dataset.cam;
+      if (k === "orbit") {
+        state.orbitMode = !state.orbitMode;
+        controls.autoRotate = state.orbitMode;
+        btn.textContent = state.orbitMode ? "停止巡航" : "环绕巡航";
+        return;
+      }
+      const c = CAMS[k];
+      if (!c) return;
+      controls.autoRotate = false; state.orbitMode = false;
+      const ob = document.querySelector('[data-cam="orbit"]');
+      if (ob) ob.textContent = "环绕巡航";
+      camera.position.set(c.pos[0], c.pos[1], c.pos[2]);
+      controls.target.set(c.tgt[0], c.tgt[1], c.tgt[2]);
+      controls.update();
+    };
+  });
+}
+
+/* ---------------------------------------------------------- 7. 数据对接 */
+async function fetchState() {
+  try {
+    const r = await fetch("/api/state", { cache: "no-store" });
+    const st = await r.json();
+    state.live = st.live || null;
+    state.summary = st.summary || {};
+    state.status = st.status;
+    const b = document.getElementById("banner");
+    if (st.error) { b.style.display = "block"; b.textContent = "仿真错误：" + st.error; }
+    else b.style.display = "none";
+    applyState(st);
+  } catch (e) { /* 服务未就绪时静默重试 */ }
+}
+function setText(id, v) { const e = document.getElementById(id); if (e) e.textContent = v; }
+
+function applyState(st) {
+  const live = st.live;
+  const map = { idle: "未开始", running: "仿真中", finished: "已完成", stopped: "已停止", error: "出错" };
+  let txt = map[st.status] || st.status;
+  if (st.scenario_label) txt += " · " + st.scenario_label + " × " + (st.scheduler_label || "");
+  setText("pillStatus", txt);
+  document.querySelector("#prog>i").style.width =
+    (live ? Math.min(100, live.sim_time / Math.max(0.001, live.duration_s) * 100) : 0) + "%";
+
+  const n = (live && live.uav_count) || 30;
+  if (state.drones.length !== n) rebuildFleet(n);
+
+  const runMap = {};
+  if (live && live.running_tasks) live.running_tasks.forEach(t => { runMap[t.uav_id] = t; });
+  let hs = 0, on = 0, busy = 0;
+  state.drones.forEach(d => {
+    const u = live && live.uav_states ? live.uav_states[String(d.id)] : null;
+    d.health = u ? u.health : 100;
+    d.online = u ? u.online : true;
+    const t = runMap[d.id];
+    d.busy = !!t;
+    d.priority = t ? t.priority : null;
+    d.progress = t ? t.progress : 0;
+    if (d.online) { hs += d.health; on++; }
+    if (d.busy) busy++;
+  });
+  const hAvg = on ? hs / on : 0;
+  setText("fOn", on + " / " + state.drones.length);
+  setText("fBusy", busy);
+  setText("fHealth", on ? hAvg.toFixed(1) : "-");
+  document.getElementById("fHealthBar").style.width = hAvg + "%";
+
+  const qh = live ? live.queue.high : 0, ql = live ? live.queue.low : 0;
+  const load = live ? live.system_load : 0;
+  setText("qHi", qh); setText("qLo", ql);
+  setText("qLoad", load.toFixed(2) + (load > 1 ? " 过载" : ""));
+  document.getElementById("qHiBar").style.width = Math.min(100, qh / 120 * 100) + "%";
+  document.getElementById("qLoBar").style.width = Math.min(100, ql / 120 * 100) + "%";
+  document.getElementById("qLoadBar").style.width = Math.min(100, load / 2 * 100) + "%";
+
+  if (live) {
+    const c = live.counters, s = live.scheduler_stats, l = live.limiter;
+    setText("mTime", live.sim_time.toFixed(1) + " / " + live.duration_s.toFixed(0) + " s");
+    setText("mTasks", c.submitted + " / " + c.done);
+    setText("mThr", (c.done / Math.max(0.001, live.sim_time)).toFixed(2) + " 个/s");
+    setText("mRetry", c.blocked);
+    setText("mBlock", c.blocked + " / " + c.retry_pending);
+    setText("mPre", c.preempted);
+    setText("mCtx", s.context_switches);
+    setText("mSlice", s.high_time_slice_ms.toFixed(0) + " / " + s.low_time_slice_ms.toFixed(0) + " ms");
+    setText("mLim", l.throttled + " / " + l.rejected_large);
+    setText("mOver", live.overload_seconds.toFixed(1) + " s");
+  }
+  const sm = st.summary || {};
+  setText("rCompl", sm.completion_rate !== undefined ? sm.completion_rate.toFixed(2) + " %" : "-");
+  setText("rWait", sm.avg_wait_high_ms !== undefined
+    ? sm.avg_wait_high_ms.toFixed(0) + " / " + sm.avg_wait_low_ms.toFixed(0) + " ms" : "-");
+  setText("rStarve", sm.starvation_rate_low !== undefined
+    ? sm.starvation_rate_low.toFixed(2) + " %" : "-");
+  drawChart(live);
+}
+
+function rebuildFleet(n) {
+  state.drones.forEach(d => {
+    scene.remove(d.group); scene.remove(d.ring); scene.remove(d.trail);
+    scene.remove(d.link); scene.remove(d.bead); scene.remove(d.tag);
+  });
+  state.drones = buildFleet(scene, n);
+}
+
+/* ---------------------------------------------------------- 8. 动画 */
+const clock = new THREE.Clock();
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(0.05, clock.getDelta());
+  state.time += dt;
+  const t = state.time;
+
+  state.drones.forEach((d, i) => {
+    const ang = t * 0.20 + d.phase * Math.PI * 2;
+    const rad = 3.6 + (i % 4) * 0.55;
+    const bob = Math.sin(t * 1.6 + d.phase * 9) * 0.6;
+    const x = d.cell.x + Math.cos(ang) * rad;
+    const z = d.cell.z + Math.sin(ang) * rad * 0.82;
+    const y = d.alt + bob + (d.busy ? 1.8 : 0);
+    d.group.position.set(x, y, z);
+
+    const yaw = d.busy ? Math.atan2(STATION_XZ.x - x, STATION_XZ.z - z) : -ang + Math.PI / 2;
+    d.group.rotation.y += (yaw - d.group.rotation.y) * Math.min(1, dt * 4);
+    d.group.rotation.z = Math.sin(t * 2.0 + d.phase * 7) * 0.04;
+
+    const spin = d.busy ? 36 : 24;
+    d.rotors.forEach((r, k) => { r.rotation.y += dt * spin * (k % 2 ? 1 : -1); });
+
+    const col = !d.online ? 0x3a4453
+      : (d.health >= 85 ? C.ok : d.health >= 55 ? C.warn : C.bad);
+    d.ledMat.color.setHex(col);
+    d.led.scale.setScalar(d.busy ? 1.35 + 0.35 * Math.sin(t * 9) : 1.0);
+    d.group.visible = d.online;
+
+    const wantCone = (d.busy && d.priority === "HIGH") ? 0.045 : 0.0;
+    d.coneMat.opacity += (wantCone - d.coneMat.opacity) * Math.min(1, dt * 5);
+    d.cone.visible = d.coneMat.opacity > 0.004;
+
+    d.ring.position.set(x, terrainH(x, z) + 0.3, z);
+    d.ring.scale.setScalar(d.busy ? 1.25 : 1.0);
+    d.ring.material.opacity = d.busy ? 0.42 : 0.18;
+
+    d.tag.position.set(x, y + 3.6, z);
+    d.tag.visible = camera.position.distanceTo(d.group.position) < 120;
+
+    d.trailPos.push({ x: x, y: y, z: z });
+    if (d.trailPos.length > 24) d.trailPos.shift();
+    const tp = d.trail.geometry.attributes.position;
+    for (let k = 0; k < 24; k++) {
+      const p = d.trailPos[Math.min(k, d.trailPos.length - 1)];
+      tp.setXYZ(k, p.x, p.y, p.z);
+    }
+    tp.needsUpdate = true;
+
+    const want = d.busy ? 0.8 : 0.0;
+    d.linkMat.opacity += (want - d.linkMat.opacity) * Math.min(1, dt * 8);
+    d.bead.material.opacity = d.linkMat.opacity;
+    if (d.linkMat.opacity > 0.02) {
+      const lp = d.link.geometry.attributes.position;
+      lp.setXYZ(0, x, y, z);
+      lp.setXYZ(1, UPLINK_TOP.x, UPLINK_TOP.y, UPLINK_TOP.z);
+      lp.needsUpdate = true;
+      const lc = d.health >= 85 ? C.ok : d.health >= 55 ? C.warn : C.bad;
+      d.linkMat.color.setHex(lc);
+      d.bead.material.color.setHex(lc);
+      const k2 = (t * 0.85 + d.phase) % 1;
+      d.bead.position.set(x + (UPLINK_TOP.x - x) * k2,
+                          y + (UPLINK_TOP.y - y) * k2,
+                          z + (UPLINK_TOP.z - z) * k2);
+    }
+
+    if (d.busy && d.priority === "HIGH" && Math.random() < dt * 22) emitPoint(pc, x, z, 3.6);
+  });
+
+  if (station) {
+    const u = station.userData;
+    u.halo.material.opacity = 0.20 + 0.14 * Math.sin(t * 1.9);
+    u.halo.scale.setScalar(1 + 0.018 * Math.sin(t * 1.9));
+    u.beacon.scale.setScalar(1 + 0.28 * Math.sin(t * 6.2));
+    if (u.beam) u.beam.material.opacity = 0.07 + 0.035 * Math.sin(t * 1.4);
+  }
+  if (surveyGrid) surveyGrid.rotation.y = t * 0.02;
+
+  if (towers && state.live) {
+    const upd = (tw, depth) => {
+      const h = 0.8 + Math.min(1, depth / 120) * 24;
+      tw.bar.scale.y = h;
+      tw.bar.position.y = 0.6 + h / 2;
+      const nt = tw.name + " " + depth;
+      if (nt !== tw.txt) {
+        tw.txt = nt;
+        tw.grp.remove(tw.label);
+        tw.label = makeTextSprite(nt, { fontSize: 26, scale: 0.040, color: "#d6ecff" });
+        tw.label.position.set(0, 0.6 + h + 3.0, 0);
+        tw.grp.add(tw.label);
+      }
+    };
+    upd(towers.high, state.live.queue.high);
+    upd(towers.low, state.live.queue.low);
+  }
+
+  controls.update();
+  if (composer) composer.render(); else renderer.render(scene, camera);
+}
+
+/* ---------------------------------------------------------- 9. 折线图 */
+function drawChart(live) {
+  const cv = document.getElementById("chart");
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  const w = Math.max(60, cv.clientWidth || 300), h = 82;
+  const wantW = Math.floor(w * dpr), wantH = Math.floor(h * dpr);
+  // 只有在"容器宽度真的变了"时才重设后备缓冲尺寸（并做上限保护，防止异常时无限增大）
+  if (cv.width !== wantW && wantW < 4096) { cv.width = wantW; cv.height = wantH; }
+  const g = cv.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+  g.strokeStyle = "rgba(78,161,255,.13)"; g.lineWidth = 1;
+  for (let i = 1; i < 4; i++) { const y = h * i / 4; g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke(); }
+  if (!live || !live.history || live.history.length < 2) return;
+  const hist = live.history, dur = Math.max(1, live.duration_s);
+  const maxQ = Math.max(10, ...hist.map(d => Math.max(d.high, d.low)));
+  const X = ts => 6 + ts / dur * (w - 12);
+  const Y = v => h - 6 - v / maxQ * (h - 12);
+  const line = (get, color) => {
+    g.beginPath(); g.strokeStyle = color; g.lineWidth = 1.7;
+    hist.forEach((d, i) => { const x = X(d.ts), y = Y(get(d)); i ? g.lineTo(x, y) : g.moveTo(x, y); });
+    g.stroke();
+  };
+  line(d => d.high, "#4ea1ff");
+  line(d => d.low, "#f5a623");
+  line(d => d.load * maxQ / 2, "#3ddc97");
+}
+
+/* ---------------------------------------------------------- 10. 控件 */
+async function initControls() {
+  const r = await fetch("/api/state", { cache: "no-store" });
+  const st = await r.json();
+  const scn = document.getElementById("scn"), sch = document.getElementById("sch");
+  scn.innerHTML = ""; sch.innerHTML = "";
+  (st.scenarios || []).forEach(o => {
+    const e = document.createElement("option"); e.value = o.code;
+    e.textContent = o.code + " · " + o.label; scn.appendChild(e);
+  });
+  (st.schedulers || []).forEach(o => {
+    const e = document.createElement("option"); e.value = o.code;
+    e.textContent = o.label; sch.appendChild(e);
+  });
+  scn.value = "PEAK"; sch.value = "dynamic";
+}
+document.getElementById("btnStart").onclick = async () => {
+  const q = "?scenario=" + document.getElementById("scn").value
+          + "&scheduler=" + document.getElementById("sch").value
+          + "&speed=" + document.getElementById("spd").value;
+  const r = await fetch("/api/start" + q);
+  const j = await r.json();
+  if (!j.ok) alert(j.msg || "启动失败");
+};
+document.getElementById("btnStop").onclick = () => fetch("/api/stop");
+
+/* ---------------------------------------------------------- 11. 启动 */
+initScene();
+if (renderer) {
+  bindCamButtons();
+  initControls();
+  fetchState();
+  setInterval(fetchState, 120);
+  animate();
+}
+</script>
+</body>
+</html>

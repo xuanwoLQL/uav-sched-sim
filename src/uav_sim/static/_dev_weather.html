@@ -1,0 +1,608 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>天气视觉自检 · UAVWeather</title>
+<!-- =============================================================================
+     天气视觉模块自检页（契约 §5）
+     -----------------------------------------------------------------------------
+     用途：在不启动整个仿真/地形/30 架机群的前提下，单独验证
+       · 雨（LineSegments 雨丝 + 风向倾斜）
+       · 雪（Points + canvas 径向渐变圆点 + 正弦横向摆动）
+       · 沙尘（土黄 Points + 2~3 层滚动噪声"沙墙"）
+       · 能见度衰减（由 visibility_km 反算 FogExp2.density，远景山脊被吃掉）
+     且切黎明/正午/黄昏/夜景时"天气效果不丢"（setTod 基准 + 天气叠加）。
+
+     参数：
+       ?preset=clear|rain|snow|dust   天气类型（默认 clear）
+       &intensity=0~1                 天气强度（默认 0.8）
+       &tod=dawn|noon|dusk|night      时段（默认 dusk，与主页面默认一致）
+       &tier=high|medium|cpu          画质档位（默认 high；cpu 档粒子≤1200 且无沙墙）
+       &auto=1                        每 4.5s 在 4 种天气间循环（观察过渡/缓动）
+
+     快捷键：1/2/3/4 = 黎明/正午/黄昏/夜景；p = 手动循环天气；a = 开关自动循环
+     渲染完成后设 window.__DEV_READY__ = true（截图脚本可等待）。
+     ============================================================================= -->
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #05080d; }
+  body { font-family: "Microsoft YaHei", "PingFang SC", sans-serif; color: #cfe3ff; }
+  #app canvas { display: block; }
+  #hud {
+    position: fixed; left: 14px; top: 14px; z-index: 10; pointer-events: none;
+    padding: 10px 14px; min-width: 360px;
+    background: rgba(4, 10, 18, .74); border: 1px solid rgba(55, 226, 213, .38);
+    border-radius: 8px; box-shadow: 0 4px 18px rgba(0, 0, 0, .45);
+    font: 12.5px/1.72 Consolas, "Courier New", monospace; white-space: pre;
+    color: #b9d4f2;
+  }
+  #hud .t { color: #7ff8ea; font-weight: 600; letter-spacing: .5px; }
+  #hud .v { color: #ffd166; }
+  #hud .dim { color: #6f8ba8; }
+  #tip {
+    position: fixed; left: 14px; bottom: 12px; z-index: 10; pointer-events: none;
+    font: 12px/1.6 Consolas, monospace; color: #6f8ba8;
+    background: rgba(4, 10, 18, .6); padding: 6px 10px; border-radius: 6px;
+  }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="hud">正在构建自检场景…</div>
+<div id="tip">快捷键 1/2/3/4 = 黎明/正午/黄昏/夜景 · p = 循环天气 · a = 自动循环 · ?auto=1</div>
+
+<script src="/static/three.min.js"></script>
+<script src="/static/weather_system.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  /* ====================================================================== 0. 参数 */
+  const QS = new URLSearchParams(location.search);
+  const clamp = function (v, a, b) { return v < a ? a : (v > b ? b : v); };
+  function numParam(k, d) { const v = parseFloat(QS.get(k)); return isFinite(v) ? v : d; }
+  function smoothstep(a, b, x) {
+    const t = clamp((x - a) / ((b - a) || 1e-9), 0, 1);
+    return t * t * (3 - 2 * t);
+  }
+
+  /* ---- 时段预设：与 app3d.html 的 TOD 表完全一致（保证自检页与主页面同一套基准）---- */
+  const TOD = {
+    dawn: { sun: [-130, 40, 96], sunCol: 0xffb27a, sunInt: 0.80, hemiKey: 0x6b8fc7, hemiInt: 0.38,
+            top: 0x070f1c, mid: 0x1b2b3d, bot: 0x3a2a24, fog: 0x1d2836, exp: 1.00, label: "黎明" },
+    noon: { sun: [96, 170, 44], sunCol: 0xfff3d6, sunInt: 1.22, hemiKey: 0x9ec8ff, hemiInt: 0.55,
+            top: 0x061425, mid: 0x123448, bot: 0x24504f, fog: 0x0f2a33, exp: 1.02, label: "正午" },
+    dusk: { sun: [150, 32, -92], sunCol: 0xff8a4c, sunInt: 0.92, hemiKey: 0x4a6a9c, hemiInt: 0.34,
+            top: 0x0a0d18, mid: 0x22203a, bot: 0x4a2a24, fog: 0x231a22, exp: 1.06, label: "黄昏" },
+    night: { sun: [60, 130, 60], sunCol: 0x6f8ecf, sunInt: 0.26, hemiKey: 0x22344d, hemiInt: 0.22,
+             top: 0x010306, mid: 0x06101a, bot: 0x0a1620, fog: 0x05080d, exp: 1.18, label: "夜景" },
+  };
+  const PRESET_KEYS = ["clear", "rain", "snow", "dust"];
+
+  let curPreset = (function () {
+    const p = String(QS.get("preset") || "clear").toLowerCase();
+    return PRESET_KEYS.indexOf(p) >= 0 ? p : "clear";
+  })();
+  const INTENSITY = clamp(numParam("intensity", 0.8), 0, 1);
+  let todKey = (function () {
+    const t = String(QS.get("tod") || "dusk").toLowerCase();
+    return TOD[t] ? t : "dusk";
+  })();
+  const TIER = (function () {
+    const t = String(QS.get("tier") || "high").toLowerCase();
+    return ["high", "medium", "cpu"].indexOf(t) >= 0 ? t : "high";
+  })();
+  let auto = QS.get("auto") === "1";
+
+  /* ================================================================ 1. 噪声与地形 */
+  function makeRng(seed) {
+    let s = (seed >>> 0) || 1;
+    return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  }
+  /** 值噪声：随机格点 + 双线性 smoothstep 插值（比 Perlin 便宜，做"起伏地形"足够） */
+  function makeValueNoise(seed) {
+    const rnd = makeRng(seed);
+    const g = new Float32Array(256 * 256);
+    for (let i = 0; i < g.length; i++) g[i] = rnd();
+    return function (x, z) {
+      const xi = Math.floor(x), zi = Math.floor(z);
+      const xf = x - xi, zf = z - zi;
+      const u = xf * xf * (3 - 2 * xf), v = zf * zf * (3 - 2 * zf);
+      const x0 = xi & 255, x1 = (xi + 1) & 255, z0 = zi & 255, z1 = (zi + 1) & 255;
+      const a = g[(z0 << 8) | x0], b = g[(z0 << 8) | x1];
+      const c = g[(z1 << 8) | x0], d = g[(z1 << 8) | x1];
+      return (a * (1 - u) + b * u) * (1 - v) + (c * (1 - u) + d * u) * v;
+    };
+  }
+  const noise = makeValueNoise(20261031);
+  function fbm(x, z, oct) {
+    let v = 0, a = 0.5, f = 1;
+    for (let i = 0; i < oct; i++) { v += noise(x * f + i * 13.1, z * f - i * 7.7) * a; f *= 2.03; a *= 0.5; }
+    return v;
+  }
+
+  const TERRAIN = { w: 820, d: 780, segX: 168, segZ: 140, cx: 0, cz: -40 };
+
+  /**
+   * 地形高度：前景起伏 + 浅盆地 + 两排"远景山脊"。
+   * 山脊放在 z=-165/-245 附近：晴/雨时是画面里的地标；沙尘时正好被雾吃掉，
+   * 用来肉眼验证"能见度衰减真的生效"。
+   */
+  function terrainH(x, z) {
+    const roll = (fbm(x * 0.014, z * 0.014, 4) - 0.5) * 8.0
+               + (fbm(x * 0.045 + 7.3, z * 0.045 - 2.1, 3) - 0.5) * 2.6;
+    const r = Math.hypot((x + 2) / 60, (z - 6) / 46);
+    const basin = -7.0 * Math.max(0, 1 - r * r);        // 前景浅盆地，制造起伏阴影
+    const g1 = Math.exp(-Math.pow((z + 165) / 70, 2));
+    const g2 = Math.exp(-Math.pow((z + 245) / 78, 2));
+    const ridge = g1 * (18 + 20 * fbm(x * 0.007 + 31.7, 5.5, 3))
+                + g2 * (32 + 30 * fbm(x * 0.005 - 11.3, 8.8, 3));
+    const sideT = smoothstep(110, 300, Math.abs(x));
+    const side = sideT * sideT * (10 + 14 * fbm(x * 0.004 + 2.7, z * 0.006 + 9.1, 3));
+    return roll + basin + ridge + side;
+  }
+
+  /* ============================================================ 2. 渲染器与场景 */
+  const app = document.getElementById("app");
+  const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.shadowMap.enabled = false;                 // 自检页不需要阴影，SwiftShader 下省一半时间
+  if (THREE.sRGBEncoding) renderer.outputEncoding = THREE.sRGBEncoding;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  app.appendChild(renderer.domElement);
+
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(52, window.innerWidth / window.innerHeight, 0.5, 2600);
+  camera.position.set(36, 25, 64);
+  const CAM_TARGET = new THREE.Vector3(-14, 12, -150);
+  camera.lookAt(CAM_TARGET);
+
+  /* --------------------------------------------------------- 天空（渐变球）
+     注意：三段渐变色 uniform 名用 top/mid/bot，与 app3d.html 的 buildSky 一致 ——
+     这样可以把 skyMat 直接传给天气模块，由它按天气强度/雾浓度把天空色调向雾色
+     （自检页验证的就是主页面那条可选联动路径，而不是另写一套天空雾霾）。 */
+  const skyMat = new THREE.ShaderMaterial({
+    side: THREE.BackSide, depthWrite: false, depthTest: true,
+    uniforms: {
+      top: { value: new THREE.Color() }, mid: { value: new THREE.Color() }, bot: { value: new THREE.Color() },
+      uExposure: { value: 1.0 },
+      uSunDir: { value: new THREE.Vector3(0, 1, 0) }, uSunCol: { value: new THREE.Color() },
+      uAir: { value: 1.0 },   // 1=晴空（太阳光晕/余晖强），0=天气重（光晕被沙尘/雨幕遮住）
+    },
+    vertexShader: [
+      "varying vec3 vDir;",
+      "void main() {",
+      "  vDir = normalize(position);",
+      "  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);",
+      "}",
+    ].join("\n"),
+    fragmentShader: [
+      "uniform vec3 top, mid, bot, uSunCol;",
+      "uniform float uExposure, uAir;",
+      "uniform vec3 uSunDir;",
+      "varying vec3 vDir;",
+      "void main() {",
+      "  vec3 d = normalize(vDir);",
+      "  float y = d.y;",
+      "  vec3 c = y > 0.05 ? mix(mid, top, smoothstep(0.05, 0.9, y))",
+      "                   : mix(bot, mid, smoothstep(-0.25, 0.05, y));",
+      "  // 太阳光晕 + 地平线暖色余晖（天气重时被 uAir 压低）",
+      "  float glow = pow(max(dot(d, normalize(uSunDir)), 0.0), 18.0);",
+      "  c += uSunCol * glow * 0.60 * (0.10 + 0.90 * uAir);",
+      "  c += uSunCol * (1.0 - smoothstep(0.0, 0.42, abs(y))) * 0.22 * (0.10 + 0.90 * uAir);",
+      // 与内置材质走同一条后处理链：ACES 近似 + sRGB 编码。否则自定义 shader 不参与
+      // toneMapping，天空会比"雾色"亮一截，沙尘在天地交界处会多出一条假的"山脊线"。
+      "  vec3 x = max(c * uExposure, 0.0);",
+      "  x = clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);",
+      "  gl_FragColor = vec4(x, 1.0);",
+      "  #include <encodings_fragment>",
+      "}",
+    ].join("\n"),
+  });
+  const skyMesh = new THREE.Mesh(new THREE.SphereGeometry(1200, 32, 20), skyMat);
+  skyMesh.renderOrder = -1;
+  scene.add(skyMesh);
+
+  /* --------------------------------------------------------- 光照（与主页面同参数） */
+  const hemi = new THREE.HemisphereLight(0x9ec8ff, 0x2a2a20, 0.52);
+  scene.add(hemi);
+  const sun = new THREE.DirectionalLight(0xffe9c4, 1.0);
+  sun.position.set(120, 86, 54);
+  scene.add(sun);
+  const fill = new THREE.DirectionalLight(0x4a86c8, 0.55);
+  fill.position.set(-110, 50, -80);
+  scene.add(fill);
+  // 黄昏余晖补光（与太阳同方位、抬高 12°）：把山脊/无人机朝太阳一侧刷一层暖色，
+  // 不然纯 ACES 下低角度太阳会让整个地景发闷（这是自检页的补光，不参与天气逻辑）。
+  const rim = new THREE.DirectionalLight(0xff9a5c, 0.40);
+  rim.position.set(150, 22, -92);
+  scene.add(rim);
+
+  /* --------------------------------------------------------- 雾：与主页面同一个 init 值 */
+  scene.fog = new THREE.FogExp2(0x231a22, 0.0034);
+
+  /* ================================================================ 3. 构建场景 */
+  /* ---- 3.1 地形状起伏地面（顶点色 + 坡度/高程分带，风格与 app3d 基础地形一致） ---- */
+  const C_DEEP = new THREE.Color(0x123542);
+  const C_SOIL = new THREE.Color(0x3d6f55);
+  const C_ROCK = new THREE.Color(0x6f948a);
+  const C_TOP  = new THREE.Color(0xb0a48c);
+
+  function buildTerrain() {
+    const geo = new THREE.PlaneGeometry(TERRAIN.w, TERRAIN.d, TERRAIN.segX, TERRAIN.segZ);
+    geo.rotateX(-Math.PI / 2);
+    geo.translate(TERRAIN.cx, 0, TERRAIN.cz);
+    const pos = geo.attributes.position;
+    const count = pos.count;
+    const hs = new Float32Array(count);
+    let hMin = 1e9, hMax = -1e9;
+    for (let i = 0; i < count; i++) {
+      const h = terrainH(pos.getX(i), pos.getZ(i));
+      hs[i] = h;
+      if (h < hMin) hMin = h;
+      if (h > hMax) hMax = h;
+    }
+    const col = new Float32Array(count * 3);
+    const tmp = new THREE.Color();
+    const eps = 2.4;
+    for (let i = 0; i < count; i++) {
+      const x = pos.getX(i), z = pos.getZ(i), h = hs[i];
+      pos.setY(i, h);
+      // 坡度（中心差分）→ 陡坡露岩
+      const slope = Math.hypot(
+        (terrainH(x - eps, z) - terrainH(x + eps, z)) / (2 * eps),
+        (terrainH(x, z - eps) - terrainH(x, z + eps)) / (2 * eps));
+      const steep = smoothstep(0.32, 1.35, slope);
+      const t = clamp((h - hMin) / Math.max(1e-6, hMax - hMin), 0, 1);
+      if (t < 0.30) tmp.copy(C_DEEP).lerp(C_SOIL, t / 0.30);
+      else if (t < 0.72) tmp.copy(C_SOIL).lerp(C_ROCK, (t - 0.30) / 0.42);
+      else tmp.copy(C_ROCK).lerp(C_TOP, (t - 0.72) / 0.28);
+      tmp.lerp(C_ROCK, steep * 0.55);
+      // 细节明暗（噪声）：让平坦处也有"土壤斑驳"的感觉，避免一大片死板纯色
+      const shade = 0.82 + 0.46 * fbm(x * 0.09 + 3.1, z * 0.09 - 1.4, 3);
+      col[i * 3] = tmp.r * shade;
+      col[i * 3 + 1] = tmp.g * shade;
+      col[i * 3 + 2] = tmp.b * shade;
+    }
+    pos.needsUpdate = true;
+    geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
+    geo.computeVertexNormals();
+    const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.97, metalness: 0.03 });
+    const mesh = new THREE.Mesh(geo, mat);
+    scene.add(mesh);
+    return { mesh: mesh, hMin: hMin, hMax: hMax };
+  }
+  const terrain = buildTerrain();
+
+  /* ---- 3.2 测区网格（很淡的青色圆环，贴地，给"这是勘查测区"的语境） ---- */
+  (function buildSurveyRings() {
+    const mat = new THREE.LineBasicMaterial({ color: 0x37e2d5, transparent: true,
+      opacity: 0.16, blending: THREE.AdditiveBlending, depthWrite: false });
+    const group = new THREE.Group();
+    [18, 30, 44].forEach(function (rad) {
+      const pts = [];
+      for (let a = 0; a <= 96; a++) {
+        const th = a / 96 * Math.PI * 2;
+        const x = -2 + Math.cos(th) * rad, z = 10 + Math.sin(th) * rad * 0.86;
+        pts.push(new THREE.Vector3(x, terrainH(x, z) + 0.35, z));
+      }
+      const g = new THREE.BufferGeometry().setFromPoints(pts);
+      group.add(new THREE.Line(g, mat));
+    });
+    scene.add(group);
+  })();
+
+  /* ---- 3.3 碎石（低多边形，给前景一点尺度参照） ---- */
+  (function buildRocks() {
+    const geo = new THREE.DodecahedronGeometry(1, 0);
+    const mat = new THREE.MeshStandardMaterial({ color: 0x3d4c49, roughness: 0.95, metalness: 0.05,
+      flatShading: true });
+    const rnd = makeRng(777);
+    const group = new THREE.Group();
+    for (let i = 0; i < 22; i++) {
+      const x = -78 + rnd() * 150;
+      const z = -30 + rnd() * 100;
+      const s = 0.7 + rnd() * 2.4;
+      const m = new THREE.Mesh(geo, mat);
+      m.position.set(x, terrainH(x, z) + s * 0.35, z);
+      m.scale.set(s, s * (0.5 + rnd() * 0.8), s);
+      m.rotation.set(rnd() * 0.6, rnd() * Math.PI * 2, rnd() * 0.6);
+      group.add(m);
+    }
+    scene.add(group);
+  })();
+
+  /* ---- 3.4 地面站（塔 + 天线 + 青色信标；给机群一个"回家"的锚点） ---- */
+  const station = (function buildStation() {
+    const g = new THREE.Group();
+    const x = 0, z = 26;
+    const y = terrainH(x, z);
+    g.position.set(x, y, z);
+    const dark = new THREE.MeshStandardMaterial({ color: 0x37444f, roughness: 0.6, metalness: 0.45 });
+    const metal = new THREE.MeshStandardMaterial({ color: 0x7f95a6, roughness: 0.35, metalness: 0.75 });
+    const base = new THREE.Mesh(new THREE.CylinderGeometry(3.0, 3.6, 1.4, 14), dark);
+    base.position.y = 0.7; g.add(base);
+    const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.30, 9.0, 8), metal);
+    mast.position.y = 5.8; g.add(mast);
+    const dish = new THREE.Mesh(new THREE.SphereGeometry(1.45, 14, 10, 0, Math.PI * 2, 0, Math.PI * 0.42),
+      new THREE.MeshStandardMaterial({ color: 0x9fb4c4, roughness: 0.3, metalness: 0.8, side: THREE.DoubleSide }));
+    dish.position.set(0.9, 9.6, 0);
+    dish.rotation.set(Math.PI * 0.62, 0.6, 0);
+    g.add(dish);
+    const beacon = new THREE.Mesh(new THREE.SphereGeometry(0.30, 10, 8),
+      new THREE.MeshBasicMaterial({ color: 0x37e2d5 }));
+    beacon.position.set(0, 10.5, 0); g.add(beacon);
+    scene.add(g);
+    return { group: g, beacon: beacon };
+  })();
+
+  /* ---- 3.5 几架小无人机（机身 + 机臂 + 半透明桨盘 + 桨叶 + 指示灯 + 地面投影环）---- */
+  const DRONE_MAT = {
+    body: new THREE.MeshStandardMaterial({ color: 0x46555f, roughness: 0.45, metalness: 0.6 }),
+    arm: new THREE.MeshStandardMaterial({ color: 0x2c363e, roughness: 0.65, metalness: 0.4 }),
+    accent: new THREE.MeshStandardMaterial({ color: 0xffa63d, roughness: 0.5, metalness: 0.3 }),
+    disc: new THREE.MeshBasicMaterial({ color: 0xbcd6e8, transparent: true, opacity: 0.22,
+      depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending }),
+    blade: new THREE.MeshBasicMaterial({ color: 0x0d1216, transparent: true, opacity: 0.9 }),
+    ledC: new THREE.MeshBasicMaterial({ color: 0x37e2d5 }),
+    ledR: new THREE.MeshBasicMaterial({ color: 0xff6b6b }),
+  };
+  const DRONE_GEO = {
+    body: new THREE.BoxGeometry(2.5, 0.50, 2.5),
+    arm: new THREE.BoxGeometry(0.18, 0.12, 3.3),
+    accent: new THREE.BoxGeometry(1.05, 0.08, 1.05),
+    disc: new THREE.CylinderGeometry(0.86, 0.86, 0.03, 18),
+    blade: new THREE.BoxGeometry(1.62, 0.02, 0.14),
+    gimbal: new THREE.SphereGeometry(0.24, 10, 8),
+    led: new THREE.SphereGeometry(0.17, 8, 6),
+    ring: new THREE.CircleGeometry(2.9, 24),
+  };
+  const DRONE_RING_MAT = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true,
+    opacity: 0.30, depthWrite: false });
+  const drones = [];
+
+  function makeDrone(x, z, alt, phase) {
+    const g = new THREE.Group();
+    const y = terrainH(x, z) + alt;
+    g.position.set(x, y, z);
+
+    const body = new THREE.Mesh(DRONE_GEO.body, DRONE_MAT.body);
+    g.add(body);
+    const accent = new THREE.Mesh(DRONE_GEO.accent, DRONE_MAT.accent);
+    accent.position.y = 0.29; g.add(accent);
+    const armA = new THREE.Mesh(DRONE_GEO.arm, DRONE_MAT.arm);
+    g.add(armA);
+    const armB = new THREE.Mesh(DRONE_GEO.arm, DRONE_MAT.arm);
+    armB.rotation.y = Math.PI / 2; g.add(armB);
+    const gimbal = new THREE.Mesh(DRONE_GEO.gimbal, DRONE_MAT.arm);
+    gimbal.position.set(0, -0.32, 0.95); g.add(gimbal);
+
+    const rotors = [];
+    const corners = [[1.42, 1.42], [-1.42, 1.42], [1.42, -1.42], [-1.42, -1.42]];
+    for (let k = 0; k < 4; k++) {
+      const rg = new THREE.Group();
+      rg.position.set(corners[k][0], 0.30, corners[k][1]);
+      const disc = new THREE.Mesh(DRONE_GEO.disc, DRONE_MAT.disc);
+      rg.add(disc);
+      const blade = new THREE.Mesh(DRONE_GEO.blade, DRONE_MAT.blade);
+      rg.add(blade);
+      g.add(rg);
+      rotors.push(rg);
+    }
+    const ledC = new THREE.Mesh(DRONE_GEO.led, DRONE_MAT.ledC);
+    ledC.position.set(0, -0.12, 1.30); g.add(ledC);
+    const ledR = new THREE.Mesh(DRONE_GEO.led, DRONE_MAT.ledR);
+    ledR.position.set(0, -0.12, -1.30); g.add(ledR);
+
+    // 地面投影环（无阴影时的替代：让无人机不"悬浮"）
+    const ring = new THREE.Mesh(DRONE_GEO.ring, DRONE_RING_MAT);
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.set(x, terrainH(x, z) + 0.18, z);
+    scene.add(ring);
+
+    scene.add(g);
+    return { group: g, rotors: rotors, base: { x: x, y: y, z: z }, phase: phase };
+  }
+
+  /* 4 架机分别放在"近 / 中 / 远"三种距离上：
+     近处那架在沙尘里依然清晰，远处两架在沙尘里会被能见度吃掉 —— 一眼就能比较。 */
+  drones.push(makeDrone(24, 34, 30.0, 0.0));     // 近（≈33 单位）
+  drones.push(makeDrone(-2, 16, 22.0, 2.1));     // 中（≈60 单位）
+  drones.push(makeDrone(-34, -40, 30.0, 4.2));   // 远（≈125 单位）
+  drones.push(makeDrone(16, -80, 40.0, 1.3));    // 更远（≈145 单位）
+
+  /* ============================================================ 4. 天气系统接入 */
+  const weather = (function () {
+    if (!window.UAVWeather) { console.error("[DEV] window.UAVWeather 未加载"); return null; }
+    try {
+      return window.UAVWeather.create({
+        THREE: THREE, scene: scene, camera: camera, renderer: renderer,
+        sun: sun, hemi: hemi, tier: TIER,
+        // 可选联动：把天空球材质交给天气模块，天气重时天空会一起变沙/变白
+        skyMat: skyMat,
+        quality: {
+          particles: TIER === "high" ? 9000 : (TIER === "medium" ? 5000 : 1200),
+          range: 90, sizeScale: 1.0,
+        },
+        log: function (m) { console.log("[Weather][DEV]", m); },
+      });
+    } catch (e) { console.error("[DEV] UAVWeather.create 失败", e); return null; }
+  })();
+
+  /** 把 query 参数（preset + intensity）拼成后端 §4.6.4 同形态的快照。
+      能见度按后端 weather.py 的公式插值：vis = 12 - (12 - preset_vis) * intensity
+      （weather-core-dev 已确认后端就是这么算的，所以自检页看到的就是主页面看到的）。 */
+  function snapshotFor(preset, intensity) {
+    const base = window.UAVWeather.PRESETS[preset];
+    const clearVis = window.UAVWeather.PRESETS.clear.visibility_km;
+    const eff = preset === "clear" ? 0 : clamp(intensity, 0, 1);
+    const vis = preset === "clear" ? clearVis : (clearVis - (clearVis - base.visibility_km) * eff);
+    const round2 = function (v) { return Math.round(v * 100) / 100; };
+    const round1 = function (v) { return Math.round(v * 10) / 10; };
+    return {
+      preset: preset,
+      label: base.label,
+      intensity: round2(eff),
+      visibility_km: round2(vis),
+      link_penalty: round1(base.link_penalty_max * eff),
+      wind_dir_deg: base.wind_dir_deg,
+      wind_speed_mps: round1(base.wind_speed_mps * (0.35 + 0.65 * eff)),
+    };
+  }
+
+  /* ---- 时段切换：把 TOD 基准下发给天气模块（模拟 app3d.html 的 applyTOD）---- */
+  function applyDevTod(key) {
+    const p = TOD[key];
+    if (!p) return;
+    todKey = key;
+    sun.position.set(p.sun[0], p.sun[1], p.sun[2]);
+    sun.color.setHex(p.sunCol);
+    sun.intensity = p.sunInt;
+    hemi.color.setHex(p.hemiKey);
+    hemi.intensity = p.hemiInt;
+    renderer.toneMappingExposure = p.exp;
+    skyMat.uniforms.uExposure.value = p.exp;
+    if (scene.fog) scene.fog.color.setHex(p.fog);
+    skyMat.uniforms.top.value.setHex(p.top);
+    skyMat.uniforms.mid.value.setHex(p.mid);
+    skyMat.uniforms.bot.value.setHex(p.bot);
+    skyMat.uniforms.uSunCol.value.setHex(p.sunCol);
+    skyMat.uniforms.uSunDir.value.set(p.sun[0], p.sun[1], p.sun[2]).normalize();
+    // ★ 关键接线：天气模块保存"时段基准"，再按当前天气重新叠加 —— 切时段天气效果不丢
+    if (weather) {
+      weather.setTod({ fogColor: p.fog, sunIntensity: p.sunInt, hemiIntensity: p.hemiInt, exposure: p.exp });
+    }
+  }
+
+  function applyWeather(preset, intensity) {
+    curPreset = preset;
+    if (weather) weather.apply(snapshotFor(preset, intensity));
+  }
+
+  applyDevTod(todKey);
+  applyWeather(curPreset, INTENSITY);
+
+  /* ---- auto=1：每 4.5s 循环 clear→rain→snow→dust（观察缓动过渡）---- */
+  let autoTimer = null;
+  function setAuto(on) {
+    auto = !!on;
+    if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
+    if (auto) {
+      autoTimer = setInterval(function () {
+        const i = PRESET_KEYS.indexOf(curPreset);
+        applyWeather(PRESET_KEYS[(i + 1) % PRESET_KEYS.length], INTENSITY);
+      }, 4500);
+    }
+  }
+  if (auto) setAuto(true);
+
+  /* ==================================================================== 5. HUD */
+  const hudEl = document.getElementById("hud");
+  let lastHud = -1;
+  const fmt = function (v, n) { return Number(v).toFixed(n); };
+
+  function updateHud() {
+    if (!weather || !window.UAVWeather) {
+      hudEl.textContent = "天气模块未加载（检查 /static/weather_system.js 是否 404）";
+      return;
+    }
+    const fog = scene.fog;
+    const p = TOD[todKey];
+    const cur = weather.current;
+    const targetDensity = weather.stats.fogTarget;
+    const actualDensity = fog ? fog.density : 0;
+    const visWorld = window.UAVWeather.visibilityWorld(cur.visibility_km);
+    const fogColorHex = fog ? ("#" + fog.color.getHexString()) : "-";
+    const lines = [
+      "<span class='t'>天气视觉自检 · _dev_weather.html</span>",
+      "preset      <span class='v'>" + cur.preset + "</span>  (" + cur.label + ")   档位 " + TIER,
+      "intensity   <span class='v'>" + fmt(cur.intensity, 2) + "</span>" +
+        (auto ? "   <span class='dim'>[auto 循环中]</span>" : ""),
+      "visibility  <span class='v'>" + fmt(cur.visibility_km, 2) + " km</span>  = " +
+        fmt(visWorld, 1) + " 世界单位",
+      "fog density <span class='v'>" + fmt(actualDensity, 5) + "</span>  目标 " +
+        fmt(targetDensity, 5) + "  (晴 " + fmt(window.UAVWeather.PRESETS.clear.visibility_km, 1) + "km→0.00340)",
+      "fog color   " + fogColorHex + "   预设 " + (window.UAVWeather.PRESETS[cur.preset].fogColor || "TOD"),
+      "tod         <span class='v'>" + todKey + "</span> (" + p.label + ")  太阳 " +
+        fmt(sun.intensity, 2) + "/" + fmt(p.sunInt, 2) + "  半球 " +
+        fmt(hemi.intensity, 2) + "/" + fmt(p.hemiInt, 2),
+      "粒子        " + weather.stats.particles + "  drawCalls " + weather.stats.drawCalls +
+        "  update " + fmt(weather.stats.ms, 2) + " ms",
+      "预算        rain " + weather.stats.budgets.rain + " / snow " + weather.stats.budgets.snow +
+        " / dust " + weather.stats.budgets.dust + " / 沙墙 " + weather.stats.budgets.walls,
+      "<span class='dim'>1/2/3/4=黎明/正午/黄昏/夜景  p=循环天气  a=自动</span>",
+    ];
+    hudEl.innerHTML = lines.join("\n");
+  }
+
+  /* ================================================================ 6. 动画循环 */
+  const clock = new THREE.Clock();
+  let frames = 0;
+  let ready = false;
+
+  function animate() {
+    requestAnimationFrame(animate);
+    const dt = Math.min(0.05, clock.getDelta());
+    const t = clock.elapsedTime;
+
+    // 无人机：悬停微动 + 桨叶旋转 + 指示灯
+    for (let i = 0; i < drones.length; i++) {
+      const d = drones[i];
+      const bob = Math.sin(t * 1.35 + d.phase) * 0.65;
+      d.group.position.y = d.base.y + bob;
+      d.group.rotation.y = d.phase + t * 0.12;
+      d.group.rotation.z = Math.sin(t * 0.9 + d.phase) * 0.035;
+      for (let k = 0; k < d.rotors.length; k++) {
+        d.rotors[k].rotation.y += dt * (k % 2 ? -42 : 42);
+      }
+    }
+    // 地面站信标呼吸
+    const bs = 1 + 0.3 * Math.sin(t * 5.2);
+    station.beacon.scale.setScalar(bs);
+
+    // 天气粒子/雾/光/天空色调的过渡与推进（在渲染之前）
+    if (weather) weather.update(dt, camera);
+    // 天气重时太阳光晕/(地平线余晖)被遮住 —— 天空球的清晰度因子
+    const wxInt = weather ? weather.current.intensity : 0;
+    skyMat.uniforms.uAir.value = clamp(1 - wxInt * 0.92, 0.04, 1);
+
+    renderer.render(scene, camera);
+
+    frames++;
+    if (!ready && frames >= 6) {
+      ready = true;
+      window.__DEV_READY__ = true;
+      console.log("[DEV] weather ready · preset=" + curPreset + " intensity=" + INTENSITY +
+        " tod=" + todKey + " tier=" + TIER);
+    }
+    if (t - lastHud > 0.2) { lastHud = t; updateHud(); }
+  }
+
+  /* ================================================================== 7. 交互 */
+  addEventListener("resize", function () {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+  addEventListener("keydown", function (e) {
+    const k = e.key;
+    if (k === "1") applyDevTod("dawn");
+    else if (k === "2") applyDevTod("noon");
+    else if (k === "3") applyDevTod("dusk");
+    else if (k === "4") applyDevTod("night");
+    else if (k === "p") applyWeather(PRESET_KEYS[(PRESET_KEYS.indexOf(curPreset) + 1) % 4], INTENSITY);
+    else if (k === "a") setAuto(!auto);
+  });
+
+  /* 启动 */
+  updateHud();
+  animate();
+
+  /* 调试钩子（自检页专用；主页面不需要）：方便无头脚本/控制台核对内部状态 */
+  window.__DEV_WEATHER__ = weather;
+  window.__DEV_SCENE__ = scene;
+})();
+</script>
+</body>
+</html>

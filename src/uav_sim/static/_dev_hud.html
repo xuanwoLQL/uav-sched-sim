@@ -1,0 +1,760 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HUD 自检 · 任务流向箭头 + 队列三维瀑布</title>
+<!-- =============================================================================
+     _dev_hud.html —— window.UAVHUD 的自检页（契约 §5）
+     -----------------------------------------------------------------------------
+     自带一个"最小可看场景"：一块地面 + 地面站简化模型 + 30 个随机运动的无人机
+     小球/盒子；用**内置假数据**（正弦 + 噪声的队列曲线）驱动 HUD，也可以
+     ?live=1 改成轮询 /api/state 的真实仿真数据。
+
+     为什么要两个数据源：
+       * 假数据 → 不依赖后端也能截图验收（答辩现场后端挂了也能源码演示）；
+       * live=1 → 证明模块能吃真实 live 快照（queue / history / running_tasks /
+         uav_states 的字段语义与 app3d.html 完全一致）。
+
+     参数：
+       ?mode=all|flow|waterfall|off   显示哪些图层
+       ?live=1                         用 /api/state 真实数据（失败自动回退假数据）
+       ?cam=iso|top                    相机预设
+       ?n=30                           无人机数量
+
+     页面就绪后设置 window.__DEV_READY__ = true（截图脚本靠它判断）。
+     ============================================================================= -->
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #040a10; color: #cfe9ff;
+    font-family: "Microsoft YaHei", system-ui, sans-serif; }
+  #app { position: fixed; inset: 0; }
+  #panel { position: fixed; left: 14px; bottom: 40px; z-index: 10; width: 330px;
+    background: rgba(5, 14, 24, .86); border: 1px solid rgba(78, 161, 255, .35);
+    border-radius: 8px; padding: 10px 12px; font-size: 12px; line-height: 1.65;
+    backdrop-filter: blur(4px); }
+  #panel h1 { margin: 0 0 4px; font-size: 14px; font-weight: 600; color: #9fd0ff; }
+  #panel .row { color: #7ea6c0; }
+  #panel b { color: #bff4ff; font-weight: 600; }
+  #panel .lg { display: inline-block; width: 9px; height: 9px; border-radius: 2px;
+    margin-right: 4px; vertical-align: -1px; }
+  .btns { margin-top: 7px; display: flex; gap: 6px; flex-wrap: wrap; }
+  .btns button { cursor: pointer; background: rgba(30, 60, 86, .72); color: #a9ecff;
+    border: 1px solid rgba(78, 161, 255, .45); border-radius: 5px; padding: 3px 9px;
+    font: 12px "Microsoft YaHei", sans-serif; }
+  .btns button:hover { background: rgba(58, 96, 130, .85); }
+  .btns button.on { background: rgba(78, 161, 255, .34); border-color: #4ea1ff; color: #eaf6ff; }
+  #stats { position: fixed; right: 14px; top: 14px; z-index: 10; min-width: 268px;
+    background: rgba(5, 14, 24, .84); border: 1px solid rgba(55, 226, 213, .3);
+    border-radius: 8px; padding: 10px 12px; white-space: pre;
+    font: 12px/1.72 Consolas, "Courier New", monospace; color: #9fe8dd; }
+  #hint { position: fixed; left: 14px; bottom: 12px; z-index: 10; font-size: 12px;
+    color: #5f86a0; }
+  #err { position: fixed; left: 50%; top: 46%; transform: translate(-50%, -50%);
+    z-index: 20; display: none; max-width: 70%; padding: 14px 18px; color: #ffb3b3;
+    background: rgba(40, 8, 8, .9); border: 1px solid #ff6b6b; border-radius: 8px;
+    font-size: 13px; line-height: 1.7; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<div id="panel">
+  <h1>HUD 自检 · 任务流向箭头 + 队列三维瀑布</h1>
+  <div class="row">上行数据流：<span class="lg" style="background:#4ea1ff"></span>HIGH 高优
+    <span class="lg" style="background:#f5a623;margin-left:10px"></span>LOW 低优</div>
+  <div class="row">下行调度指令：<span class="lg" style="background:#37e2d5"></span>青色小箭头（反向）</div>
+  <div class="row">弱网 health&lt;55：箭头变稀/变短/抖动</div>
+  <div class="row">瀑布：X=时间 · Z=双泳道 · Y=深度 · <span style="color:#8fe8bd">绿线 load</span></div>
+  <div class="row" style="margin-top:5px">数据源：<b id="src">内置假数据</b> ｜
+    相机：<b id="camp">iso</b></div>
+  <div class="btns" id="modeBtns">
+    <button data-mode="all">全部</button>
+    <button data-mode="flow">仅箭头</button>
+    <button data-mode="waterfall">仅瀑布</button>
+    <button data-mode="off">关闭</button>
+  </div>
+  <div class="btns">
+    <button id="btnFacing">朝向相机：开</button>
+    <button id="btnReset">复位视角</button>
+  </div>
+</div>
+
+<div id="stats">正在初始化…</div>
+<div id="hint">鼠标左键旋转 / 滚轮缩放 / 右键平移 —— 自检页不依赖后端，?live=1 使用 /api/state 真实数据；?cam=near 可演示"相机靠近时瀑布淡出"</div>
+<div id="err"></div>
+
+<script src="/static/three.min.js"></script>
+<script src="/static/OrbitControls.js"></script>
+<script src="/static/hud_overlay.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  /* =========================================================================
+     0. 参数解析
+     ========================================================================= */
+  var QS = new URLSearchParams(location.search || "");
+  var MODE_QS = QS.get("mode") || "all";
+  var MODE = (MODE_QS === "all" || MODE_QS === "flow" ||
+              MODE_QS === "waterfall" || MODE_QS === "off") ? MODE_QS : "all";
+  var LIVE = QS.get("live") === "1";
+  var CAM = (QS.get("cam") === "top") ? "top" : (QS.get("cam") === "near" ? "near" : "iso");
+  var N = Math.max(1, Math.min(48, parseInt(QS.get("n") || "30", 10) || 30));
+
+  var HUD = window.UAVHUD;
+  var statsEl = document.getElementById("stats");
+  var srcEl = document.getElementById("src");
+  var campEl = document.getElementById("camp");
+  var errEl = document.getElementById("err");
+
+  function showErr(msg) {
+    if (errEl) {
+      errEl.style.display = "block";
+      errEl.textContent = String(msg);
+    }
+  }
+
+  /* =========================================================================
+     1. 与 app3d.html 同款的 makeTextSprite（HUD 通过 opts.makeTextSprite 注入）
+     ========================================================================= */
+  function makeTextSprite(text, opt) {
+    opt = opt || {};
+    var fs = opt.fontSize || 30, pad = 9;
+    var cv = document.createElement("canvas");
+    var c0 = cv.getContext("2d");
+    var txt = String(text);
+    c0.font = "600 " + fs + "px 'Microsoft YaHei',sans-serif";
+    var w = Math.ceil(c0.measureText(txt).width) + pad * 2;
+    var h = fs + pad * 2;
+    cv.width = Math.max(4, w); cv.height = Math.max(4, h);
+    var g = cv.getContext("2d");
+    g.font = "600 " + fs + "px 'Microsoft YaHei',sans-serif";
+    g.textBaseline = "middle";
+    g.fillStyle = opt.bg || "rgba(5,14,24,.78)";
+    g.strokeStyle = opt.border || "rgba(78,161,255,.55)";
+    g.lineWidth = 3;
+    var rr = 9;
+    g.beginPath();
+    g.moveTo(rr, 0); g.lineTo(w - rr, 0); g.quadraticCurveTo(w, 0, w, rr);
+    g.lineTo(w, h - rr); g.quadraticCurveTo(w, h, w - rr, h);
+    g.lineTo(rr, h); g.quadraticCurveTo(0, h, 0, h - rr);
+    g.lineTo(0, rr); g.quadraticCurveTo(0, 0, rr, 0); g.closePath();
+    g.fill(); g.stroke();
+    g.fillStyle = opt.color || "#a9ecff";
+    g.fillText(txt, pad, h / 2 + 1);
+    var tex = new THREE.CanvasTexture(cv);
+    tex.minFilter = THREE.LinearFilter;
+    // canvas 画的是 sRGB 颜色：r128 里必须显式标记编码，否则文字会被二次 sRGB 编码、发白
+    if (THREE.sRGBEncoding !== undefined) tex.encoding = THREE.sRGBEncoding;
+    var sp = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: tex, transparent: true, depthWrite: false, fog: false,
+    }));
+    if ("toneMapped" in sp.material) sp.material.toneMapped = false;
+    var s = opt.scale || 0.05;
+    sp.scale.set(w * s, h * s, 1);
+    return sp;
+  }
+
+  /* =========================================================================
+     2. 场景 / 相机 / 光照 / 地面 / 地面站
+     ========================================================================= */
+  var renderer, scene, camera, controls;
+  var stationTop = null;
+  var stationParts = null;      // 地面站的可动画部件（脉冲光晕/信标）
+
+  var CAM_DEF = {
+    // 2026-11 世界放大到 352×256 后，主页面默认 iso 机位是 (190,130,250)；这里做近似复刻。
+    // 瀑布锚点会随世界尺寸自适应（基准 (24,24,6) → 当前世界 ×2 = (48,48,12)）。
+    iso: { pos: [190, 130, 250], tgt: [-10, -12, -12] },
+    top: { pos: [0.1, 520, 120], tgt: [0, 0, 20] },
+    // ?cam=near：镜头放到瀑布锚点附近 ~58 单位处（阈值已按世界缩放为 44~90），演示淡出
+    near: { pos: [88, 62, 52], tgt: [48, 48, 12] },
+  };
+
+  function clampf(v, a, b) { return v < a ? a : (v > b ? b : v); }
+
+  function initScene() {
+    renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+    renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 1.5));
+    renderer.setSize(innerWidth, innerHeight);
+    if (THREE.sRGBEncoding) renderer.outputEncoding = THREE.sRGBEncoding;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 0.92;
+    document.getElementById("app").appendChild(renderer.domElement);
+
+    // 自检场景刻意压暗：HUD 箭头/瀑布都是**加色混合**，背景越暗颜色越纯、越像数据大屏。
+    // （如果放在亮色地表上，加色混合会把蓝/琥珀直接叠成白色，验收时就看不出优先级配色了。）
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x03080e);
+    scene.fog = new THREE.FogExp2(0x040b12, 0.0026);
+
+    camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.5, 3000);
+    var cd = CAM_DEF[CAM] || CAM_DEF.iso;
+    camera.position.set(cd.pos[0], cd.pos[1], cd.pos[2]);
+
+    controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.target.set(cd.tgt[0], cd.tgt[1], cd.tgt[2]);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.07;
+    controls.minDistance = 26;
+    controls.maxDistance = 860;
+    controls.maxPolarAngle = Math.PI * 0.492;
+    controls.update();
+
+    // ---- 光照：冷色天光 + 低角度暖阳，整体压暗，让自发光 HUD 跳出来 ----
+    scene.add(new THREE.HemisphereLight(0x8fb6e8, 0x0a1214, 0.22));
+    var sun = new THREE.DirectionalLight(0xffe9c4, 0.45);
+    sun.position.set(120, 150, 60);
+    scene.add(sun);
+    var fill = new THREE.DirectionalLight(0x4a86c8, 0.12);
+    fill.position.set(-120, 60, -80);
+    scene.add(fill);
+
+    // ---- 地面 + 网格（按 2026-11 新世界 352×256 放大）----
+    var ground = new THREE.Mesh(
+      new THREE.PlaneGeometry(780, 580),
+      new THREE.MeshLambertMaterial({ color: 0x08131b }));
+    ground.rotation.x = -Math.PI / 2;
+    scene.add(ground);
+
+    var grid = new THREE.GridHelper(780, 78, 0x1b3b50, 0x0f2431);
+    grid.position.y = 0.05;
+    if (grid.material) { grid.material.transparent = true; grid.material.opacity = 0.42; }
+    scene.add(grid);
+
+    // ---- 几块"台地"：给镜头一点尺度感，别让 30 架机悬在纯黑虚空里 ----
+    var boxMat = new THREE.MeshLambertMaterial({ color: 0x0f1c26 });
+    var boxDefs = [
+      [-92, -8, -52, 30, 3.2, 22], [58, -18, -22, 26, 5.0, 20],
+      [-64, 10, 96, 34, 7.5, 24], [88, 22, 84, 28, 4.0, 26],
+      [-120, -4, 46, 22, 2.4, 18], [130, -12, 8, 24, 3.0, 20],
+    ];
+    for (var bi = 0; bi < boxDefs.length; bi++) {
+      var bd = boxDefs[bi];
+      var bx = new THREE.Mesh(new THREE.BoxGeometry(bd[3], bd[4], bd[5]), boxMat);
+      bx.position.set(bd[0], bd[1], bd[2]);
+      bx.rotation.y = (bi * 0.37) % 3.14;
+      scene.add(bx);
+    }
+
+    buildStation();
+    buildStationTopMarker();
+
+    stationTop = new THREE.Vector3(0, 17, 44);   // = 主页面 UPLINK_TOP
+
+    addEventListener("resize", function () {
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+  }
+
+  /** 地面站简化模型：跟 app3d.html 的 buildStation 同一套比例，天线顶 = (0,17,44) */
+  function buildStation() {
+    var g = new THREE.Group();
+    g.position.set(0, 0, 44);
+    scene.add(g);
+
+    var dark = new THREE.MeshLambertMaterial({ color: 0x23282c });
+    var metal = new THREE.MeshLambertMaterial({ color: 0x5a646e });
+
+    var plat = new THREE.Mesh(new THREE.CylinderGeometry(10, 11.5, 1.6, 16), dark);
+    plat.position.y = 0.8;
+    g.add(plat);
+
+    var mark = new THREE.Mesh(
+      new THREE.RingGeometry(6.2, 7.4, 48),
+      new THREE.MeshBasicMaterial({ color: 0xf5a623, transparent: true, opacity: 0.32,
+        side: THREE.DoubleSide }));
+    mark.rotation.x = -Math.PI / 2;
+    mark.position.y = 1.62;
+    g.add(mark);
+
+    var rack = new THREE.Mesh(new THREE.BoxGeometry(5.4, 3.6, 3.0),
+      new THREE.MeshLambertMaterial({ color: 0x36424e }));
+    rack.position.set(-4.2, 3.4, 1.6);
+    g.add(rack);
+
+    var tower = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.55, 16, 8), metal);
+    tower.position.y = 8.5;
+    g.add(tower);
+    for (var i = 1; i <= 3; i++) {
+      var ring = new THREE.Mesh(new THREE.TorusGeometry(0.95, 0.07, 6, 18), metal);
+      ring.rotation.x = Math.PI / 2;
+      ring.position.y = 3.4 + i * 3.4;
+      g.add(ring);
+    }
+
+    var dish = new THREE.Mesh(
+      new THREE.SphereGeometry(2.2, 20, 10, 0, Math.PI * 2, 0, Math.PI / 2.5),
+      new THREE.MeshLambertMaterial({ color: 0xc8d4dc, side: THREE.DoubleSide }));
+    dish.position.y = 17.0;
+    dish.rotation.x = -0.55;
+    g.add(dish);
+
+    var beacon = new THREE.Mesh(new THREE.SphereGeometry(0.38, 10, 10),
+      new THREE.MeshBasicMaterial({ color: 0x37e2d5 }));
+    beacon.position.y = 18.2;
+    g.add(beacon);
+
+    var halo = new THREE.Mesh(
+      new THREE.RingGeometry(12, 13.8, 64),
+      new THREE.MeshBasicMaterial({ color: 0x37e2d5, transparent: true, opacity: 0.2,
+        side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false }));
+    halo.rotation.x = -Math.PI / 2;
+    halo.position.y = 1.66;
+    g.add(halo);
+
+    var beam = new THREE.Mesh(
+      new THREE.CylinderGeometry(2.6, 6.0, 36, 20, 1, true),
+      new THREE.MeshBasicMaterial({ color: 0x37e2d5, transparent: true, opacity: 0.07,
+        blending: THREE.AdditiveBlending, side: THREE.DoubleSide, depthWrite: false }));
+    beam.position.y = 18;
+    g.add(beam);
+
+    var lab = makeTextSprite("地面站 · 调度服务器", { fontSize: 30, scale: 0.05 });
+    lab.position.y = 23;
+    g.add(lab);
+
+    stationParts = { halo: halo, beacon: beacon, beam: beam };
+  }
+
+  /** 天线顶的汇聚点标记：所有上行箭头都汇到这里，加个脉冲小球提示"数据落点" */
+  function buildStationTopMarker() {
+    var g = new THREE.Group();
+    g.position.set(0, 17, 44);
+    scene.add(g);
+    var core = new THREE.Mesh(
+      new THREE.SphereGeometry(0.55, 12, 12),
+      new THREE.MeshBasicMaterial({ color: 0x37e2d5, transparent: true, opacity: 0.85,
+        blending: THREE.AdditiveBlending, depthWrite: false }));
+    g.add(core);
+    var halo = new THREE.Mesh(
+      new THREE.RingGeometry(1.4, 2.2, 40),
+      new THREE.MeshBasicMaterial({ color: 0x37e2d5, transparent: true, opacity: 0.35,
+        side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false }));
+    g.add(halo);
+    stationParts.topCore = core;
+    stationParts.topHalo = halo;
+  }
+
+  /* =========================================================================
+     3. 30 架无人机（随机运动的小盒子 + 状态）
+     ========================================================================= */
+  var devDrones = [];      // 给 UAVHUD.update 的 drones 数组（pos 是 THREE.Vector3）
+  var droneGeo, droneMat, ledGeo;
+
+  function initDrones() {
+    droneGeo = new THREE.BoxGeometry(2.8, 0.55, 2.8);
+    droneMat = new THREE.MeshLambertMaterial({ color: 0x2a3540, emissive: 0x050b11 });
+    ledGeo = new THREE.SphereGeometry(0.46, 8, 8);
+
+    for (var i = 0; i < N; i++) {
+      var g = new THREE.Group();
+      var body = new THREE.Mesh(droneGeo, droneMat);
+      g.add(body);
+      var ledMat = new THREE.MeshBasicMaterial({ color: 0x3ddc97 });
+      var led = new THREE.Mesh(ledGeo, ledMat);
+      led.position.set(0, 0.5, 0);
+      g.add(led);
+      scene.add(g);
+
+      // 初始位置：散布在放大后的测区上空（世界 352×256），y 高于地面站平台
+      var x = (Math.random() - 0.5) * 240;
+      var z = 20 + (Math.random() - 0.5) * 200;
+      var y = 12 + Math.random() * 22;
+      g.position.set(x, y, z);
+
+      var d = {
+        id: i + 1,
+        group: g,
+        pos: g.position,            // HUD 直接读 d.pos.x/.y/.z
+        vel: new THREE.Vector3((Math.random() - 0.5) * 7, (Math.random() - 0.5) * 1.4,
+          (Math.random() - 0.5) * 7),
+        health: 100,
+        busy: false,
+        online: true,
+        priority: null,
+        progress: 0,
+        phaseName: "SURVEY",
+        phase: (i * 0.137) % 1,
+        ledMat: ledMat,
+        // 假数据模式：每 5 架里有 4 架 busy（≈ 80% 出动率，画面箭头更丰富）
+        busyFixed: (i % 5) !== 0,
+        prioFixed: (i % 2 === 0) ? "HIGH" : "LOW",
+      };
+      devDrones.push(d);
+    }
+  }
+
+  /** 随机运动：碰到边界反弹 + 轻微上下浮动（保证箭头每帧都在动） */
+  function updateDrones(dt) {
+    for (var i = 0; i < devDrones.length; i++) {
+      var d = devDrones[i];
+      var p = d.pos, v = d.vel;
+      p.x += v.x * dt;
+      p.y += v.y * dt * 0.4;
+      p.z += v.z * dt;
+
+      if (p.x > 128) { p.x = 128; v.x = -Math.abs(v.x); }
+      else if (p.x < -128) { p.x = -128; v.x = Math.abs(v.x); }
+      if (p.z > 122) { p.z = 122; v.z = -Math.abs(v.z); }
+      else if (p.z < -100) { p.z = -100; v.z = Math.abs(v.z); }
+      if (p.y > 36) { p.y = 36; v.y = -Math.abs(v.y); }
+      else if (p.y < 11) { p.y = 11; v.y = Math.abs(v.y); }
+
+      d.group.position.copy(p);
+
+      // LED 颜色：和主页面一致的健康度分档（绿 / 黄 / 红）
+      var col = d.health >= 85 ? 0x3ddc97 : (d.health >= 55 ? 0xffd166 : 0xff6b6b);
+      d.ledMat.color.setHex(col);
+      d.group.visible = d.online !== false;
+    }
+  }
+
+  /* =========================================================================
+     4. 内置假数据：live 快照（queue / history / running_tasks / uav_states）
+        —— 正弦 + 噪声的队列曲线，和真实 PEAK 工况的"高优小、低优大、周期性起伏"一致。
+     ========================================================================= */
+  var fakeLive = {
+    sim_time: 0,
+    duration_s: 90,
+    uav_count: N,
+    queue: { high: 0, low: 0, capacity: 5000, congestion: 1.0 },
+    system_load: 0,
+    history: [],
+    running_tasks: [],
+    running_count: 0,
+    uav_states: {},
+  };
+  var fakeSampleIdx = 0;
+
+  function appendFakeSample() {
+    fakeSampleIdx++;
+    var idx = fakeSampleIdx;
+    var hv = 26 + 20 * Math.sin(idx * 0.18 + 0.6) + 7 * Math.sin(idx * 0.53 + 1.1) +
+      (Math.random() - 0.5) * 4;
+    var lv = 62 + 32 * Math.sin(idx * 0.11 + 2.1) + 10 * Math.sin(idx * 0.37 + 0.4) +
+      (Math.random() - 0.5) * 6;
+    hv = Math.round(clampf(hv, 0, 130));
+    lv = Math.round(clampf(lv, 0, 150));
+    var load = clampf(0.55 + lv / 95 + 0.18 * Math.sin(idx * 0.23), 0.2, 2.6);
+
+    fakeLive.history.push({ ts: idx * 0.5, high: hv, low: lv, load: load });
+    if (fakeLive.history.length > 170) fakeLive.history.shift();
+    fakeLive.sim_time = idx * 0.5;
+    fakeLive.queue.high = hv;
+    fakeLive.queue.low = lv;
+    fakeLive.system_load = load;
+
+    // 运行中任务：与 devDrones 的 busy 状态保持一致（真实接口里 running_tasks 就是任务列表）
+    var tasks = fakeLive.running_tasks;
+    tasks.length = 0;
+    var states = fakeLive.uav_states;
+    for (var i = 0; i < devDrones.length; i++) {
+      var d = devDrones[i];
+      if (!d.busy) continue;
+      tasks.push({
+        uav_id: d.id,
+        priority: d.priority || "LOW",
+        task_type: "IMAGERY",
+        progress: d.progress,
+      });
+      states[String(d.id)] = { health: d.health, online: true };
+    }
+    fakeLive.running_count = tasks.length;
+  }
+
+  /** 预填 140 个采样（≈70 仿真秒）—— 保证打开页面第一帧瀑布就是满的，截图不用等 */
+  function seedFakeHistory() {
+    for (var i = 0; i < 140; i++) appendFakeSample();
+  }
+
+  var fakeAcc = 0;
+  function stepFakeData(dt) {
+    fakeAcc += dt;
+    while (fakeAcc >= 0.5) {
+      fakeAcc -= 0.5;
+      appendFakeSample();
+    }
+  }
+
+  /* =========================================================================
+     5. /api/state 实时数据（?live=1）
+     ========================================================================= */
+  var realLive = null;
+  var liveSource = "内置假数据";
+  var runMap = {};        // uav_id -> task（每 600ms 重建一次）
+  var fetching = false;
+  // ?autostart=1：自检页专用 —— 共享后端当前没在跑时，自动拉一个低速 PEAK 工况，
+  // 这样无头截图能稳定抓到"运行中"的真实 live 快照（speed=0.25 让 90s 工况跑约 20s 真实时间）。
+  var AUTOSTART = QS.get("autostart") === "1";
+  var autoStarted = false;
+
+  function maybeAutostart(st) {
+    if (!AUTOSTART || autoStarted) return;
+    autoStarted = true;
+    if (st && st.status === "running") return;   // 后端已经在跑，不重复启动
+    fetch("/api/start?scenario=PEAK&scheduler=dynamic&speed=0.25", { cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(function () { liveSource = "自检页已启动 PEAK（speed=0.25）"; })
+      .catch(function () { });
+  }
+
+  function pollLive() {
+    if (!LIVE || fetching) return;
+    fetching = true;
+    fetch("/api/state", { cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(function (st) {
+        maybeAutostart(st);
+        if (st && st.live) {
+          realLive = st.live;
+          liveSource = "后端 /api/state 实时";
+          runMap = {};
+          var rt = realLive.running_tasks || [];
+          for (var i = 0; i < rt.length; i++) runMap[rt[i].uav_id] = rt[i];
+        } else {
+          realLive = null;
+          liveSource = "后端未运行 · 回退假数据";
+        }
+      })
+      .catch(function () {
+        realLive = null;
+        liveSource = "后端不可用 · 回退假数据";
+      })
+      .then(function () { fetching = false; });
+  }
+
+  /** 把真实 live 的 tasks/uav_states 映射到本地 30 架机上（id 一一对应） */
+  function applyRealState() {
+    if (!LIVE || !realLive) return;
+    var us = realLive.uav_states || {};
+    for (var i = 0; i < devDrones.length; i++) {
+      var d = devDrones[i];
+      var task = runMap[d.id];
+      d.busy = !!task;
+      d.priority = task ? task.priority : null;
+      d.progress = task ? (task.progress || 0) : 0;
+      var u = us[String(d.id)];
+      d.health = u ? (typeof u.health === "number" ? u.health : 100) : 100;
+      d.online = u ? (u.online !== false) : true;
+    }
+  }
+
+  /** 假数据模式：health 用正弦缓慢起伏，制造一部分 health<55 的弱网链路 */
+  function updateFakeDroneStates(t) {
+    for (var i = 0; i < devDrones.length; i++) {
+      var d = devDrones[i];
+      d.health = 90 - 42 * (0.5 + 0.5 * Math.sin(t * 0.22 + d.phase * 6.28));
+      d.busy = d.busyFixed;
+      d.priority = d.prioFixed;
+      d.online = true;
+      d.progress = (t * 0.07 + d.phase) % 1;
+      d.phaseName = "SURVEY";
+    }
+  }
+
+  /* =========================================================================
+     6. HUD 装配 & 主循环
+     ========================================================================= */
+  var hud = null;
+  var selfTestOk = false;
+  var t = 0;
+  var frameCount = 0;
+  var lastNow = 0;
+  var fpsCount = 0, fpsLast = 0, fps = 0;
+  var lastStat = 0;
+
+  function initHUD() {
+    if (!HUD) {
+      showErr("window.UAVHUD 未加载：请确认 /static/hud_overlay.js 能正常访问");
+      return;
+    }
+    try {
+      selfTestOk = !!(HUD.selfTest && HUD.selfTest().ok);
+    } catch (e) {
+      selfTestOk = false;
+    }
+    hud = HUD.create({
+      THREE: THREE,
+      scene: scene,
+      camera: camera,
+      renderer: renderer,                     // 可选：让模块按实际 outputEncoding 做颜色管理
+      // 2026-11 世界放大到 352×256（面积 ×4）：模块内部按 world 自适应放大 HUD
+      world: { width: 352, depth: 256 },
+      stationTop: stationTop,
+      makeTextSprite: makeTextSprite,
+      tier: "high",                          // 自检页按 high 档跑，保证箭头/瀑布都是完整版
+      log: function (m) { try { console.log(m); } catch (e) { } },
+      // 故意传"世界放大前"的旧值 heightScale=0.13 / waterfallScale=1.0：
+      // 模块内部会做下限保护（max(传入, 新默认 0.22/1.8) + 世界自适应），验证旧接线也能自动放大。
+      quality: { maxArrows: 240, waterfallSlots: 90, heightScale: 0.13, waterfallScale: 1.0 },
+    });
+    if (!hud) {
+      showErr("UAVHUD.create() 返回 null（详见 console 的 [HUD] 日志）");
+      return;
+    }
+    hud.setMode(MODE);
+    hud.setCameraFacing(true);
+    bindUI();
+
+    // 调试用句柄（自检页专属，方便无头脚本 --eval 检查内部状态/换机位；主页面不需要）
+    window.__DEV_HUD = hud;
+    window.__DEV_RENDERER = renderer;
+    window.__DEV_SCENE = scene;
+    window.__DEV_CAMERA = camera;
+    window.__DEV_CONTROLS = controls;
+  }
+
+  function bindUI() {
+    var btns = document.querySelectorAll("#modeBtns button");
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].classList.toggle("on", btns[i].getAttribute("data-mode") === MODE);
+      btns[i].onclick = (function (btn) {
+        return function () {
+          var m = btn.getAttribute("data-mode");
+          hud.setMode(m);
+          var all = document.querySelectorAll("#modeBtns button");
+          for (var j = 0; j < all.length; j++) all[j].classList.toggle("on", all[j] === btn);
+        };
+      })(btns[i]);
+    }
+    var bFacing = document.getElementById("btnFacing");
+    var facing = true;
+    if (bFacing) {
+      bFacing.onclick = function () {
+        facing = !facing;
+        hud.setCameraFacing(facing);
+        bFacing.textContent = "朝向相机：" + (facing ? "开" : "关");
+        bFacing.classList.toggle("on", facing);
+      };
+      bFacing.classList.add("on");
+    }
+    var bReset = document.getElementById("btnReset");
+    if (bReset) {
+      bReset.onclick = function () {
+        var cd = CAM_DEF[CAM] || CAM_DEF.iso;
+        camera.position.set(cd.pos[0], cd.pos[1], cd.pos[2]);
+        controls.target.set(cd.tgt[0], cd.tgt[1], cd.tgt[2]);
+        controls.update();
+      };
+    }
+  }
+
+  function refreshStats(now) {
+    fpsCount++;
+    if (now - fpsLast >= 500) {
+      fps = Math.round(fpsCount * 1000 / Math.max(1, now - fpsLast));
+      fpsCount = 0;
+      fpsLast = now;
+    }
+    if (now - lastStat < 500) return;
+    lastStat = now;
+    if (!hud) {
+      statsEl.textContent = "HUD 未初始化";
+      return;
+    }
+    var s = hud.stats;
+    statsEl.textContent = [
+      "FPS        " + fps,
+      "图层模式    " + s.mode + "   (URL mode=" + MODE + ")",
+      "世界缩放    ×" + (s.worldScale != null ? s.worldScale.toFixed(2) : "-") +
+        "   时间轴 " + (hud.config.span != null ? hud.config.span.toFixed(1) : "-") +
+        "   高比例 " + (hud.config.heightScale != null ? hud.config.heightScale.toFixed(2) : "-"),
+      "箭头        " + s.arrows + " / 上限 " + hud.config.maxArrows,
+      "busy 链路   " + s.links + "   弱网 " + s.weak,
+      "瀑布槽      " + s.slots + " / " + hud.config.slots,
+      "相机距锚点  " + (s.camDist != null ? s.camDist.toFixed(1) : "-") +
+        "   fade " + (s.camFade != null ? s.camFade.toFixed(2) : "-"),
+      "三角        " + s.tris,
+      "update      " + s.ms.toFixed(2) + " ms",
+      "数据源      " + liveSource,
+      "selfTest    " + (selfTestOk ? "ok" : "FAIL"),
+    ].join("\n");
+    if (srcEl) srcEl.textContent = (LIVE && realLive) ? "真实 /api/state" : liveSource;
+    if (campEl) campEl.textContent = CAM;
+  }
+
+  function animate() {
+    requestAnimationFrame(animate);
+    var now = performance.now();
+    var dt = lastNow ? Math.min(0.05, (now - lastNow) / 1000) : 0.016;
+    lastNow = now;
+    t += dt;
+    frameCount++;
+
+    // 1) 无人机运动 + 状态
+    updateDrones(dt);
+    if (LIVE) {
+      applyRealState();
+      if (!realLive) {
+        // 实时数据没到/后端没跑：继续用假数据，页面不空着
+        updateFakeDroneStates(t);
+        stepFakeData(dt);
+      }
+    } else {
+      updateFakeDroneStates(t);
+      stepFakeData(dt);
+    }
+
+    // 2) 地面站呼吸灯 & 天线顶汇聚点脉冲
+    if (stationParts) {
+      if (stationParts.halo) stationParts.halo.material.opacity = 0.16 + 0.1 * Math.sin(t * 1.9);
+      if (stationParts.beacon) stationParts.beacon.scale.setScalar(1 + 0.25 * Math.sin(t * 6.2));
+      if (stationParts.topCore) stationParts.topCore.scale.setScalar(1 + 0.18 * Math.sin(t * 5.0));
+      if (stationParts.topHalo) {
+        stationParts.topHalo.scale.setScalar(1 + 0.35 * Math.abs(Math.sin(t * 2.2)));
+        stationParts.topHalo.material.opacity = 0.20 + 0.16 * Math.abs(Math.sin(t * 2.2));
+      }
+    }
+
+    // 3) HUD：每帧 update(dt, ctx)。ctx 的字段与契约 §4.4 完全一致。
+    //    __DEV_PAUSE_HUD 只是自检页的调试开关（无头脚本排查用），主页面没有这个分支。
+    if (hud && !window.__DEV_PAUSE_HUD) {
+      var live = (LIVE && realLive) ? realLive : fakeLive;
+      hud.update(dt, {
+        t: t,
+        live: live,
+        drones: devDrones,
+        stationTop: stationTop,
+        visibility_km: 10.0,
+      });
+    }
+
+    controls.update();
+    renderer.render(scene, camera);
+
+    // 4) 面板 & 就绪标记
+    refreshStats(now);
+    if (frameCount === 3) {
+      window.__DEV_READY__ = true;
+      console.log("[DEV] hud ready：mode=" + MODE + " live=" + LIVE + " cam=" + CAM +
+        " n=" + N + " selfTest=" + (selfTestOk ? "ok" : "FAIL"));
+    }
+  }
+
+  /* =========================================================================
+     7. 启动
+     ========================================================================= */
+  try {
+    initScene();
+    initDrones();
+    seedFakeHistory();
+    updateFakeDroneStates(0);
+    initHUD();
+    if (LIVE) {
+      pollLive();
+      setInterval(pollLive, 600);
+    }
+    lastNow = performance.now();
+    fpsLast = lastNow;
+    requestAnimationFrame(animate);
+  } catch (e) {
+    showErr("自检页初始化失败：" + (e && e.message ? e.message : e));
+    console.error(e);
+  }
+})();
+</script>
+</body>
+</html>

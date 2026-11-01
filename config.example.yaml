@@ -1,0 +1,164 @@
+# =============================================================================
+# UavSchedulerSim 全局配置
+# 《操作系统》课程实训 —— 面向智慧地质勘查的无人机集群并发自适应负载均衡调度仿真系统
+# -----------------------------------------------------------------------------
+# 修改本文件即可切换工况参数、算法系数、数据库连接，无需改动代码（对应开发规范第 4 条）。
+# =============================================================================
+
+simulation:
+  # 全局随机种子：决定任务到达轨迹 / 链路质量轨迹。固定它 = 控制变量。
+  random_seed: 20261031
+  # 每个（工况 × 策略）组合重复运行次数；>=3 时指标取均值并记录标准差
+  repetitions: 1
+  # 调度器主循环真实休眠间隔（秒），越小调度越细，CPU 占用越高
+  scheduler_tick_real_s: 0.002
+  # 队列状态采样间隔（仿真秒），用于出图与落库 queue_sample
+  queue_sample_interval_s: 0.5
+  # 链路状态采样间隔（仿真秒），用于落库 link_sample
+  link_sample_interval_s: 1.0
+
+runtime:
+  # 仿真时间 -> 真实时间缩放。0.1 表示 1 仿真秒 = 100 真实毫秒。
+  # 仿真 90 秒峰值工况实际跑 9 秒。所有指标都在仿真时间尺度上计算，与缩放无关。
+  time_scale: 0.1
+  # 服务器工作线程数（= 系统可同时处理的任务数，模拟地面站 CPU 核数）
+  worker_threads: 8
+  # 单工作线程的数据上传带宽（MB/s）。系统容量 = worker_threads × worker_bandwidth_mbps
+  worker_bandwidth_mbps: 150
+
+server:
+  # 系统最大并发承载阈值（限流器的并发上限）
+  max_concurrent: 8
+  # 单任务内存/数据量上限（MB）。超过则拒绝 + 分片上传
+  max_task_memory_mb: 2048
+  # 是否启用大任务分片（保证业务完整率，同时统计"拒绝次数"）
+  enable_chunking: true
+  # 单台无人机最大资源占用额度（并发槽位），防止单机饿死其他节点
+  per_uav_quota: 2
+  # 队列容量上限
+  queue_capacity: 5000
+  # 拥堵度归一化基准：排队任务数达到该值即视为"该队列已拥堵"（Q 饱和为 1）。
+  # 必须远小于 queue_capacity，否则 congestion() 恒接近 0，动态权重的 Q 因子形同虚设
+  # （标定时实测：用容量 5000 归一化，Q 恒为 0.05~0.1，等价于没有拥堵感知）。
+  # 取 4 × 工作线程数 = "积压超过 4 轮工作量即拥堵"。
+  congestion_reference_depth: 32
+  # 调度器 aging（老化提权）触发阈值（毫秒，仿真时间）：**决策参数**。
+  # 动态权重与 MLFQ 用它在低优先级任务等待过久时提权，防止被高优先级洪流饿死。
+  starvation_threshold_ms: 1200
+  # 饥饿率**评价**阈值（毫秒，仿真时间）：业务判定"已经失联/饿死"的时刻。
+  # 与上面 aging 触发阈值语义不同，必须分开 —— 否则指标被"设计性"钉死：
+  # 若两值相同，凡是 dynamic 策略，低优先级任务必然在阈值附近被补偿，
+  # 于是"饥饿率"恒等于 ~55%，完全丧失区分度（标定时实测踩过这个坑）。
+  starvation_metric_threshold_ms: 15000
+  # 系统过载判定阈值：系统负载 = 队列总任务需求 / 容量，超过该值视为过载
+  overload_threshold: 1.0
+
+dynamic_weight:
+  # 动态权重公式：W = base × (w0 + α·Q + β·W_wait + γ·L) × (1 - δ·S) × (1 + 饥饿硬补偿)
+  w0: 0.50          # 基础偏置，保证不为 0
+  alpha: 0.45       # 队列堆积因子 Q ∈ [0,1]
+  beta: 0.35        # 等待时长因子 W_wait ∈ [0,1]（饥饿补偿主通道）
+  gamma: 0.15       # 链路健康度因子 L ∈ [0,1]（弱网降权）
+  delta: 0.25       # 系统负载降权因子 S ∈ [0,1]（过载时整体收敛）
+  base_high: 1.00   # 高优先级任务基础权重
+  base_low: 0.35    # 低优先级任务基础权重
+  starve_boost: 1.80        # 等待超过阈值的硬补偿倍率
+  starve_boost_cap: 6.0     # 硬补偿累计上限（防止长期等待任务权重爆炸）
+  cache_health_threshold: 40 # 链路健康度低于该值 -> 进入本地缓存 CACHED，暂不占用资源
+  weaknet_downweight: 0.60   # 弱网降权倍率（健康度低于阈值时权重 × 该系数；1.0=不降权）
+  cache_retry_backoff_s: 2.0 # 缓存任务的退避重试间隔（仿真秒）
+  # 自适应时间片（毫秒，仿真时间）
+  # 方向：**过载时缩短、空闲时拉长**。缩短可显著压低平均等待（减少队头阻塞），
+  # 拉长可减少上下文切换开销。参数探针实测：PEAK 工况下 slice_max=600ms 的
+  # 高优平均等待为 24549ms，优于 slice_max=2000ms 的 25076ms。
+  slice_base_ms: 700          # 通用基准（未被下面按类别覆盖时使用）
+  slice_min_ms: 200
+  slice_max_ms: 800
+  slice_congestion_shrink: 0.60  # 拥堵时时间片收缩系数：(1 - shrink × Q)
+  # ---- 按任务类别差异化时间片（核心：大勘查任务不能被切碎）----
+  # HIGH 服务时长 ~11 仿真秒，用 1500ms 时间片约 8 轮可完成；配合"抢占后回队首"
+  # （preempt_requeue='front'）保证每轮都保住排队位置，高优先级任务完成率
+  # 从"共用短时间片"时的 24% 提升到 37%（实测，PEAK 工况）。
+  slice_high_base_ms: 1500
+  slice_high_min_ms: 400
+  slice_high_max_ms: 3000
+  # 高优先级队列拥堵度低于该值时**不切分**（避免轻载时白抬高首次启动时延）
+  slice_preempt_threshold: 0.15
+  # LOW 任务服务时长只有几十毫秒，200ms 时间片即可一次跑完，无需切分。
+  slice_low_base_ms: 200
+  slice_low_min_ms: 100
+  slice_low_max_ms: 400
+  # 弱网自适应：服务速率折损下限（health=0 时按 25% 带宽执行）
+  weaknet_bandwidth_floor: 0.25
+
+rr:
+  # 固定时间片轮转的时间片（毫秒，仿真时间）
+  # 取 500ms：小于它则上下文切换开销上升，大于它则退化为 FCFS（护航效应重现）。
+  # 参数敏感性实验见 `python run.py sensitivity` 的 B 组（120 / 500 / 3000ms 对照）。
+  time_slice_ms: 500
+
+mlfq:
+  # 多级反馈队列参数（三个参数都是"写死的静态参数"，这正是 PDF 痛点④的来源）
+  slice_level0_ms: 300    # level-0（新任务/高优先级）时间片：短，保证快周转
+  slice_level1_ms: 800    # level-1（降级后）时间片：长，减少切换开销
+  aging_ms: 1500          # aging 升权阈值：低队列等待超过它就被提权调度
+                          # 注：这个 1500ms 是**针对本工况手工整定**得到的；
+                          # 换成 6000ms 性能即崩塌（见 sensitivity A 组）
+
+weaknet:
+  # 健康度判定档位
+  health_good: 70    # >= 70 优质链路
+  health_poor: 45    # < 45 劣质链路（动态权重会降权；静态策略无感知）
+  # 重传概率模型：p_fail = (1 - health/100) × retry_gain
+  # 取 0.5 而非 1.0：健康度 52 时 p_fail≈0.24，期望尝试次数 1.32 次（温和的重传放大）。
+  # 若取 1.0，p_fail≈0.48，需求被放大 1.9 倍，三种工况会一起退化成"重传风暴"，
+  # 饥饿率指标饱和、策略差异被掩盖 —— 这是标定时踩过的坑，报告"参数标定"章节有记录。
+  retry_gain: 0.50
+  # 重传任务重新入队时的等待倍数（指数退避基数，仿真秒）
+  retry_backoff_base_s: 0.20
+
+weather:
+  # 天气系统（3D 渲染升级新增，契约 §4.6.1）。
+  # 天气不是"贴图滤镜"：它按 0.5s 网格生成强度曲线（onset 爬升 → 平台期阵风 → 尾部衰减），
+  # 折算成链路健康度扣分 link_penalty，进而影响弱网降权 / 重传概率 / 服务时长。
+  # 默认必须 clear：clear 的 link_penalty_max=0，扣分恒 0，既有 15 组结果逐位不变。
+  default_preset: clear        # clear/rain/snow/dust
+  enable_dynamic: true         # 是否有 onset/阵风/尾部衰减；false=恒定强度（对照组用）
+  grid_s: 0.5                  # 天气曲线网格（与 link_monitor.HEALTH_GRID_S 对齐）
+  presets:
+    # visibility_km：满强度时的能见度（实际可见度随强度从"晴朗 12km"线性插值到该值）
+    # link_penalty_max：满强度时对链路健康度的最大扣分（0~100）
+    # wind_speed_mps：满强度时的风速（前端雨滴/雪花倾斜方向用）
+    clear: { visibility_km: 12.0, link_penalty_max: 0.0,  wind_speed_mps: 1.5 }
+    rain:  { visibility_km: 3.0,  link_penalty_max: 18.0, wind_speed_mps: 8.0 }
+    snow:  { visibility_km: 1.2,  link_penalty_max: 24.0, wind_speed_mps: 4.0 }
+    dust:  { visibility_km: 0.6,  link_penalty_max: 32.0, wind_speed_mps: 14.0 }
+
+database:
+  # 关闭后所有结果只落本地 CSV/JSON，程序功能不受影响（优雅降级）
+  enable: true
+  host: 127.0.0.1
+  port: 3306
+  user: root
+  # 密码优先取环境变量 UAV_DB_PASSWORD，其次取此处。生产环境请只设环境变量。
+  # 【示例文件】真实口令请写在本地 config.yaml（已被 .gitignore 忽略）或环境变量 UAV_DB_PASSWORD
+  password: ""
+  database: uav_sched_sim
+  charset: utf8mb4
+  # 单次批量写入行数
+  batch_size: 2000
+  # 建表脚本相对项目根目录的路径
+  schema_file: sql/01_schema.sql
+
+output:
+  results_dir: results
+  charts_dir: charts
+  logs_dir: logs
+  # 是否把每次运行的任务明细导出 CSV（即便入库也导出，便于报告附录）
+  export_task_csv: true
+
+logging:
+  level: INFO
+  # 控制台是否打印每个任务的明细（仅调试用，正式跑实验请关掉）
+  verbose_task: false
+  file: logs/uav_sched_sim.log
