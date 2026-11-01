@@ -3391,7 +3391,12 @@ function htmlCharts(sections) {
   });
   html += '<p class="tip">点击任意图片放大（灯箱里可用 ← → 切换、Esc 关闭）。' +
     '卡片底部的<b>时间是文件生成时间</b> —— 若比 summary.csv 还新/更旧，说明它不是同一批实验产出的，' +
-    '引用前请核对。</p>';
+    '引用前请核对。<br><b>哪张图由哪条命令产出</b>：' +
+    '01~07 ← <code>run.py all</code>（界面「重跑」选"全量 15 组"）；' +
+    '08 ← <code>run.py weather</code>；09 ← <code>run.py all</code> 的伴生探针；' +
+    '10 与「多站矩阵」组 ← <code>run.py stations</code>；' +
+    '「运行场景测评」← <code>run.py bench-weather</code>。' +
+    '所以点一次"全量 15 组"只会刷新 01~07 与 09，08/10 的时间戳不变是<b>正常的</b>。</p>';
   RX.imgGroups = list.map((s) => s.images.map((im) => ({ ...im, src: "/results_img/" +
     im.rel.split("/").map(encodeURIComponent).join("/") })));
   return html;
@@ -3881,13 +3886,16 @@ async function startRun() {
     const j = await (await fetch("/api/run_experiment?kind=" + encodeURIComponent(kind) +
       "&reps=" + (isFinite(reps) ? reps : 0), { cache: "no-store" })).json();
     if (!j || j.ok === false) {
-      log.textContent = "启动失败：" + ((j && j.msg) || "未知错误");
+      log.textContent = "启动失败：" + ((j && j.msg) || "未知错误") +
+        (j && j.need_env ? "\n\n提示：exe 单独分发时没有 Python 解释器。" +
+          "请把 exe 放在项目目录（有 .venv 的那一层）旁边，或设置环境变量 UAV_PYTHON。" : "");
       _rx$("runGo").style.display = "";
       _rx$("runState").textContent = "";
       return;
     }
     log.textContent = "已启动：" + (j.label || kind) + "（预计 " + (j.eta_s || "?") + " s）\n" +
-      "会覆盖：" + (j.overwrites || "-") + (j.backup ? "\n旧表已备份到：" + j.backup : "") + "\n\n";
+      "会覆盖：" + (j.overwrites || "-") + (j.backup ? "\n旧表已备份到：" + j.backup : "") +
+      (j.python ? "\n解释器：" + j.python + "（" + (j.python_from || "") + "）" : "") + "\n\n";
     pollRun();
   } catch (e) {
     log.textContent = "启动失败：" + (e && e.message ? e.message : e);
@@ -3913,6 +3921,23 @@ async function pollRun() {
     } else {
       if (st) st.textContent = (job.status === "done" ? "✓ 完成" : "✗ 失败（退出码 " +
         job.returncode + "）") + " · " + (job.finished_at || "");
+      // 失败时给一条**能直接照做**的建议（最常见的是"在 exe 里跑、但找不到 Python"）
+      const txt = (job.lines || []).join("\n");
+      if (job.status !== "done" && log) {
+        let hint = "";
+        if (/unrecognized arguments|error: unrecognized/.test(txt)) {
+          hint = "\n\n[hint] 命令行被当成了解释器自己的参数 —— 通常是解释器选错了" +
+            "（exe 里 sys.executable 是 exe 自己）。检查项目目录下的 .venv，" +
+            "或用环境变量 UAV_PYTHON 指定 python.exe。";
+        } else if (/No such file|找不到|cannot find/.test(txt)) {
+          hint = "\n\n[hint] 有文件/目录不存在 —— 确认 exe 放在项目目录旁边" +
+            "（那一层应有 run.py、config.yaml、.venv）。";
+        } else if (/ModuleNotFoundError/.test(txt)) {
+          hint = "\n\n[hint] 缺依赖 —— 先在项目目录执行 " +
+            "`.venv\\Scripts\\python.exe -m pip install -r requirements.txt`。";
+        }
+        if (hint) log.textContent += hint;
+      }
       _rx$("runStop").style.display = "none";
       _rx$("runGo").style.display = "";
       _rx$("runGo").textContent = "再跑一次";

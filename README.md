@@ -839,13 +839,25 @@ exe 已重新打包并实跑验证（`--stations triple --mec` → `/api/state` 
 
 | 实验 | 预计 | 会覆盖什么 |
 |---|---|---|
-| `all` | 100~130 s | `results/summary.csv`（**先备份为 `summary.prev.csv`**） |
-| `stations` | 120~150 s | `results/stations/*`（独立目录，不动 15 组） |
+| `all` | 100~130 s | `results/summary.csv`（**先备份为 `summary.prev.csv`**）+ `charts/01~07、09` |
+| `stations` | 120~150 s | `results/stations/*` + `charts/10`（独立目录，不动 15 组） |
 | `mec` | 110~140 s | `results/mec/*` |
 | `replicate` | 150~200 s | `results/replications/*`（可设 reps） |
 
+> **exe 里的解释器问题（已修）**：`sys.executable` 在打包后是 **exe 自己**，直接拿它拼命令行
+> 会得到 `exe run.py all`，被 exe 的 argparse 拒绝（退出码 2）。现在按
+> `UAV_PYTHON` → 项目根 `.venv`/`venv` →（非 frozen 时）`sys.executable` 的顺序找**真正的 Python**；
+> 找不到就**不拼命令**，直接给出"请在项目目录执行 `python run.py all --no-db`"的建议。
+> 子进程还强制 `PYTHONIOENCODING=utf-8`，避免中文/`✓✗` 乱码。
+> 因此：**exe 要和 `.venv` 放在同一层目录**（也就是项目目录）才能一键重跑；单独拷走时它仍是
+> 完整的"查看器"，只是重跑按钮会给出明确提示。
+>
+> 顺带：**"全量 15 组"只刷新 01~07 与 09**；`08` 要 `run.py weather`、`10` 要 `run.py stations`、
+> 「运行场景测评」要 `run.py bench-weather` —— 卡片上的时间戳不变是正常的，界面里已写明每张图的产出命令。
+
 ![一键重跑对话框](docs/images/33-仿真结果-一键重跑对话框.png)
 ![重跑完成后的实时日志](docs/images/35-仿真结果-重跑完成日志.png)
+![exe 内重跑后图表已更新（01~07、09 变成 22:13）](docs/images/37-仿真结果-exe内重跑后图表已更新.png)
 
 **② 两份明细对比**（页签「对比」）：选两份 `raw/*.json`，得到 12 个指标的并排表
 （A / B / 差值 / 相对 % / **变好-变差判定**）+ 两组队列曲线叠加；若两份 seed 不同会**明确警告**

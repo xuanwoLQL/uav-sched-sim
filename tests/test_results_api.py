@@ -353,3 +353,59 @@ def test_experiment_status_idle_and_stop(tmp_path, monkeypatch) -> None:
     d = dash_mod.Dashboard(load_config())
     assert d.experiment_status()["job"] is None
     assert d.stop_experiment()["ok"] is False
+
+
+# ---------------------------------------------------------------------------
+# 6) 解释器解析（**exe 里 sys.executable 是 exe 自己**这个坑的回归守护）
+# ---------------------------------------------------------------------------
+def test_resolve_python_uses_venv_in_project_root(tmp_path, monkeypatch) -> None:
+    root = _make_fake_root(tmp_path)
+    py = root / ".venv" / "Scripts" / "python.exe"
+    py.parent.mkdir(parents=True)
+    py.write_bytes(b"stub")
+    monkeypatch.setattr(dash_mod, "OUTPUT_ROOT", root)
+    monkeypatch.delenv("UAV_PYTHON", raising=False)
+    got, why = dash_mod._resolve_python()
+    assert got == str(py)
+    assert ".venv" in why
+
+
+def test_resolve_python_never_falls_back_to_frozen_exe(tmp_path, monkeypatch) -> None:
+    """frozen 时**绝不能**把 sys.executable（= exe）当成 Python —— 那会拼出
+    `exe run.py all` 并被 exe 的 argparse 拒绝（用户实测退出码 2）。"""
+    root = _make_fake_root(tmp_path)          # 故意**不**造 .venv
+    monkeypatch.setattr(dash_mod, "OUTPUT_ROOT", root)
+    monkeypatch.delenv("UAV_PYTHON", raising=False)
+    monkeypatch.setattr(dash_mod.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(dash_mod.sys, "executable",
+                        str(root / "dist" / "无人机集群调度仿真系统.exe"))
+    got, why = dash_mod._resolve_python()
+    assert got is None, f"frozen 下不得回退到 exe：{got}"
+    assert "UAV_PYTHON" in why
+
+
+def test_resolve_python_honours_env_override(tmp_path, monkeypatch) -> None:
+    root = _make_fake_root(tmp_path)
+    py = tmp_path / "custom" / "python.exe"
+    py.parent.mkdir(parents=True)
+    py.write_bytes(b"stub")
+    monkeypatch.setattr(dash_mod, "OUTPUT_ROOT", root)
+    monkeypatch.setenv("UAV_PYTHON", str(py))
+    got, why = dash_mod._resolve_python()
+    assert got == str(py) and "UAV_PYTHON" in why
+
+
+def test_start_experiment_without_interpreter_is_actionable(tmp_path, monkeypatch) -> None:
+    """找不到解释器时：不拼命令、不启动子进程，返回 need_env + 可执行建议。"""
+    root = _make_fake_root(tmp_path)
+    # 注意：先 load_config() 再伪造 sys.frozen —— config.project_root() 也会看 frozen，
+    # 顺序反了会去 tmp 里找 config.yaml（踩过）。
+    cfg = load_config()
+    monkeypatch.setattr(dash_mod, "OUTPUT_ROOT", root)
+    monkeypatch.delenv("UAV_PYTHON", raising=False)
+    monkeypatch.setattr(dash_mod.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(dash_mod.sys, "executable", str(root / "x.exe"))
+    d = dash_mod.Dashboard(cfg)
+    got = d.start_experiment("all")
+    assert got["ok"] is False and got.get("need_env") is True
+    assert "python run.py" in got["msg"]

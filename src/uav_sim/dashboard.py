@@ -643,6 +643,53 @@ EXPERIMENT_KINDS: dict = {
 }
 
 
+def _resolve_python() -> tuple:
+    """找出**真正能跑 `run.py` 的 Python 解释器**，返回 ``(路径, 来源说明)`` 或 ``(None, 原因)``。
+
+    为什么不能直接用 ``sys.executable``（实测踩坑）：
+      * 源码运行时它是 python.exe，没问题；
+      * **打包成 exe 后它是 exe 自己** —— 于是 `[exe, run.py, "all", ...]` 会被 exe 的
+        argparse 当成"无法识别的参数"直接退出 2（用户看到的正是这条报错）。
+    所以这里按优先级找解释器：环境变量 ``UAV_PYTHON`` → 项目根下的 `.venv` / `venv` →
+    （非 frozen 时）`sys.executable`。找不到就**明确拒绝并给出可执行的建议**，
+    而不是拼一条注定失败的命令行。
+    """
+    cands: list = []
+    env = os.environ.get("UAV_PYTHON")
+    if env:
+        cands.append((Path(env), "环境变量 UAV_PYTHON"))
+    root = OUTPUT_ROOT
+    for rel in (".venv/Scripts/python.exe", "venv/Scripts/python.exe",
+                ".venv/bin/python", "venv/bin/python"):
+        cands.append((root / rel, f"项目虚拟环境 {rel}"))
+    if not getattr(sys, "frozen", False):
+        cands.append((Path(sys.executable), "当前解释器 sys.executable"))
+    for p, why in cands:
+        try:
+            if p.is_file():
+                return str(p), why
+        except OSError:
+            continue
+    return None, (
+        "找不到可用的 Python 解释器：一键重跑需要在项目目录里有 .venv（"
+        f"期望 {root / '.venv' / 'Scripts' / 'python.exe'}）。"
+        "exe 独立分发时没有 Python，请用源码环境跑 `python run.py ...`，"
+        "或安装 Python 后设置环境变量 UAV_PYTHON 指向它。")
+
+
+def _resolve_run_py() -> Optional[Path]:
+    """定位 `run.py`（实验入口）。源码运行时在项目根；打包后可能被一起塞进 `_MEIPASS`。"""
+    for p in (OUTPUT_ROOT / "run.py",
+              Path(getattr(sys, "_MEIPASS", ".")) / "run.py",
+              Path(__file__).resolve().parents[2] / "run.py"):
+        try:
+            if p.is_file():
+                return p
+        except OSError:
+            continue
+    return None
+
+
 class ExperimentJob:
     """一次"一键重跑"的后台任务（子进程 + 环形日志缓冲）。
 
@@ -671,8 +718,13 @@ class ExperimentJob:
         import subprocess
 
         try:
+            # 子进程强制 UTF-8：run.py 会打印中文与 ✓/✗ 等符号，若继承父进程的 GBK
+            # 代码页，日志会变成乱码或直接 UnicodeEncodeError（本项目踩过的老坑）。
+            env = dict(os.environ)
+            env.setdefault("PYTHONIOENCODING", "utf-8")
+            env.setdefault("PYTHONUTF8", "1")
             self._proc = subprocess.Popen(          # noqa: S603 - argv 由白名单拼装
-                self.argv, cwd=str(self.cwd),
+                self.argv, cwd=str(self.cwd), env=env,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, encoding="utf-8", errors="replace", bufsize=1,
             )
@@ -1058,19 +1110,28 @@ class Dashboard:
           ② **先备份再覆盖**：`run.py all` 会重写 `results/summary.csv`，所以跑之前把旧表
              另存为 `summary.prev.csv`（覆盖式实验最容易丢的就是"上一次的对照"）；
           ③ **不并发**：同一时刻只允许一个实验任务，避免两个 `run.py all` 抢同一批输出文件。
-        """
-        import sys as _sys
 
+        解释器解析见 :func:`_resolve_python` —— **exe 里 `sys.executable` 是 exe 自己**，
+        直接拿它拼命令行会得到 `exe run.py all`，被 exe 的 argparse 拒绝（退出码 2）。
+        """
         k = str(kind or "").strip().lower()
         spec = EXPERIMENT_KINDS.get(k)
         if spec is None:
             return {"ok": False,
                     "msg": f"未知实验 {k or '(空)'}，可选：" + " / ".join(EXPERIMENT_KINDS)}
+        # ① 先确认"跑得起来"：解释器与 run.py 都得真的存在，否则直接给可执行建议
+        py, why = _resolve_python()
+        run_py = _resolve_run_py()
+        if py is None or run_py is None:
+            missing = "Python 解释器" if py is None else "run.py"
+            return {"ok": False, "need_env": True,
+                    "msg": f"找不到{missing}，无法从界面重跑。{why if py is None else ''}"
+                           " 请在项目目录用命令行执行：python run.py all --no-db"}
         with self._lock:
             job = getattr(self, "_exp_job", None)
             if job is not None and job.status == "running":
                 return {"ok": False, "msg": "已有实验在跑，等它结束再试（或先点停止）"}
-            # ① 备份会被覆盖的汇总表
+            # ② 备份会被覆盖的汇总表
             backup = ""
             if k == "all":
                 try:
@@ -1081,10 +1142,9 @@ class Dashboard:
                         backup = str(dst)
                 except OSError:
                     backup = ""
-            # ② 拼命令行：`<python> run.py <argv...> [--reps N]`
+            # ③ 拼命令行：`<python> run.py <argv...> [--reps N]`
             root = OUTPUT_ROOT
-            py = _sys.executable
-            argv = [py, str(root / "run.py"), *spec["argv"]]
+            argv = [py, str(run_py), *spec["argv"]]
             if spec.get("reps_flag") and int(reps or 0) > 0:
                 argv += ["--reps", str(int(reps))]
             job = ExperimentJob(k, argv, cwd=root)
@@ -1092,7 +1152,8 @@ class Dashboard:
         job.start()
         return {"ok": True, "kind": k, "label": spec["label"],
                 "eta_s": spec["eta_s"], "overwrites": spec["overwrites"],
-                "backup": backup, "argv": argv[2:]}
+                "backup": backup, "python": py, "python_from": why,
+                "argv": argv[2:]}
 
     def experiment_status(self, tail: int = 80) -> dict:
         """``GET /api/run_status`` —— 一键重跑的进度（供界面轮询）。"""

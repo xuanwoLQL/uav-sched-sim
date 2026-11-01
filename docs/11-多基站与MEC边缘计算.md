@@ -388,11 +388,29 @@ Task.migrate_count     # 迁移次数（0 = 从未迁移）
 所以面板与 3D 场景不受影响，失败也带不崩面板；界面每秒轮询 `/api/run_status`，
 把子进程输出实时贴进对话框，**跑完自动刷新结果界面**。
 
+> **⚠️ 踩坑记录：exe 里 `sys.executable` 是 exe 自己，不是 Python。**
+> 最初直接用 `sys.executable` 拼命令行，在 exe 里就变成
+> `无人机集群调度仿真系统.exe run.py all --no-db` —— 被 exe 的 argparse 当成"无法识别的参数"
+> 直接退出 **2**（用户实测截图就是这个）。
+> 现在 `_resolve_python()` 按优先级找**真正能跑 `run.py` 的解释器**：
+> `UAV_PYTHON` 环境变量 → 项目根 `.venv`/`venv`（Windows 与 POSIX 两套路径）→
+> （非 frozen 时）`sys.executable`；frozen 时**绝不**回退到 exe。
+> 找不到就**不拼命令**，直接返回 `need_env: true` + 一句能照做的建议
+> （"请在项目目录执行 `python run.py all --no-db`，或设 `UAV_PYTHON`"）。
+> 同时子进程环境强制 `PYTHONIOENCODING=utf-8`/`PYTHONUTF8=1` —— 否则 `run.py` 打印的
+> 中文与 `✓/✗` 会变成乱码甚至 `UnicodeEncodeError`。
+> 失败时对话框还会按报错特征给 hint（`unrecognized arguments` → 解释器选错；
+> `No such file` → exe 没放在项目目录旁；`ModuleNotFoundError` → 缺依赖）。
+
 ![一键重跑对话框：四档实验、预计耗时、覆盖范围与"先备份"提示](images/33-仿真结果-一键重跑对话框.png)
 ![重跑完成：实时日志 + ✓ 完成时间（这里是 `run.py mec` 的真实输出）](images/35-仿真结果-重跑完成日志.png)
+![exe 内点「重跑」选"全量 15 组"之后：01~07、09 的时间戳变成 22:13，顶部 summary.csv 也变成 22:13](images/37-仿真结果-exe内重跑后图表已更新.png)
 
-> 实测（本轮）：`stations` 66 行输出 / `mec` 62 行输出，均 `rc=0`；
-> 跑完后 `results/stations/charts/*` 的时间戳从 18:37 变成 21:29，页面缩略图同步更新。
+> 实测（本轮）：`stations` 66 行输出 / `mec` 62 行输出 / **`all` 98 行输出**，均 `rc=0`；
+> 跑完后 `charts/01~07`、`09` 的时间戳从 18:39 变成 **22:13**，`results/summary.csv` 同步刷新，
+> 旧表被备份为 `summary.prev.csv`（22:11:21）。
+> **哪些图不会被"全量 15 组"刷新**：`08`（`run.py weather`）、`10`（`run.py stations`）、
+> 「运行场景测评」（`run.py bench-weather`）—— 这是**正常的**，界面里也写清了每张图的产出命令。
 
 #### 2.3.2 两份明细对比（页签「对比」）
 
