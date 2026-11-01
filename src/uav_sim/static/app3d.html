@@ -172,7 +172,7 @@ button.ghost.on{border-color:rgba(55,226,213,.75);color:#9ff7ee;
 </div>
 
 <div class="panel" id="chartbox">
-  <h3>就绪队列深度 / 系统负载</h3>
+  <h3>就绪队列深度 / 系统负载 / 时间片</h3>
   <canvas id="chart" height="82"></canvas>
   <div class="legend" style="justify-content:space-between;margin-top:2px">
     <span><i class="dot" style="background:#4ea1ff"></i>高优队列</span>
@@ -248,6 +248,7 @@ button.ghost.on{border-color:rgba(55,226,213,.75);color:#9ff7ee;
 <script src="/static/hud_overlay.js"></script>
 <script src="/static/weather_system.js"></script>
 <script src="/static/weather_grade.js"></script>
+<script src="/static/os_inspect.js"></script>
 <script>
 "use strict";
 /* =========================================================================
@@ -1675,6 +1676,9 @@ function initScene() {
 
   _step("⑦ 机群…");
   state.drones = buildFleet(scene, 30);
+  /* 供「OS 微观透视镜」（os_inspect.js）做 3D 点选用。
+     不放在 __DBG 里，因为 __DBG 只在 ?debug=1 时创建，而点选是正式功能。 */
+  window.UAV_SCENE = { scene: scene, camera: camera, renderer: renderer, state: state };
   console.log(`[terrain] ${HF_NX}×${HF_NZ} 格，树 ${scenery.trees}，碎石 ${scenery.rocks}`);
 
   // ---- 升级模块（SSAO / 天气 / HUD）：失败自动降级 ----
@@ -1957,7 +1961,10 @@ function applyState(st) {
     setText("mBlock", c.blocked + " / " + c.retry_pending);
     setText("mPre", c.preempted);
     setText("mCtx", s.context_switches);
-    setText("mSlice", s.high_time_slice_ms.toFixed(0) + " / " + s.low_time_slice_ms.toFixed(0) + " ms");
+    /* 1e9 是调度器"本轮不抢占"的哨兵值（FCFS / 静态优先级 / 轻载动态权重），
+       直接显示会变成 "1000000000 ms"，对用户毫无意义 —— 这里翻译成人话。 */
+    const sliceTxt = (v) => (v >= 1e6 ? "不抢占" : v.toFixed(0) + " ms");
+    setText("mSlice", sliceTxt(s.high_time_slice_ms) + " / " + sliceTxt(s.low_time_slice_ms));
     setText("mLim", l.throttled + " / " + l.rejected_large);
     setText("mOver", live.overload_seconds.toFixed(1) + " s");
   }
@@ -2319,6 +2326,20 @@ function drawChart(live) {
     hist.forEach((d, i) => { const x = X(d.ts), y = Y(get(d)); i ? g.lineTo(x, y) : g.moveTo(x, y); });
     g.stroke();
   };
+  /* 时间片柱状叠加（老师要求"过载时能直观看到高优片变长、低优片变短"）。
+     1e9 是"本轮不抢占"的哨兵值，画柱时按 0 处理，否则整条柱子会被它压平。 */
+  const sv = v => (v >= 1e6 ? 0 : v);
+  const sliceMax = Math.max(1, ...hist.map(d => Math.max(sv(d.hi_slice || 0), sv(d.lo_slice || 0))));
+  const bw = (w - 12) / hist.length;
+  hist.forEach((d, i) => {
+    const x = 6 + i * bw;
+    const hh = sv(d.hi_slice || 0) / sliceMax * 10;
+    const hl = sv(d.lo_slice || 0) / sliceMax * 10;
+    g.fillStyle = "rgba(78,161,255,.42)";
+    g.fillRect(x, h - 2 - hh, Math.max(1, bw * 0.45), hh);
+    g.fillStyle = "rgba(245,166,35,.42)";
+    g.fillRect(x + bw * 0.5, h - 2 - hl, Math.max(1, bw * 0.45), hl);
+  });
   line(d => d.high, "#4ea1ff");
   line(d => d.low, "#f5a623");
   line(d => d.load * maxQ / 2, "#3ddc97");

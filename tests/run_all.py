@@ -31,6 +31,7 @@ TESTS = [
     ("test_schedulers.py", "五种调度策略 / 时间片 / 教学结论断言"),
     ("test_statistics.py", "重复实验统计 / t 置信区间 / 配对显著性 / CRN 种子"),
     ("test_des_model.py", "GPU 分析模型（纯 Python 回退路径）确定性 / 区间 / 教学结论"),
+    ("test_telemetry.py", "OS 微观透视遥测 / 混沌注入 / 死锁看门狗 / 权重因子"),
     ("test_end_to_end.py", "轨迹可复现 / 端到端 / 指标口径 / MySQL 往返"),
 ]
 

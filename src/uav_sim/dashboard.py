@@ -36,6 +36,8 @@ dashboard.py —— 实时可视化仿真面板（本地网页版）
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import logging
 import sys
@@ -311,6 +313,54 @@ class Dashboard:
                 return {"ok": False, "msg": str(exc)}
             return {"ok": True, "weather_preset": preset}
 
+    # ------------------------------------------------------------------
+    # 混沌工程 / Trace 导出（2026-11：OS 微观透视）
+    # ------------------------------------------------------------------
+    def chaos(self, kind: str, **kw) -> dict:
+        """触发一次混沌注入：weaknet（弱网风暴）/ burst（并发洪峰）/ deadlock（死锁）。"""
+        run = self.run
+        if run is None or getattr(run, "sim", None) is None:
+            return {"ok": False, "msg": "没有运行中的仿真，请先点「开始仿真」"}
+        if run.status != "running":
+            return {"ok": False, "msg": f"仿真当前状态是 {run.status}，只能在运行中注入"}
+        sim = run.sim
+        try:
+            if kind == "weaknet":
+                return sim.inject_weaknet(duration_s=float(kw.get("duration", 20.0)),
+                                          frac=float(kw.get("frac", 0.4)))
+            if kind == "burst":
+                return sim.inject_burst(n=int(kw.get("n", 500)))
+            if kind == "deadlock":
+                return sim.inject_deadlock(hold_s=float(kw.get("hold", 20.0)))
+        except Exception as exc:  # noqa: BLE001 - 接口层兜底
+            logger.exception("混沌注入失败")
+            return {"ok": False, "msg": f"{type(exc).__name__}: {exc}"}
+        return {"ok": False, "msg": f"未知混沌类型 {kind}（可选 weaknet/burst/deadlock）"}
+
+    def trace_export(self, fmt: str = "json"):
+        """导出当前/最近一次运行的完整事件日志，返回 ``(content_type, bytes)``。"""
+        run = self.run
+        sim = getattr(run, "sim", None) if run is not None else None
+        events = list(getattr(sim, "_event_log", []) or []) if sim is not None else []
+        meta = {
+            "scenario": getattr(run, "scenario", None) if run is not None else None,
+            "scheduler": getattr(run, "scheduler", None) if run is not None else None,
+            "status": getattr(run, "status", None) if run is not None else None,
+            "events": len(events),
+        }
+        if str(fmt).lower() == "csv":
+            buf = io.StringIO()
+            cols = ["t", "k", "tid", "uav", "prio", "type", "slot", "slice_ms",
+                    "size_mb", "wait_ms", "retry", "served_s", "held_s",
+                    "duration_s", "uav_count", "requested", "injected"]
+            w = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")
+            w.writeheader()
+            for e in events:
+                w.writerow(e)
+            return "text/csv; charset=utf-8", ("\ufeff" + buf.getvalue()).encode("utf-8")
+        body = json.dumps({"meta": meta, "events": events}, ensure_ascii=False, indent=1)
+        return "application/json; charset=utf-8", body.encode("utf-8")
+
     def stop_run(self) -> dict:
         with self._lock:
             if self.run is not None:
@@ -411,6 +461,28 @@ def _make_handler(dash: Dashboard):
                 except Exception as exc:  # noqa: BLE001 - 接口层兜底，绝不 500 崩面板
                     logger.exception("切换天气失败")
                     self._json({"ok": False, "msg": f"切换天气失败：{exc}"}, 500)
+                return
+            if path == "/api/chaos":
+                # GET /api/chaos?kind=weaknet|burst|deadlock[&duration=20&frac=0.4&n=500&hold=20]
+                kind = (qs.get("kind") or [""])[0].strip().lower()
+                kw = {}
+                for k in ("duration", "frac", "n", "hold"):
+                    if k in qs:
+                        try:
+                            kw[k] = float(qs[k][0])
+                        except (TypeError, ValueError):
+                            pass
+                try:
+                    self._json(dash.chaos(kind, **kw))
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("混沌接口异常")
+                    self._json({"ok": False, "msg": str(exc)}, 500)
+                return
+            if path == "/api/trace":
+                # GET /api/trace?format=json|csv —— 导出完整事件日志（Trace）
+                fmt = (qs.get("format") or ["json"])[0].strip().lower()
+                ctype, body = dash.trace_export(fmt)
+                self._send(200, body, ctype)
                 return
             if path == "/api/start":
                 scenario = (qs.get("scenario") or ["PEAK"])[0].upper()

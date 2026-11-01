@@ -37,6 +37,7 @@ import sys
 import threading
 from collections import deque
 from contextlib import nullcontext
+from itertools import islice
 from pathlib import Path
 from typing import Deque, List, Optional
 
@@ -101,6 +102,35 @@ class MultiLevelQueue:
             self.max_high_seen = len(self._high_queue)
         if len(self._low_queue) > self.max_low_seen:
             self.max_low_seen = len(self._low_queue)
+
+    # ------------------------------------------------------------ 只读快照
+    def snapshot_tasks(self, limit: int = 40, now: float = 0.0) -> List[dict]:
+        """按**出队顺序**列出前 ``limit`` 个就绪任务（供 3D「传送带」可视化）。
+
+        严格只读：不记等待账、不改任何计数、不出队 —— 因此可以每 200 ms 调一次。
+        高优队列在前、低优队列在后；每个元素带 data_size（方块大小）与 wait_ms
+        （饥饿补偿倒计时的分子）。
+        """
+        out: List[dict] = []
+        n = max(0, int(limit))
+        if n == 0:
+            return out
+        with self._guard():
+            for q, prio in ((self._high_queue, "HIGH"), (self._low_queue, "LOW")):
+                for t in islice(q, n):
+                    wait_ms = 0.0
+                    if now > 0:
+                        wait_ms = max(0.0, (now - float(getattr(t, "enqueue_ts", now))) * 1000.0)
+                    out.append({
+                        "task_id": t.task_id,
+                        "uav_id": int(t.uav_id),
+                        "priority": prio,
+                        "task_type": t.task_type.value,
+                        "data_size_mb": round(float(t.data_size_mb), 1),
+                        "wait_ms": round(wait_ms, 1),
+                        "retry": int(t.retry_count),
+                    })
+        return out
 
     # ------------------------------------------------------------ 入队 / 出队
     def enqueue(self, task: Task, now: float) -> bool:

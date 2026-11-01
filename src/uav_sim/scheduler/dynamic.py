@@ -166,6 +166,9 @@ class DynamicWeightScheduler(BaseScheduler):
         self.starve_rescues: int = 0    # 饥饿硬通道救出的低优先级任务数
         self.throttle_skips: int = 0    # 因并发满而错峰的轮数
         self.last_factors: dict = {}    # 最近一次权重计算的四因子快照（答辩讲解用）
+        #: 按优先级分别记录最近一次四因子（供前端「权重天平」同时显示高/低两个候选）
+        self._factors_by_prio: dict = {"HIGH": {}, "LOW": {}}
+        self.last_candidates: dict = {}
 
     # ==================================================================
     # 权重计算
@@ -214,6 +217,10 @@ class DynamicWeightScheduler(BaseScheduler):
             "boosted": boosted, "degraded": degraded,
             "weight": weight, "wait_ms": wait,
         }
+        # 同步一份"按优先级"的快照：前端要同时展示高/低两个候选的权重，
+        # 只看 last_factors（最后一次调用）会缺一半信息。
+        self._factors_by_prio[task.priority.name] = self.last_factors
+        self.last_candidates = self._factors_by_prio
         return max(1e-9, weight)
 
     def _adaptive_slice_ms(self, congestion: float) -> float:

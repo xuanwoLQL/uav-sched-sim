@@ -56,6 +56,7 @@ import random
 import sys
 import threading
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -83,6 +84,42 @@ from uav_sim.scenarios import Scenario, TraceEvent, WorkloadTrace
 from uav_sim.weather import WeatherModel, config_preset
 
 logger = logging.getLogger(__name__)
+
+
+def process_cpu_times() -> Tuple[float, float]:
+    """返回进程的 (用户态秒, 内核态秒)。
+
+    为什么需要它：老师要求「真实的内核态/用户态切换时间」。Python 没有跨平台的
+    线程级 CPU 时间接口，但**进程级**的 user/kernel 拆分在 Windows 上可以通过
+    ``GetProcessTimes`` 拿到（POSIX 走 ``os.times()``）。拿不到时退回
+    ``time.process_time()``（用户+内核合计）并把 kernel 记为 0 —— 不编造数据。
+    """
+    try:  # Windows
+        import ctypes
+        from ctypes import wintypes
+
+        class _FILETIME(ctypes.Structure):
+            _fields_ = [("dwLowDateTime", wintypes.DWORD),
+                        ("dwHighDateTime", wintypes.DWORD)]
+
+        def _sec(ft: "_FILETIME") -> float:
+            return ((ft.dwHighDateTime << 32) | ft.dwLowDateTime) / 1e7
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        created, exited, kern, user = _FILETIME(), _FILETIME(), _FILETIME(), _FILETIME()
+        if k32.GetProcessTimes(k32.GetCurrentProcess(), ctypes.byref(created),
+                               ctypes.byref(exited), ctypes.byref(kern),
+                               ctypes.byref(user)):
+            return _sec(user), _sec(kern)
+    except Exception:  # pragma: no cover - 非 Windows / 受限环境
+        pass
+    try:  # POSIX：os.times() 直接给 user/system
+        import os
+
+        t = os.times()
+        return float(t.user), float(t.system)
+    except Exception:  # pragma: no cover
+        return float(time.process_time()), 0.0
 
 EPS = 1e-9
 
@@ -243,6 +280,24 @@ class Simulator:
         self._frozen_ts = None        # 仿真结束后冻结的时刻（见 now() 的说明）
         self._last_ts = 0.0
 
+        # ---- OS 微观透视：事件日志 / 并发槽位 / 上下文切换开销 ----
+        #: 事件日志（有界环形缓冲）。前端「Trace」面板与 /api/trace 导出都读它。
+        self._event_log: deque = deque(
+            maxlen=max(1000, cfg_get_int(cfg, "simulation.trace_max_events", 20000)))
+        #: 并发槽位（= CPU 核号）。dispatch 时分配，完成/抢占时归还。
+        self._free_slots: List[int] = list(range(self.workers))
+        self._slot_of: Dict[str, int] = {}
+        #: 每架无人机上一次任务结束的仿真时刻 —— 用来算"上下文切换开销"。
+        self._last_finish_ts: Dict[int, float] = {}
+        self._last_switch_ms: Dict[int, float] = {}
+        self._deadlock_recovered = 0
+        self._deadlock_suspects = 0
+        #: 混沌注入状态（/api/chaos）
+        self._chaos: Dict[str, object] = {
+            "weaknet_until": 0.0, "weaknet_uavs": set(),
+            "burst": 0, "deadlock_until": 0.0, "deadlock_task": None,
+        }
+
         self._events_by_uav: Dict[int, List[TraceEvent]] = {
             uid: trace.events_of(uid) for uid in uav_ids}
 
@@ -333,6 +388,71 @@ class Simulator:
     # ==================================================================
     # 提交与派发
     # ==================================================================
+    # ------------------------------------------------------------------
+    # OS 微观透视：事件日志（Trace）
+    # ------------------------------------------------------------------
+    def _log_event(self, kind: str, task: Optional[Task] = None, **extra) -> None:
+        """追加一条 trace 事件（有界环形缓冲；异常一律吞掉，不影响仿真主流程）。"""
+        try:
+            ev: dict = {"t": round(self.now(), 3), "k": kind}
+            if task is not None:
+                ev["tid"] = task.task_id
+                ev["uav"] = int(task.uav_id)
+                ev["prio"] = task.priority.name
+                ev["type"] = task.task_type.value
+            if extra:
+                ev.update(extra)
+            self._event_log.append(ev)
+        except Exception:  # pragma: no cover
+            pass
+
+    # ------------------------------------------------------------------
+    # 混沌工程：弱网风暴 / 并发洪峰 / 死锁注入
+    # ------------------------------------------------------------------
+    def inject_weaknet(self, duration_s: float = 20.0, frac: float = 0.4) -> dict:
+        """让前 frac 比例的无人机进入"弱网风暴"：失败率放大 2.5 倍。"""
+        now = self.now()
+        n = max(1, int(round(self.scenario.uav_count * max(0.05, min(1.0, float(frac))))))
+        uavs = set(range(1, n + 1))
+        self._chaos["weaknet_until"] = now + max(1.0, float(duration_s))
+        self._chaos["weaknet_uavs"] = uavs
+        self._log_event("chaos_weaknet", None, duration_s=duration_s, uav_count=n)
+        return {"ok": True, "kind": "weaknet", "uav_count": n,
+                "until": round(now + float(duration_s), 2)}
+
+    def inject_burst(self, n: int = 500) -> dict:
+        """瞬间注入 n 个高优勘查任务（并发洪峰），压测限流/削峰。"""
+        now = self.now()
+        n = max(1, min(5000, int(n)))
+        made = 0
+        for i in range(n):
+            uav = (i % max(1, int(self.scenario.uav_count))) + 1
+            try:
+                t = self.make_task(uav, TaskType.IMAGERY, 900.0, now)
+                if self.submit_task(t):
+                    made += 1
+            except Exception:  # pragma: no cover
+                break
+        self._chaos["burst"] = int(self._chaos.get("burst", 0)) + made
+        self._log_event("chaos_burst", None, requested=n, injected=made)
+        return {"ok": True, "kind": "burst", "injected": made}
+
+    def inject_deadlock(self, hold_s: float = 20.0) -> dict:
+        """把当前剩余量最大的运行中任务"卡死" hold_s 秒；看门狗会在 3 秒后强制回收。"""
+        now = self.now()
+        with self._lock:
+            running = list(self._running.values())
+        if not running:
+            return {"ok": False, "msg": "当前没有运行中的任务，无法注入死锁"}
+        task = max(running, key=lambda x: x[0].remaining_s)[0]
+        task._hang_until = now + max(2.0, float(hold_s))
+        task._hang_since = now
+        self._chaos["deadlock_until"] = now + max(2.0, float(hold_s))
+        self._chaos["deadlock_task"] = task.task_id
+        self._log_event("chaos_deadlock", task, hold_s=float(hold_s))
+        return {"ok": True, "kind": "deadlock", "task_id": task.task_id,
+                "uav": int(task.uav_id)}
+
     def submit_task(self, task: Task) -> bool:
         """生产者线程提交任务（线程安全）；队列满则丢弃并计数。"""
         if task is None:
@@ -342,6 +462,7 @@ class Simulator:
                 self._by_id[task.task_id] = task
                 self._tasks.append(task)
         ok = self.queue.enqueue(task, self.now())
+        self._log_event("enqueue", task, size_mb=round(float(task.data_size_mb), 1))
         if not ok:
             with self._lock:
                 self._dropped_in_queue += 1
@@ -359,6 +480,7 @@ class Simulator:
         if task is None:
             return False
         now = self.now()
+        slot = -1
         with self._lock:
             if self.stop_event.is_set():
                 return False
@@ -374,7 +496,16 @@ class Simulator:
                 task.finish_ts = now
                 return False
             self._running[task.task_id] = (task, now)
+            # 分配并发槽位（= 绑定的"CPU 核号"），并计算本次上下文切换开销
+            slot = self._free_slots.pop(0) if self._free_slots else -1
+            self._slot_of[task.task_id] = slot
+            prev_finish = self._last_finish_ts.get(int(task.uav_id))
+            if prev_finish is not None:
+                self._last_switch_ms[int(task.uav_id)] = round(
+                    max(0.0, now - prev_finish) * 1000.0, 2)
             task.state = TaskState.RUNNING
+        self._log_event("dispatch", task, slot=slot,
+                        slice_ms=(None if limit_s is None else round(float(limit_s) * 1000.0, 1)))
         try:
             self._executor.submit(self._run_task, task, exec_s)  # type: ignore[union-attr]
         except RuntimeError:  # 线程池已关闭
@@ -382,6 +513,59 @@ class Simulator:
                 self._running.pop(task.task_id, None)
             return False
         return True
+
+    def _release_slot(self, task: Task, now: Optional[float] = None) -> None:
+        """归还并发槽位（= 释放 CPU 核），并记录该机本次任务结束时刻。
+
+        上下文切换开销 = 本机上一次任务结束 → 本次任务被派发 之间的仿真时间差，
+        在 ``dispatch()`` 里算好写进 ``_last_switch_ms``。
+        """
+        try:
+            with self._lock:
+                slot = self._slot_of.pop(task.task_id, -1)
+                if slot >= 0:
+                    self._free_slots.append(slot)
+                    self._free_slots.sort()
+                self._last_finish_ts[int(task.uav_id)] = float(
+                    now if now is not None else self.now())
+        except Exception:  # pragma: no cover
+            logger.exception("_release_slot 异常 task=%s", getattr(task, "task_id", "?"))
+
+    def _reap_deadlocks(self, now: float) -> int:
+        """死锁看门狗：把"注入后卡住超过 3 仿真秒"的任务强制回收。
+
+        真实系统里「任务占着 IO 不返回」会永久占住一个并发槽位，最终拖垮线程池。
+        这里模拟完整闭环：**超时检测 → 标记可疑 → 强制回收 → 记事件**。
+        前端「混沌」面板会看到 ``deadlock_recovered`` 事件与计数变化。
+        """
+        recovered = 0
+        suspects = 0
+        with self._lock:
+            items = list(self._running.items())
+        for tid, (task, _disp_ts) in items:
+            since = float(getattr(task, "_hang_since", 0.0) or 0.0)
+            if since <= 0.0:
+                continue
+            if now - since < 3.0:
+                suspects += 1
+                continue
+            with self._lock:
+                self._running.pop(tid, None)
+            try:
+                self.limiter.release(task)
+            except Exception:  # pragma: no cover
+                pass
+            task.state = TaskState.DONE
+            task.finish_ts = now
+            task.drop_reason = "deadlock_recovered"
+            task._hang_since = 0.0
+            task._hang_until = 0.0
+            self._deadlock_recovered += 1
+            self._log_event("deadlock_recovered", task, held_s=round(now - since, 2))
+            self._release_slot(task, now)
+            recovered += 1
+        self._deadlock_suspects = suspects
+        return recovered
 
     # ------------------------------------------------------------------
     # 工作线程体：模拟一次「上传」
@@ -393,12 +577,24 @@ class Simulator:
             if sleep_real > 0:
                 time.sleep(sleep_real)
 
+            # ---- 混沌工程：死锁注入（任务被"卡住"不返回） ----
+            hang_until = float(getattr(task, "_hang_until", 0.0) or 0.0)
+            if hang_until > 0:
+                extra_s = max(0.0, hang_until - self.now())
+                if extra_s > 0:
+                    time.sleep(extra_s * self.time_scale)
+
             now = self.now()
+            if task.state is TaskState.DONE:
+                # 看门狗已判定死锁并强制回收 —— 本线程只负责安静退出，不重复记账
+                self._release_slot(task, now)
+                return
             task.served_s = min(task.service_s, task.served_s + exec_s)
             finished = task.served_s + 1e-9 >= task.service_s
 
             with self._lock:
                 self._running.pop(task.task_id, None)
+            self._release_slot(task, now)
 
             if not finished:
                 # ---- 时间片耗尽 / 被抢占 ----
@@ -414,6 +610,7 @@ class Simulator:
                 self._preempt_count += 1
                 task.preempt_count += 1
                 self.limiter.release(task)
+                self._log_event("preempt", task, served_s=round(float(task.served_s), 3))
                 if getattr(self._scheduler, "preempt_requeue", "front") == "tail":
                     self.queue.requeue(task, now)
                 else:
@@ -422,7 +619,7 @@ class Simulator:
 
             # ---- 上传完成 -> 弱网失败判定 ----
             health = self.link_monitor.health_at(task.uav_id, now)
-            p_fail = self._failure_probability(health)
+            p_fail = self._failure_probability(health, task.uav_id)
             self.limiter.release(task)
 
             if p_fail > 0 and self._rng.random() < p_fail:
@@ -433,6 +630,8 @@ class Simulator:
             task.finish_ts = now
             with self._lock:
                 self._done_count += 1
+            self._log_event("done", task, wait_ms=round(float(task.wait_ms_total), 1),
+                            retry=int(task.retry_count))
             if self._scheduler is not None:
                 try:
                     self._scheduler.add_task_finished(task, task.service_s)
@@ -445,13 +644,21 @@ class Simulator:
             except Exception:
                 pass
 
-    def _failure_probability(self, health: float) -> float:
+    def _failure_probability(self, health: float, uav_id: Optional[int] = None) -> float:
         """弱网失败概率 p_fail = (1 - health/100) × retry_gain，clamp 到 [0,1]。
 
         物理意义：链路越差，一次上传被丢包/超时打断的概率越高。
         ``retry_gain`` 是"重传放大系数"，对应 PDF「任务反复重传"的现象。
         """
         raw = (1.0 - max(0.0, min(100.0, health)) / 100.0) * self.retry_gain
+        # 混沌工程「弱网风暴」：被选中的无人机，失败率放大 2.5 倍
+        try:
+            if (uav_id is not None
+                    and self.now() < float(self._chaos.get("weaknet_until", 0.0))
+                    and int(uav_id) in self._chaos.get("weaknet_uavs", set())):
+                raw *= 2.5
+        except Exception:  # pragma: no cover
+            pass
         return max(0.0, min(1.0, raw))
 
     def _on_upload_failed(self, task: Task, health: float, now: float) -> None:
@@ -467,12 +674,17 @@ class Simulator:
             task.cached = True
             task.state = TaskState.CACHED
             delay = self.cache_retry_backoff_s
+            self._log_event("cache", task, health=round(float(health), 1),
+                            delay_s=round(float(delay), 2))
         else:
             task.state = TaskState.BLOCKED
             # 指数退避（避免失败任务在同一毫秒内反复重试打爆线程池）
             # 上限 2^3 = 8 倍基数：退避太长会让任务"消失"于队列之外，
             # 既不真实（真实重传是立即重试）也会稀释饥饿与队列堆积的统计。
             delay = self.retry_backoff_base_s * (2 ** min(max(0, task.retry_count - 1), 3))
+            self._log_event("retry", task, health=round(float(health), 1),
+                            delay_s=round(float(delay), 2),
+                            retry=int(task.retry_count))
         with self._lock:
             self._retry_pending.append((now + delay, task))
 
@@ -613,6 +825,7 @@ class Simulator:
                 self._process_churn(now)
                 self._flush_retries(now)
                 self.link_monitor.tick(now)
+                self._reap_deadlocks(now)
 
                 # ---- 调度一轮（策略实现，绝不阻塞） ----
                 try:
@@ -688,6 +901,80 @@ class Simulator:
     # ==================================================================
     # 实时快照（供可视化面板高频轮询，必须轻量）
     # ==================================================================
+    # ------------------------------------------------------------------
+    # 快照辅助：单机透视 / 权重因子 / 内核级指标
+    # ------------------------------------------------------------------
+    def _uav_detail(self, running: List[dict], health: dict, online: dict) -> Dict[str, dict]:
+        """把"运行中任务"反查回每架无人机，得到线程五态 + 绑核 + 切换开销。"""
+        by_uav = {int(r["uav_id"]): r for r in running}
+        out: Dict[str, dict] = {}
+        for uid in range(1, int(self.scenario.uav_count) + 1):
+            r = by_uav.get(uid)
+            is_online = bool(online.get(uid, True))
+            if r is not None:
+                state = "RUNNING"
+            elif is_online:
+                state = "READY"
+            else:
+                state = "OFFLINE"
+            out[str(uid)] = {
+                "health": round(float(health.get(uid, 100.0)), 2),
+                "online": is_online,
+                "busy": r is not None,
+                "state": state,
+                "task_id": r["task_id"] if r else None,
+                "priority": r["priority"] if r else None,
+                "task_type": r["task_type"] if r else None,
+                "progress": r["progress"] if r else 0.0,
+                "core": r["core"] if r else -1,
+                "wait_ms": r["wait_ms"] if r else 0.0,
+                "switch_ms": round(float(self._last_switch_ms.get(uid, 0.0)), 2),
+            }
+        return out
+
+    def _weight_snapshot(self) -> dict:
+        """动态权重的四因子与两个候选权重（供「权重天平」面板）。"""
+        sched = self._scheduler
+        if sched is None:
+            return {}
+        try:
+            cands = getattr(sched, "last_candidates", None)
+            if isinstance(cands, dict) and cands:
+                return {
+                    "model": getattr(sched, "name", self.scheduler_name),
+                    "high": dict(cands.get("HIGH") or {}),
+                    "low": dict(cands.get("LOW") or {}),
+                    "link_aware": bool(getattr(sched, "link_aware", False)),
+                }
+            f = getattr(sched, "last_factors", None)
+            if isinstance(f, dict) and f:
+                return {"model": getattr(sched, "name", self.scheduler_name),
+                        "factors": dict(f)}
+        except Exception:  # pragma: no cover
+            pass
+        return {}
+
+    def _kernel_snapshot(self, now: float) -> dict:
+        """内核级指标：进程 user/kernel CPU 时间、上下文切换开销、死锁看门狗。"""
+        try:
+            user_s, kern_s = process_cpu_times()
+        except Exception:  # pragma: no cover
+            user_s, kern_s = 0.0, 0.0
+        sw = [v for v in self._last_switch_ms.values() if v > 0]
+        sched = self._scheduler
+        cs = int(getattr(sched, "context_switches", 0)) if sched is not None else 0
+        return {
+            "cpu_user_s": round(float(user_s), 2),
+            "cpu_kernel_s": round(float(kern_s), 2),
+            "context_switches": cs,
+            "switch_ms_avg": round(sum(sw) / len(sw), 2) if sw else 0.0,
+            "switch_ms_max": round(max(sw), 2) if sw else 0.0,
+            "deadlock_suspects": int(self._deadlock_suspects),
+            "deadlock_recovered": int(self._deadlock_recovered),
+            "trace_events": len(self._event_log),
+            "threads_alive": int(threading.active_count()),
+        }
+
     def snapshot(self) -> dict:
         """导出当前时刻的系统状态快照（JSON 友好）。
 
@@ -710,6 +997,8 @@ class Simulator:
                     "remaining_s": round(t.remaining_s, 3),
                     "service_s": round(float(t.service_s), 3),
                     "progress": round(float(t.progress), 4),
+                    "core": int(self._slot_of.get(t.task_id, -1)),
+                    "wait_ms": round(float(t.wait_ms_total), 1),
                 }
                 for t, _ in self._running.values()
             ]
@@ -747,17 +1036,9 @@ class Simulator:
             "running_tasks": sorted(running, key=lambda r: -r["remaining_s"]),
             "running_count": len(running),
             # 每架无人机的合并状态（3D 面板直接按 uav_id 索引，免去前端自己 join）
-            "uav_states": {
-                str(uid): {
-                    "health": round(float(health.get(uid, 100.0)), 2),
-                    "online": bool(online.get(uid, True)),
-                    "busy": False,
-                    "priority": None,
-                    "task_type": None,
-                    "progress": 0.0,
-                }
-                for uid in range(1, int(self.scenario.uav_count) + 1)
-            },
+            # 2026-11：补上"线程五态 / 绑定核号 / 当前任务 / 最近一次上下文切换开销"，
+            # 供「OS 微观透视镜」点击单机时下钻。
+            "uav_states": self._uav_detail(running, health, online),
             "counters": {
                 "submitted": int(submitted),
                 "done": int(done),
@@ -786,9 +1067,29 @@ class Simulator:
             },
             "history": [
                 {"ts": round(s.ts, 3), "high": s.high_depth, "low": s.low_depth,
-                 "load": round(s.system_load, 4)}
+                 "load": round(s.system_load, 4),
+                 "hi_slice": round(float(s.high_time_slice_ms), 0),
+                 "lo_slice": round(float(s.low_time_slice_ms), 0)}
                 for s in self.queue_samples()[-160:]
             ],
+            # ---- OS 微观透视：就绪队列"传送带" / 权重天平 / 内核指标 / 混沌状态 ----
+            "queue_tasks": self.queue.snapshot_tasks(limit=40, now=now),
+            "weight": self._weight_snapshot(),
+            "pool": {
+                "active": len(running),
+                "idle": max(0, int(self.workers) - len(running)),
+                "total": int(self.workers),
+            },
+            "kernel": self._kernel_snapshot(now),
+            "chaos": {
+                "weaknet_active": now < float(self._chaos.get("weaknet_until", 0.0)),
+                "weaknet_until": round(float(self._chaos.get("weaknet_until", 0.0)), 2),
+                "weaknet_uavs": len(self._chaos.get("weaknet_uavs") or ()),
+                "burst": int(self._chaos.get("burst", 0)),
+                "deadlock_task": self._chaos.get("deadlock_task"),
+                "deadlock_until": round(float(self._chaos.get("deadlock_until", 0.0)), 2),
+            },
+            "trace_tail": list(self._event_log)[-60:],
             # ---- 天气快照（契约 §4.6.4：键名不可改，前端天气系统直接消费） ----
             # 运行中切换天气后这里立刻变化；未开始仿真时是 t=0 的曲线起点。
             "weather": self.weather.snapshot(now),
