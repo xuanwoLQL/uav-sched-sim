@@ -447,6 +447,285 @@ def _read_replication_ci(cfg: dict) -> dict:
 
 
 # ===========================================================================
+# 导出「报告素材包」（zip，纯标准库）
+# ===========================================================================
+#: 导出时打包的目录（相对 OUTPUT_ROOT）→ zip 内前缀
+_EXPORT_DIRS = (
+    ("charts", "charts"),
+    ("results/stations", "results/stations"),
+    ("results/station_probe", "results/station_probe"),
+    ("results/mec", "results/mec"),
+    ("results/replications", "results/replications"),
+    ("docs/images", "screenshots"),
+)
+
+#: 单个文件上限（MB）：避免把 1.7 MB 的 raw JSON × N 份全塞进包（raw 默认不进包）
+_EXPORT_MAX_FILE_MB = 12
+
+
+def build_export_bundle(cfg: dict, scope: str = "charts") -> tuple:
+    """把"报告要用的图 + 表 + 结论"打成一个 zip，返回 ``(文件名, bytes)``。
+
+    设计取舍：
+      * **默认 scope=charts**：只打 `charts/*.png` + 三个 CSV（summary / stations / probe）
+        + 一份自动生成的 `结论摘要.md` + `README.txt`（说明每张图哪来的、口径是什么）。
+        体积约 2~4 MB，能直接发微信/邮件。
+      * **scope=all** 再加多站/MEC/CI 目录与 `docs/images` 截图（**不含** `results/raw`：
+        15 份 JSON 就 11 MB，且它们是中间产物，报告用不上）。
+      * 单文件 > 12 MB 跳过（在 README 里列出来，避免"悄悄少东西"）。
+    """
+    import zipfile
+
+    root = OUTPUT_ROOT
+    res = _results_dir(cfg)
+    scope = str(scope or "charts").lower()
+    want_dirs = [("charts", "charts")]
+    if scope == "all":
+        want_dirs = list(_EXPORT_DIRS)
+    else:
+        # charts 模式：只带三张"结论表"所在的目录，不搬 raw
+        want_dirs += [("results/stations", "results/stations"),
+                      ("results/station_probe", "results/station_probe")]
+
+    buf = io.BytesIO()
+    skipped = []
+    added = []
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for rel_dir, prefix in want_dirs:
+            base = root / rel_dir
+            if not base.is_dir():
+                continue
+            for p in sorted(base.rglob("*")):
+                if not p.is_file():
+                    continue
+                # 只带图与表：raw/task_records 这类中间产物不进包
+                if p.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp", ".csv", ".md"):
+                    continue
+                if "raw" in p.parts or "task_records" in p.parts:
+                    continue
+                try:
+                    size_mb = p.stat().st_size / 1048576.0
+                except OSError:
+                    continue
+                arc = f"{prefix}/{p.relative_to(base).as_posix()}"
+                if size_mb > _EXPORT_MAX_FILE_MB:
+                    skipped.append(f"{arc}（{size_mb:.1f} MB，超过单文件上限）")
+                    continue
+                try:
+                    zf.write(p, arc)
+                    added.append(arc)
+                except OSError as exc:  # noqa: BLE001
+                    skipped.append(f"{arc}（读取失败：{exc}）")
+
+        # 结论摘要（自动从 summary.csv 生成，避免"包里只有图、没有数"）
+        summary = _read_summary_csv(cfg)
+        zf.writestr("结论摘要.md", _bundle_summary_md(summary, cfg))
+        zf.writestr("README.txt", _bundle_readme_txt(added, skipped, scope, summary))
+        _ = res  # 保留：路径说明写进 README
+    stamp = time.strftime("%Y%m%d-%H%M")
+    name = f"仿真报告素材包-{stamp}.zip"
+    return name, buf.getvalue()
+
+
+def _bundle_summary_md(summary: dict, cfg: dict) -> str:
+    """由 summary.csv 生成 Markdown 结论表（可直接粘进课程报告）。"""
+    lines = ["# 实验结果摘要（自动生成）", ""]
+    if not summary.get("exists") or not summary.get("rows"):
+        lines += ["磁盘上还没有 `results/summary.csv`。",
+                  "先在项目根执行 `python run.py all --no-db` 再导出。", ""]
+        return "\n".join(lines)
+    lines += [
+        f"- 数据源：`results/summary.csv`（生成于 {summary.get('generated_at', '-')}）",
+        f"- 随机种子：`{summary.get('seed', '-')}`（控制变量）",
+        f"- 规模：3 工况 × 5 个经典策略 = {len(summary['rows'])} 组",
+        "",
+        "> 口径提醒：整跑指标存在 wall-clock 抖动（完整率 0.2~0.5 pp 量级），"
+        "结论看**方向与量级**，不要把小数位当精确值（docs/11 §7）。",
+        "",
+        "| 工况 | 策略 | 吞吐 | 完整率% | 高优等待ms | 低优等待ms | 低优饥饿% | 利用率% |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for r in summary["rows"]:
+        lines.append(
+            f"| {r.get('scenario_label') or r.get('scenario')} | "
+            f"{r.get('scheduler_label') or r.get('scheduler')} | "
+            f"{float(r.get('throughput', 0)):.2f} | "
+            f"{float(r.get('completion_rate', 0)):.2f} | "
+            f"{float(r.get('avg_wait_high_ms', 0)):.0f} | "
+            f"{float(r.get('avg_wait_low_ms', 0)):.0f} | "
+            f"{float(r.get('starvation_rate_low', 0)):.2f} | "
+            f"{float(r.get('resource_utilization', 0)):.1f} |")
+    lines += ["", "## 图表清单", ""]
+    try:
+        charts = (OUTPUT_ROOT / "charts")
+        names = sorted(p.name for p in charts.glob("*.png")) if charts.is_dir() else []
+    except OSError:
+        names = []
+    lines += [f"- `charts/{n}`" for n in names] or ["- （charts/ 为空）"]
+    lines += ["", "## 复现命令", "", "```powershell",
+              "& \".\\.venv\\Scripts\\python.exe\" run.py all --no-db",
+              "& \".\\.venv\\Scripts\\python.exe\" run.py stations",
+              "& \".\\.venv\\Scripts\\python.exe\" run.py replicate --reps 10 --scenarios PEAK "
+              "--schedulers dynamic cross_node --variants single,triple,triple_mec --no-db",
+              "```", ""]
+    return "\n".join(lines)
+
+
+def _bundle_readme_txt(added: list, skipped: list, scope: str, summary: dict) -> str:
+    """zip 内的 README：说清"包里有什么、每张图哪来的、哪些被跳过"。"""
+    out = [
+        "仿真报告素材包",
+        "=" * 60,
+        f"生成时间：{time.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"导出范围：{scope}（charts = 只带核心图表与三张结论表；all = 再加多站/MEC/CI/截图）",
+        f"文件数：{len(added)}",
+        "",
+        "目录说明",
+        "-" * 60,
+        "charts/            15 组核心结论图（01~08）+ 站级/MEC 与多站矩阵图（09、10）",
+        "results/stations/  多站 × 6 策略 × 3 工况 = 18 组矩阵（CSV + charts/）",
+        "results/station_probe/  run.py all 的伴生探针（3 组）",
+        "results/mec/       MEC 端-边-云对照（scope=all 时）",
+        "results/replications/  重复实验均值 ± 95% 置信区间（scope=all 时）",
+        "screenshots/       docs/images 下归档的界面截图（scope=all 时）",
+        "结论摘要.md        由 results/summary.csv 自动生成的 Markdown 表（可直接粘进报告）",
+        "",
+        "口径提醒",
+        "-" * 60,
+        "1) 单次实跑的整跑指标有 wall-clock 抖动，结论看方向与量级，不要抠小数位；",
+        "2) 15 组矩阵口径固定为 3 工况 × 5 个经典策略；cross_node / 多站 / MEC 是**独立对照实验**，",
+        "   不与 15 组混在一张表里比绝对值（docs/11 §7.2）；",
+        "3) 图上的时间戳是文件生成时间，若与 summary.csv 不是同一次实验，引用前请核对。",
+        "",
+    ]
+    if not summary.get("exists"):
+        out += ["注意：导出时没有找到 results/summary.csv，结论摘要为空。", ""]
+    if skipped:
+        out += ["未打包的文件（超过单文件上限或读取失败）", "-" * 60]
+        out += [f"  - {s}" for s in skipped]
+        out.append("")
+    out += ["完整文件清单", "-" * 60] + [f"  {a}" for a in added] + [""]
+    return "\n".join(out)
+
+
+# ===========================================================================
+# 一键重跑实验（后台子进程）
+# ===========================================================================
+#: 允许从界面触发的实验（**白名单**：命令行由服务端拼装，绝不接受前端传来的任意参数）
+EXPERIMENT_KINDS: dict = {
+    "all": {
+        "label": "全量 15 组矩阵 + 伴生探针",
+        "argv": ["all", "--no-db"],
+        "eta_s": 120,
+        "overwrites": "results/summary.csv（会先备份为 summary.prev.csv）",
+    },
+    "stations": {
+        "label": "多站 × 多策略 18 组矩阵",
+        "argv": ["stations"],
+        "eta_s": 150,
+        "overwrites": "results/stations/*（独立目录，不动 15 组）",
+    },
+    "mec": {
+        "label": "MEC 端-边-云对照 12 组",
+        "argv": ["mec"],
+        "eta_s": 140,
+        "overwrites": "results/mec/*（独立目录）",
+    },
+    "replicate": {
+        "label": "重复实验（均值 ± 95% CI）",
+        "argv": ["replicate", "--scenarios", "PEAK",
+                 "--schedulers", "dynamic", "cross_node",
+                 "--variants", "single", "triple", "triple_mec", "--no-db"],
+        "eta_s": 200,
+        "overwrites": "results/replications/*（独立目录）",
+        "reps_flag": True,
+    },
+}
+
+
+class ExperimentJob:
+    """一次"一键重跑"的后台任务（子进程 + 环形日志缓冲）。
+
+    为什么用子进程而不是线程里直接跑：`run.py all` 会跑 15 次真实仿真（约 100~150 s），
+    放在面板进程里会与正在播放的 3D 仿真抢 GIL；子进程隔离后**面板照常刷新**，
+    而且失败也不会把面板带崩。
+    """
+
+    #: 日志只保留最后 N 行（前端一次拉全量会越来越慢）
+    MAX_LINES: int = 400
+
+    def __init__(self, kind: str, argv: list, cwd: Path) -> None:
+        self.kind = kind
+        self.argv = list(argv)
+        self.cwd = Path(cwd)
+        self.started_at = time.strftime("%Y-%m-%d %H:%M:%S")
+        self.finished_at = ""
+        self.returncode: Optional[int] = None
+        self.status: str = "running"       # running | done | failed
+        self.lines: list = []
+        self._lock = threading.Lock()
+        self._proc = None
+
+    # ------------------------------------------------------------------
+    def start(self) -> None:
+        import subprocess
+
+        try:
+            self._proc = subprocess.Popen(          # noqa: S603 - argv 由白名单拼装
+                self.argv, cwd=str(self.cwd),
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace", bufsize=1,
+            )
+        except OSError as exc:
+            with self._lock:
+                self.status = "failed"
+                self.finished_at = time.strftime("%Y-%m-%d %H:%M:%S")
+                self.lines.append(f"[启动失败] {type(exc).__name__}: {exc}")
+            return
+        threading.Thread(target=self._pump, name="ExpJob", daemon=True).start()
+
+    def _pump(self) -> None:
+        assert self._proc is not None and self._proc.stdout is not None
+        try:
+            for line in self._proc.stdout:
+                self._append(line.rstrip("\n"))
+        finally:
+            code = self._proc.wait()
+            with self._lock:
+                self.returncode = code
+                self.status = "done" if code == 0 else "failed"
+                self.finished_at = time.strftime("%Y-%m-%d %H:%M:%S")
+                self.lines.append(f"[结束] 退出码 {code}")
+
+    def _append(self, line: str) -> None:
+        with self._lock:
+            self.lines.append(line)
+            if len(self.lines) > self.MAX_LINES:
+                del self.lines[: len(self.lines) - self.MAX_LINES]
+
+    # ------------------------------------------------------------------
+    def snapshot(self, tail: int = 80) -> dict:
+        with self._lock:
+            return {
+                "kind": self.kind,
+                "status": self.status,
+                "returncode": self.returncode,
+                "started_at": self.started_at,
+                "finished_at": self.finished_at,
+                "lines": list(self.lines[-tail:]),
+                "total_lines": len(self.lines),
+                "running": self.status == "running",
+            }
+
+    def kill(self) -> None:
+        if self._proc is not None and self._proc.poll() is None:
+            try:
+                self._proc.terminate()
+            except OSError:
+                pass
+
+
+# ===========================================================================
 # 仿真运行器
 # ===========================================================================
 class SimRun:
@@ -771,6 +1050,64 @@ class Dashboard:
                 self.run.stop()
         return {"ok": True}
 
+    def start_experiment(self, kind: str, reps: int = 0) -> dict:
+        """一键重跑实验（``GET /api/run_experiment?kind=...``）。
+
+        三条纪律：
+          ① **白名单**：kind 只能取 :data:`EXPERIMENT_KINDS` 的键，命令行由服务端拼装；
+          ② **先备份再覆盖**：`run.py all` 会重写 `results/summary.csv`，所以跑之前把旧表
+             另存为 `summary.prev.csv`（覆盖式实验最容易丢的就是"上一次的对照"）；
+          ③ **不并发**：同一时刻只允许一个实验任务，避免两个 `run.py all` 抢同一批输出文件。
+        """
+        import sys as _sys
+
+        k = str(kind or "").strip().lower()
+        spec = EXPERIMENT_KINDS.get(k)
+        if spec is None:
+            return {"ok": False,
+                    "msg": f"未知实验 {k or '(空)'}，可选：" + " / ".join(EXPERIMENT_KINDS)}
+        with self._lock:
+            job = getattr(self, "_exp_job", None)
+            if job is not None and job.status == "running":
+                return {"ok": False, "msg": "已有实验在跑，等它结束再试（或先点停止）"}
+            # ① 备份会被覆盖的汇总表
+            backup = ""
+            if k == "all":
+                try:
+                    src = _results_dir(self.cfg) / "summary.csv"
+                    if src.is_file():
+                        dst = src.with_name("summary.prev.csv")
+                        dst.write_bytes(src.read_bytes())
+                        backup = str(dst)
+                except OSError:
+                    backup = ""
+            # ② 拼命令行：`<python> run.py <argv...> [--reps N]`
+            root = OUTPUT_ROOT
+            py = _sys.executable
+            argv = [py, str(root / "run.py"), *spec["argv"]]
+            if spec.get("reps_flag") and int(reps or 0) > 0:
+                argv += ["--reps", str(int(reps))]
+            job = ExperimentJob(k, argv, cwd=root)
+            self._exp_job = job
+        job.start()
+        return {"ok": True, "kind": k, "label": spec["label"],
+                "eta_s": spec["eta_s"], "overwrites": spec["overwrites"],
+                "backup": backup, "argv": argv[2:]}
+
+    def experiment_status(self, tail: int = 80) -> dict:
+        """``GET /api/run_status`` —— 一键重跑的进度（供界面轮询）。"""
+        job = getattr(self, "_exp_job", None)
+        if job is None:
+            return {"ok": True, "job": None}
+        return {"ok": True, "job": job.snapshot(tail=tail)}
+
+    def stop_experiment(self) -> dict:
+        job = getattr(self, "_exp_job", None)
+        if job is None or job.status != "running":
+            return {"ok": False, "msg": "当前没有正在跑的实验"}
+        job.kill()
+        return {"ok": True, "msg": "已请求终止（子进程收到 terminate）"}
+
     def run_result_snapshot(self) -> dict:
         """「仿真结果」界面顶部的**本次运行**卡片（内存态，不是磁盘产物）。
 
@@ -952,6 +1289,50 @@ def _make_handler(dash: Dashboard):
                 # GET /api/raw_series?name=PEAK-dynamic-...json —— 队列回放用的时序
                 name = (qs.get("name") or [""])[0].strip()
                 self._json(_read_raw_series(dash.cfg, name))
+                return
+            if path == "/api/run_experiment":
+                # GET/POST /api/run_experiment?kind=all|stations|mec|replicate&reps=3
+                #   「仿真结果」界面里的**一键重跑**（后台子进程，不阻塞面板）
+                #   安全：kind 走白名单，命令行由服务端拼装，**不接受任意命令**
+                kind = (qs.get("kind") or [""])[0].strip().lower()
+                reps_raw = (qs.get("reps") or [""])[0].strip()
+                try:
+                    reps = int(reps_raw) if reps_raw else 0
+                except ValueError:
+                    reps = 0
+                self._json(dash.start_experiment(kind, reps=reps))
+                return
+            if path == "/api/run_status":
+                self._json(dash.experiment_status())
+                return
+            if path == "/api/stop_experiment":
+                self._json(dash.stop_experiment())
+                return
+            if path == "/api/export_bundle":
+                # GET /api/export_bundle?scope=charts|all —— 导出"报告素材包"（zip 流）
+                scope = (qs.get("scope") or ["charts"])[0].strip().lower()
+                try:
+                    name, blob = build_export_bundle(dash.cfg, scope=scope)
+                except Exception as exc:  # noqa: BLE001 - 导出失败要给人话，不要 500 崩
+                    logger.exception("导出素材包失败")
+                    self._json({"ok": False, "msg": f"{type(exc).__name__}: {exc}"}, 500)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/zip")
+                # 文件名含中文：用 RFC 5987 的 filename* 编码，避免浏览器按 latin-1 乱码
+                from urllib.parse import quote as _quote
+
+                self.send_header(
+                    "Content-Disposition",
+                    "attachment; filename=\"bundle.zip\"; "
+                    f"filename*=UTF-8''{_quote(name)}")
+                self.send_header("Content-Length", str(len(blob)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                try:
+                    self.wfile.write(blob)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
                 return
             if path == "/api/weather":
                 # 契约 §4.6.4：GET /api/weather?preset=rain

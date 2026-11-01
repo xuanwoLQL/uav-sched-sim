@@ -824,10 +824,39 @@ exe 已重新打包并实跑验证（`--stations triple --mec` → `/api/state` 
 | `GET /api/results` | 一次返回全部**元数据**（图片清单/矩阵/raw 清单/CI/本次运行），图片懒加载 |
 | `GET /results_img/<相对路径>` | 读图片；**白名单目录 + 图片扩展名双闸**，`../`、绝对路径、非图片一律 404 |
 | `GET /api/raw_series?name=<文件>` | 时序回放数据；文件名禁止 `/`、`\`、`..` |
+| `GET /api/run_experiment?kind=…` | 一键重跑（后台子进程）；**kind 白名单**，命令行服务端拼装，`all` 先备份 `summary.csv` |
+| `GET /api/run_status` / `/api/stop_experiment` | 进度轮询 / 终止 |
+| `GET /api/export_bundle?scope=charts\|all` | 导出报告素材包 zip（含自动生成的 `结论摘要.md`） |
 
 安全考虑：`/results_img` 等于把本地磁盘暴露给浏览器，所以**只认白名单目录**（`charts/`、
 `results/*/`、`docs/images/`），失败时**不回显服务器路径**。测试见
-[`tests/test_results_api.py`](tests/test_results_api.py)（15 条，含目录穿越的 7 个反例）。
+[`tests/test_results_api.py`](tests/test_results_api.py)（21 条，含目录穿越的 7 个反例）。
+
+### 4.12.5 三个"能动手"的能力（不用再开终端）
+
+**① 一键重跑**：右上角「↻ 重跑」→ 选四档实验之一 → 跑在**子进程**里（面板与 3D 不受影响），
+对话框里实时贴出子进程输出，**跑完自动刷新**结果界面。
+
+| 实验 | 预计 | 会覆盖什么 |
+|---|---|---|
+| `all` | 100~130 s | `results/summary.csv`（**先备份为 `summary.prev.csv`**） |
+| `stations` | 120~150 s | `results/stations/*`（独立目录，不动 15 组） |
+| `mec` | 110~140 s | `results/mec/*` |
+| `replicate` | 150~200 s | `results/replications/*`（可设 reps） |
+
+![一键重跑对话框](docs/images/33-仿真结果-一键重跑对话框.png)
+![重跑完成后的实时日志](docs/images/35-仿真结果-重跑完成日志.png)
+
+**② 两份明细对比**（页签「对比」）：选两份 `raw/*.json`，得到 12 个指标的并排表
+（A / B / 差值 / 相对 % / **变好-变差判定**）+ 两组队列曲线叠加；若两份 seed 不同会**明确警告**
+"差值里混着随机性，不能当因果结论"。
+
+![两份明细对比](docs/images/32-仿真结果-对比.png)
+
+**③ 导出报告素材包**（右上角「⤓ 导出素材包」）：一键 zip = 图表 + 三张结论表 +
+**自动生成的 `结论摘要.md`**（Markdown 表，可直接粘进报告）+ `README.txt`（目录说明/口径提醒/文件清单）。
+默认 `scope=charts` 实测 **2.0 MB / 18 个条目**，能直接发微信；**刻意不打包 `results/raw`**（15 份 JSON 就 11 MB，
+且是中间产物）。
 
 ---
 

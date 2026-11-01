@@ -50,7 +50,8 @@
     // 切到目标页签
     const tabs = [...document.querySelectorAll("#rxTabs button")];
     out.tabs = tabs.map((b) => b.textContent);
-    const lab = { live: "本次运行", charts: "图表", table: "15 组矩阵", replay: "时序回放", ci: "置信区间" }[tab];
+    const lab = { live: "本次运行", charts: "图表", table: "15 组矩阵",
+      replay: "时序回放", compare: "对比", ci: "置信区间" }[tab];
     const want = tabs.find((b) => b.textContent.indexOf(lab) === 0);
     if (want) {
       want.click();
@@ -115,6 +116,82 @@
     if (tab === "ci") {
       out.rows = body.querySelectorAll("tbody tr").length;
       ok(out.rows >= 1, "置信区间表有 " + out.rows + " 行");
+    }
+    if (tab === "compare") {
+      for (let i = 0; i < 40; i++) {
+        await sleep(250);
+        if (body.querySelector("#cmpBody table")) break;
+      }
+      const rows = body.querySelectorAll("#cmpBody tbody tr").length;
+      out.cmp_rows = rows;
+      ok(rows >= 5, "对比表有 " + rows + " 行指标");
+      const cv = body.querySelector("#cmpCanvas");
+      ok(!!cv && cv.width > 0, "对比曲线画布已初始化（" + (cv ? cv.width + "px" : "-") + "）");
+      out.cmp_tip = (body.querySelector("#cmpTip") || {}).textContent || "";
+    }
+
+    // ---- 附加动作：重跑对话框 / 真的重跑 / 导出素材包 ----
+    const action = (q.get("action") || "").toLowerCase();
+    if (action === "rundlg") {
+      document.getElementById("rxRun").click();
+      await sleep(800);
+      const dlg = document.getElementById("runDlg");
+      ok(dlg.classList.contains("show"), "重跑对话框已打开");
+      out.run_kinds = [...dlg.querySelectorAll(".opt")].map((o) => o.dataset.kind);
+      out.run_warn = (dlg.querySelector(".warn") || {}).textContent || "";
+      ok(/summary\.prev\.csv/.test(out.run_warn), "对话框明确写了会覆盖什么 + 有备份");
+    }
+    if (action === "run") {
+      // 真的跑一次（默认 stations：独立目录，不动 15 组）
+      const kind = (q.get("kind") || "stations").toLowerCase();
+      document.getElementById("rxRun").click();
+      await sleep(600);
+      const opt = document.querySelector('#runDlg .opt[data-kind="' + kind + '"]');
+      ok(!!opt, "找到实验选项 " + kind);
+      if (opt) opt.click();
+      document.getElementById("runGo").click();
+      // 轮询直到结束（最长 6 分钟）
+      let last = "";
+      for (let i = 0; i < 360; i++) {
+        await sleep(1000);
+        const j = await (await fetch("/api/run_status", { cache: "no-store" })).json();
+        const job = j && j.job;
+        if (!job) continue;
+        last = job.status + "|" + job.total_lines;
+        if (i % 10 === 0) out["run_progress_" + i] = last;
+        if (!job.running) {
+          out.run_status = job.status;
+          out.run_rc = job.returncode;
+          out.run_lines = job.total_lines;
+          out.run_tail = (job.lines || []).slice(-6);
+          break;
+        }
+      }
+      ok(out.run_status === "done", "一键重跑结束且成功（status=" + out.run_status +
+        " rc=" + out.run_rc + " 输出 " + out.run_lines + " 行）");
+      const log = document.getElementById("runLog");
+      out.run_log_shown = !!(log && log.textContent && log.textContent.length > 50);
+      ok(out.run_log_shown, "对话框里实时贴出了子进程输出");
+      // 关掉对话框，回结果界面看有没有刷新（&keepdlg=1 时保留，便于截"跑完的日志"）
+      if (q.get("keepdlg") !== "1") {
+        document.getElementById("runClose").click();
+        await sleep(500);
+      } else {
+        await sleep(300);
+      }
+      const src = (document.getElementById("rxSrc") || {}).textContent || "";
+      out.after_src = src;
+    }
+    if (action === "export") {
+      document.getElementById("rxExport").click();
+      let btnTxt = "";
+      for (let i = 0; i < 60; i++) {
+        await sleep(500);
+        btnTxt = (document.getElementById("rxExport") || {}).textContent || "";
+        if (/已导出|导出失败/.test(btnTxt)) break;
+      }
+      out.export_btn = btnTxt;
+      ok(/已导出/.test(btnTxt), "导出素材包完成：" + btnTxt);
     }
   } catch (e) {
     out.log.push("[FAIL] 脚本异常：" + (e && e.message ? e.message : String(e)));

@@ -24,7 +24,7 @@
 
    例子（本机 RTX 3050，实测 120fps）：
      node tools/shot.mjs --gpu --url "http://127.0.0.1:8791/?quality=high" \
-       --out shots/gpu.png --wait 8000 --eval-file tools/gpu_pit.js --eval-delay 2500
+       --out shots/gpu.png --wait 8000 --eval-file tools/shot_stations.js --eval-delay 2500
 
    输出：stdout 打印一行摘要 JSON（含 console 错误、页面异常、页面自检结果）。
    退出码：0 = 无 page error；2 = 有 page error；1 = 驱动本身失败。

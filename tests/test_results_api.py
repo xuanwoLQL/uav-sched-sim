@@ -230,3 +230,126 @@ def test_http_raw_series_ok_and_rejects_bad_name(tmp_path, monkeypatch) -> None:
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+# ---------------------------------------------------------------------------
+# 4) 导出「报告素材包」
+# ---------------------------------------------------------------------------
+def test_export_bundle_contains_charts_summary_and_readme(tmp_path, monkeypatch) -> None:
+    import io
+    import zipfile
+
+    root = _make_fake_root(tmp_path)
+    # 造一份 summary.csv，让"结论摘要"有内容
+    (root / "results" / "summary.csv").write_text(
+        "exp_id,scenario,scenario_label,scheduler,scheduler_label,seed,duration_s,uav_count,"
+        "throughput,completion_rate,avg_wait_high_ms,avg_wait_low_ms,starvation_rate_low,"
+        "resource_utilization,retry_rate,station_load_imbalance,migration_count,"
+        "edge_offload_ratio,avg_e2e_ms,quorum_commits,quorum_rejects\n"
+        "e1,PEAK,高并发峰值勘查,dynamic,动态权重,20261031,90,30,25.86,95.17,2102,1345,"
+        "0,51.09,29.57,0.551,0,0,106.4,2327,0\n",
+        encoding="utf-8-sig")
+    monkeypatch.setattr(dash_mod, "OUTPUT_ROOT", root)
+    cfg = {"output": {"results_dir": str(root / "results")}}
+
+    name, blob = dash_mod.build_export_bundle(cfg, scope="charts")
+    assert name.endswith(".zip") and len(blob) > 100
+    zf = zipfile.ZipFile(io.BytesIO(blob))
+    names = zf.namelist()
+    assert any(n.startswith("charts/") and n.endswith(".png") for n in names)
+    assert "结论摘要.md" in names and "README.txt" in names
+    # 中间产物不进包（raw/task_records）
+    assert not any("/raw/" in n for n in names)
+    md = zf.read("结论摘要.md").decode("utf-8")
+    assert "25.86" in md and "20261031" in md
+    # 文件清单与"跳过"说明都要有
+    readme = zf.read("README.txt").decode("utf-8")
+    assert "口径提醒" in readme and "完整文件清单" in readme
+
+
+def test_export_bundle_without_artifacts_still_returns_zip(tmp_path, monkeypatch) -> None:
+    """一个产物都没有时也要给出**可读的** zip（含提示），而不是抛异常/空响应。"""
+    import io
+    import zipfile
+
+    root = tmp_path / "empty"
+    root.mkdir()
+    monkeypatch.setattr(dash_mod, "OUTPUT_ROOT", root)
+    cfg = {"output": {"results_dir": str(root / "results")}}
+    name, blob = dash_mod.build_export_bundle(cfg, scope="charts")
+    zf = zipfile.ZipFile(io.BytesIO(blob))
+    md = zf.read("结论摘要.md").decode("utf-8")
+    assert "还没有" in md and "run.py all" in md
+
+
+def test_http_export_bundle_headers(tmp_path, monkeypatch) -> None:
+    root = _make_fake_root(tmp_path)
+    monkeypatch.setattr(dash_mod, "OUTPUT_ROOT", root)
+    base, httpd = _serve(root)
+    try:
+        req = urllib.request.Request(base + "/api/export_bundle?scope=charts")
+        with urllib.request.urlopen(req, timeout=30) as r:   # noqa: S310 - 仅本机
+            assert r.status == 200
+            assert r.headers.get("Content-Type") == "application/zip"
+            cd = r.headers.get("Content-Disposition", "")
+            # 中文文件名必须走 RFC 5987 的 filename*，否则浏览器按 latin-1 显示乱码
+            assert "filename*=UTF-8''" in cd
+            assert len(r.read()) > 100
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+# ---------------------------------------------------------------------------
+# 5) 一键重跑（白名单 + 状态机；**不真的跑实验**）
+# ---------------------------------------------------------------------------
+def test_run_experiment_rejects_unknown_kind(tmp_path, monkeypatch) -> None:
+    root = _make_fake_root(tmp_path)
+    monkeypatch.setattr(dash_mod, "OUTPUT_ROOT", root)
+    base, httpd = _serve(root)
+    try:
+        code, _c, body = _get(base + "/api/run_experiment?kind=rm+-rf+/")
+        j = json.loads(body.decode("utf-8"))
+        assert j["ok"] is False
+        assert "可选" in j["msg"]
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_run_experiment_whitelisted_argv_and_backup(tmp_path, monkeypatch) -> None:
+    """合法 kind：命令行只能由服务端拼装（Python + run.py + 白名单参数）。"""
+    root = _make_fake_root(tmp_path)
+    monkeypatch.setattr(dash_mod, "OUTPUT_ROOT", root)
+    (root / "results" / "summary.csv").write_text("exp_id\nx\n", encoding="utf-8-sig")
+    started = {}
+    monkeypatch.setattr(dash_mod.ExperimentJob, "start",
+                        lambda self: started.update(kind=self.kind, argv=self.argv))
+    d = dash_mod.Dashboard(load_config())
+    d.cfg = {"output": {"results_dir": str(root / "results")}}
+    monkeypatch.setattr(dash_mod, "_results_dir", lambda cfg: root / "results")
+
+    got = d.start_experiment("all")
+    assert got["ok"] is True
+    assert got["kind"] == "all"
+    # 备份：旧的 summary.csv 被复制成 summary.prev.csv
+    assert (root / "results" / "summary.prev.csv").is_file()
+    assert got["backup"].endswith("summary.prev.csv")
+    # argv：python + <root>/run.py + 白名单子命令，且不接受前端任意参数
+    assert started["argv"][0].endswith(("python.exe", "python", "python3"))
+    assert started["argv"][1].endswith("run.py")
+    assert started["argv"][2] == "all"
+    assert "--no-db" in started["argv"]
+    # 并发保护：已有任务在跑时第二次调用被拒
+    again = d.start_experiment("stations")
+    assert again["ok"] is False and "已有实验在跑" in again["msg"]
+    # 状态接口
+    st = d.experiment_status()
+    assert st["ok"] is True and st["job"]["kind"] == "all"
+    assert st["job"]["status"] == "running"
+
+
+def test_experiment_status_idle_and_stop(tmp_path, monkeypatch) -> None:
+    d = dash_mod.Dashboard(load_config())
+    assert d.experiment_status()["job"] is None
+    assert d.stop_experiment()["ok"] is False

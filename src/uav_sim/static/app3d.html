@@ -219,6 +219,36 @@ button.ghost.on{border-color:rgba(55,226,213,.75);color:#9ff7ee;
   #lb .nav{cursor:pointer;font-size:22px;padding:4px 14px;border-radius:8px;
     border:1px solid var(--line);user-select:none}
   #lb .nav:hover{border-color:#37e2d5;color:#9ff7ee}
+  /* 一键重跑对话框 */
+  #runDlg{position:fixed;inset:0;z-index:80;display:none;align-items:center;
+    justify-content:center;background:rgba(2,5,9,.72);backdrop-filter:blur(4px)}
+  #runDlg.show{display:flex}
+  #runDlg .box{width:min(720px,92vw);max-height:86vh;display:flex;flex-direction:column;
+    background:#0b1522;border:1px solid var(--line);border-radius:14px;
+    box-shadow:0 20px 60px rgba(0,0,0,.6);overflow:hidden}
+  #runDlg .hd{padding:12px 16px;border-bottom:1px solid var(--line);
+    display:flex;align-items:center;gap:10px}
+  #runDlg .hd h3{margin:0;font-size:14px;color:var(--cyan)}
+  #runDlg .bd{padding:14px 16px;overflow:auto;font-size:12.5px;line-height:1.7;
+    /* 必须给实底色：`#runDlg` 上有 backdrop-filter: blur，若 .bd 透明，
+       文字会被合成到"模糊层"上，headless Chromium 里会出现**重影**
+       （实测：同一段文字上下错位约 3px 叠着画，看起来像糊了）。 */
+    background:#0b1522}
+  #runDlg .ft{padding:10px 16px;border-top:1px solid var(--line);display:flex;
+    gap:8px;justify-content:flex-end;align-items:center}
+  #runDlg .opt{display:flex;gap:10px;align-items:flex-start;padding:8px 10px;
+    border:1px solid var(--line);border-radius:9px;margin-bottom:8px;cursor:pointer}
+  #runDlg .opt:hover{border-color:#3d6ba8}
+  #runDlg .opt.on{border-color:rgba(55,226,213,.7);background:rgba(55,226,213,.08)}
+  #runDlg .opt b{font-size:12.5px}
+  #runDlg .opt small{display:block;color:var(--dim);font-size:11px;margin-top:2px}
+  #runDlg .warn{color:#ffb0b0;background:rgba(120,32,32,.28);border:1px solid rgba(163,51,51,.6);
+    border-radius:8px;padding:8px 10px;margin:10px 0;font-size:12px}
+  #runDlg pre{margin:10px 0 0;padding:10px;background:#060d16;border:1px solid var(--line);
+    border-radius:8px;max-height:260px;overflow:auto;font:11px/1.55 ui-monospace,Consolas,monospace;
+    color:#b9cbe0;white-space:pre-wrap}
+  #runDlg .spin{width:12px;height:12px;border-radius:50%;border:2px solid rgba(55,226,213,.25);
+    border-top-color:#37e2d5;display:inline-block;animation:spin 1s linear infinite;vertical-align:-2px}
 </style>
 </head>
 <body>
@@ -342,10 +372,29 @@ button.ghost.on{border-color:rgba(55,226,213,.75);color:#9ff7ee;
     <span class="src" id="rxSrc">读取中…</span>
     <div class="tabs" id="rxTabs"></div>
     <span class="sp"></span>
+    <button class="ghost" id="rxRun" title="在后台重跑一次实验（会覆盖对应产物，先备份 summary.csv）">↻ 重跑</button>
+    <button class="ghost" id="rxExport" title="把图表 + 结论表 + 自动生成的结论摘要打成一个 zip">⤓ 导出素材包</button>
     <button class="ghost" id="rxReload" title="重新读取磁盘上的实验产物（不会重跑实验）">↻ 刷新</button>
     <button class="ghost" id="rxClose" title="关闭（Esc）">✕ 关闭</button>
   </div>
   <div class="body" id="rxBody"></div>
+</div>
+
+<!-- 一键重跑对话框 -->
+<div id="runDlg">
+  <div class="box">
+    <div class="hd">
+      <h3 id="runTitle">重跑实验</h3>
+      <span class="sp" style="flex:1"></span>
+      <span class="src" id="runState"></span>
+    </div>
+    <div class="bd" id="runBody"></div>
+    <div class="ft">
+      <button class="ghost" id="runStop" style="display:none">■ 终止</button>
+      <button class="ghost" id="runClose">关闭</button>
+      <button class="go" id="runGo">开始重跑</button>
+    </div>
+  </div>
 </div>
 
 <!-- 灯箱：点图放大 + 左右键切换 -->
@@ -3121,7 +3170,7 @@ document.getElementById("btnStop").onclick = () => fetch("/api/stop");
 /* ============================================================ 15.5 仿真结果界面 */
 /* 数据全部来自 GET /api/results（只读本地实验产物），图片走 /results_img/<相对路径> 懒加载。
    这个模块的纪律：
-     ① 数据可能**不存在**（没跑过 run.py all）—— 每个分区都要能给出可执行的提示，绝不空白报错；
+     ① 数据可能<b>不存在</b>（没跑过 run.py all）—— 每个分区都要能给出可执行的提示，绝不空白报错；
      ② 每张图必须标"生成时间"，因为 charts/ 里的图很可能来自另一次实验（旧图当新结论是这类
         项目最容易犯的错）；
      ③ 关闭对话框/遮罩立刻停止 canvas 动画，别在后台烧 CPU。 */
@@ -3185,6 +3234,7 @@ function renderRxTabs() {
     ["charts", "图表 " + nSec],
     ["table", "15 组矩阵"],
     ["replay", "时序回放"],
+    ["compare", "对比"],
     ["ci", "置信区间"],
   ];
   const box = _rx$("rxTabs");
@@ -3207,6 +3257,7 @@ function renderRxBody() {
   else if (RX.tab === "table") body.innerHTML = htmlTable(d.summary || {});
   else if (RX.tab === "ci") body.innerHTML = htmlCi(d.replication_ci || {});
   else if (RX.tab === "replay") { body.innerHTML = htmlReplay(d); initReplay(d); }
+  else if (RX.tab === "compare") { body.innerHTML = htmlCompare(d); initCompare(d); }
   // 卡片/缩略图的点击与排序绑定
   body.querySelectorAll("[data-img]").forEach((el) => {
     el.onclick = () => openLightbox(el.dataset.group, Number(el.dataset.idx));
@@ -3269,8 +3320,8 @@ function htmlLive(live) {
       '<p class="note">状态 <b>' + (live.status || "-") + '</b> · 工况 ' +
       (live.scenario || "-") + ' · 策略 ' + (live.scheduler || "-") +
       ' · 拓扑 ' + (live.stations || "单站") + (live.mec ? " + MEC" : "") +
-      '。这一组是**刚跑的这一轮（内存态，不落盘）**，与下面"图表/矩阵"里的磁盘产物不是同一批数据。' +
-      (live.status === "running" ? '<br>⚠️ 还在跑：除"进度/队列/提交"外的指标要**跑完才结算**，此刻显示 "-" 是正常的。' : "") +
+      '。这一组是<b>刚跑的这一轮（内存态，不落盘）</b>，与下面"图表/矩阵"里的磁盘产物不是同一批数据。' +
+      (live.status === "running" ? '<br>⚠️ 还在跑：除"进度/队列/提交"外的指标要<b>跑完才结算</b>，此刻显示 "-" 是正常的。' : "") +
       '</p>' +
       (prog ? '<p class="note" style="margin-bottom:10px">' + prog + '</p>' : "") +
       '<div class="kpis">' + kpis.map(([k, v]) =>
@@ -3307,9 +3358,9 @@ function htmlLive(live) {
   }
   return '<div class="sec"><h3>本次运行 <em>还没有运行过</em></h3>' +
     '<div class="empty">' +
-    '这里显示的是**刚点「▶ 开始仿真」跑的那一轮**（内存态）。现在还没有数据。<br>' +
+    '这里显示的是<b>刚点「▶ 开始仿真」跑的那一轮</b>（内存态）。现在还没有数据。<br>' +
     '① 关掉本页 → 点「▶ 开始仿真」→ 跑一会儿 → 再点「📊 仿真结果」；<br>' +
-    '② 想看**正式的 15 组矩阵**，请到「15 组矩阵」页签（数据来自 <code>results/summary.csv</code>）；<br>' +
+    '② 想看<b>正式的 15 组矩阵</b>，请到「15 组矩阵」页签（数据来自 <code>results/summary.csv</code>）；<br>' +
     '③ 若磁盘上还没有任何产物，先在项目根跑一次 <code>python run.py all --no-db</code>。' +
     '</div></div>';
 }
@@ -3339,7 +3390,7 @@ function htmlCharts(sections) {
     group += 1;
   });
   html += '<p class="tip">点击任意图片放大（灯箱里可用 ← → 切换、Esc 关闭）。' +
-    '卡片底部的**时间是文件生成时间** —— 若比 summary.csv 还新/更旧，说明它不是同一批实验产出的，' +
+    '卡片底部的<b>时间是文件生成时间</b> —— 若比 summary.csv 还新/更旧，说明它不是同一批实验产出的，' +
     '引用前请核对。</p>';
   RX.imgGroups = list.map((s) => s.images.map((im) => ({ ...im, src: "/results_img/" +
     im.rel.split("/").map(encodeURIComponent).join("/") })));
@@ -3389,7 +3440,7 @@ function htmlTable(sum) {
   });
   html += '</tbody></table>' +
     '<p class="tip">⚠️ 单次实跑的整跑指标存在 wall-clock 抖动（完整率 0.2~0.5 pp 量级），' +
-    '结论看**方向与量级**，不要把小数位当精确值（docs/11 §7）。' +
+    '结论看<b>方向与量级</b>，不要把小数位当精确值（docs/11 §7）。' +
     '导出：在本页按 Ctrl+P 打印为 PDF，或直接用 Excel 打开 summary.csv。</p></div>';
   return html;
 }
@@ -3406,7 +3457,7 @@ function htmlReplay(d) {
     '<option value="' + i + '">' + (it.scenario || "?") + " · " + (it.scheduler || "?") +
     " · " + _fmtTs(it.mtime) + '</option>').join("");
   return '<div class="sec"><h3>时序回放 <em>数据源 results/raw/*.json（不需要重跑）</em></h3>' +
-    '<p class="note">选一份明细，拖着滑块或点「播放」看这一轮**两级就绪队列 / 系统负载 / 在制线程**' +
+    '<p class="note">选一份明细，拖着滑块或点「播放」看这一轮<b>两级就绪队列 / 系统负载 / 在制线程</b>' +
     '怎么随时间变化 —— 静态图 06 只画了两条曲线，这里是整段过程。</p>' +
     '<div class="replay"><label style="font-size:11.5px;color:var(--dim)">明细</label>' +
     '<select id="rpSel">' + opts + '</select>' +
@@ -3541,7 +3592,166 @@ function drawReplay() {
     " · 低优 " + d0.low + " · 在制 " + d0.running + " · 阻塞 " + d0.blocked;
 }
 
-/* ------------------------------ ⑤ 置信区间 ------------------------------ */
+/* ------------------------------ ⑤ 对比 ------------------------------ */
+/* 选两份 raw/*.json（比如"改造前 vs 改造后"、或 dynamic vs cross_node），
+   并排看指标差异 + 两条队列曲线叠加。数据全在磁盘上，不重跑。 */
+const CMP_METRICS = [
+  ["throughput", "吞吐（个/s）", 2, true],
+  ["completion_rate", "完整率 %", 2, true],
+  ["avg_wait_high_ms", "高优等待 ms", 0, false],
+  ["avg_wait_low_ms", "低优等待 ms", 0, false],
+  ["p95_wait_high_ms", "P95 高优 ms", 0, false],
+  ["starvation_rate_low", "低优饥饿 %", 2, false],
+  ["resource_utilization", "资源利用率 %", 1, true],
+  ["retry_rate", "重传率 %", 2, false],
+  ["station_load_imbalance", "站间不均衡", 3, false],
+  ["migration_count", "迁移次数", 0, false],
+  ["edge_offload_ratio", "边缘分流 %", 1, true],
+  ["avg_e2e_ms", "端到端 ms", 1, false],
+];
+function htmlCompare(d) {
+  const items = (d.raw && d.raw.items) || [];
+  if (items.length < 2) {
+    return '<div class="empty">对比需要至少两份 <code>results/raw/*.json</code>。<br>' +
+      '先跑一次 <code>python run.py all --no-db</code>（每个策略一份明细），再来对比。</div>';
+  }
+  const opt = (sel) => items.map((it, i) =>
+    '<option value="' + i + '"' + (i === sel ? " selected" : "") + '>' +
+    (it.scenario || "?") + " · " + (it.scheduler || "?") + " · " + _fmtTs(it.mtime) + '</option>').join("");
+  // 默认选"最新两份"，通常就是同一批里的两个策略，最常被拿来比
+  return '<div class="sec"><h3>两份明细对比 <em>数据源 results/raw/*.json</em></h3>' +
+    '<p class="note">选两份明细：左边当基线、右边当对照。指标差异按"对照 − 基线"算，' +
+    '并按指标方向标注变好/变差（绿=更好、红=更差，灰=中性）。曲线区叠加两组的<b>高优/低优队列</b>。</p>' +
+    '<div class="replay"><label style="font-size:11.5px;color:var(--dim)">基线 A</label>' +
+    '<select id="cmpA">' + opt(1) + '</select>' +
+    '<label style="font-size:11.5px;color:var(--dim)">对照 B</label>' +
+    '<select id="cmpB">' + opt(0) + '</select>' +
+    '<button class="ghost" id="cmpSwap">⇄ 交换</button></div>' +
+    '<div id="cmpBody"><div class="empty">读取中…</div></div>' +
+    '<canvas class="rp" id="cmpCanvas" style="height:230px;margin-top:10px"></canvas>' +
+    '<p class="tip" id="cmpTip">—</p></div>';
+}
+
+function initCompare(d) {
+  const items = (d.raw && d.raw.items) || [];
+  const a = _rx$("cmpA"), b = _rx$("cmpB");
+  if (!a || !b) return;
+  const run = async () => {
+    const ia = items[Number(a.value)], ib = items[Number(b.value)];
+    if (!ia || !ib) return;
+    _rx$("cmpBody").innerHTML = '<div class="empty">读取中…</div>';
+    const get = async (it) => (await (await fetch(
+      "/api/raw_series?name=" + encodeURIComponent(it.name), { cache: "no-store" })).json());
+    const [ja, jb] = await Promise.all([get(ia), get(ib)]);
+    if (!ja || !ja.ok || !jb || !jb.ok) {
+      _rx$("cmpBody").innerHTML = '<div class="empty">读取失败：' +
+        ((ja && ja.msg) || "") + " " + ((jb && jb.msg) || "") + '</div>';
+      return;
+    }
+    RX.cmp = { a: ja, b: jb };
+    _rx$("cmpBody").innerHTML = cmpTableHtml(ja, jb);
+    drawCompare();
+  };
+  a.onchange = run;
+  b.onchange = run;
+  const sw = _rx$("cmpSwap");
+  if (sw) sw.onclick = () => { const t = a.value; a.value = b.value; b.value = t; run(); };
+  run();
+}
+
+function cmpTableHtml(ja, jb) {
+  const ma = ja.metrics || {}, mb = jb.metrics || {};
+  const head = '<table><thead><tr><th class="l">指标</th><th class="l">基线 A</th>' +
+    '<th class="l">对照 B</th><th class="l">差值（B−A）</th><th class="l">相对</th>' +
+    '<th class="l">判定</th></tr></thead><tbody>';
+  let rows = "";
+  CMP_METRICS.forEach(([k, label, nd, higherBetter]) => {
+    const va = Number(ma[k]), vb = Number(mb[k]);
+    if (!isFinite(va) && !isFinite(vb)) return;
+    const A = isFinite(va) ? va : 0, B = isFinite(vb) ? vb : 0;
+    const diff = B - A;
+    const rel = A !== 0 ? (diff / Math.abs(A) * 100) : null;
+    let judge = "—", color = "var(--dim)";
+    if (Math.abs(diff) > 1e-9) {
+      const better = higherBetter ? diff > 0 : diff < 0;
+      judge = better ? "变好" : "变差";
+      color = better ? "#3ddc97" : "#ff6b6b";
+    }
+    rows += '<tr><td class="l">' + label + '</td>' +
+      '<td class="l">' + A.toFixed(nd) + '</td>' +
+      '<td class="l">' + B.toFixed(nd) + '</td>' +
+      '<td class="l" style="color:' + color + '">' + (diff > 0 ? "+" : "") + diff.toFixed(nd) + '</td>' +
+      '<td class="l">' + (rel === null ? "—" : (rel > 0 ? "+" : "") + rel.toFixed(1) + "%") + '</td>' +
+      '<td class="l" style="color:' + color + '">' + judge + '</td></tr>';
+  });
+  const title = (j) => j.scenario + " × " + j.scheduler + "（seed " + j.seed + "）";
+  return '<p class="note">基线 A = <b>' + title(ja) + '</b>；对照 B = <b>' + title(jb) + '</b>' +
+    '。⚠️ 若两份明细的 seed 不同，"差值"里混着随机性，不能当因果结论。</p>' +
+    head + rows + '</tbody></table>';
+}
+
+function drawCompare() {
+  const cv = _rx$("cmpCanvas");
+  if (!cv || !RX.cmp) return;
+  const { a, b } = RX.cmp;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const W = cv.clientWidth || 800, H = cv.clientHeight || 230;
+  if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) {
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  }
+  const g = cv.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, W, H);
+  g.fillStyle = "#080f19"; g.fillRect(0, 0, W, H);
+  const pad = { l: 44, r: 14, t: 12, b: 22 };
+  const iw = W - pad.l - pad.r, ih = H - pad.t - pad.b;
+  const all = [...(a.series || []), ...(b.series || [])];
+  const maxQ = Math.max(1, ...all.map((d) => Math.max(d.high, d.low)));
+  const n = Math.max((a.series || []).length, (b.series || []).length, 2);
+  g.strokeStyle = "rgba(78,161,255,.14)";
+  for (let i = 0; i <= 4; i++) {
+    const y = pad.t + ih * i / 4;
+    g.beginPath(); g.moveTo(pad.l, y); g.lineTo(pad.l + iw, y); g.stroke();
+  }
+  const X = (i, len) => pad.l + iw * (i / Math.max(1, len - 1));
+  const Y = (v) => pad.t + ih * (1 - v / maxQ);
+  const draw = (ser, color, dash) => {
+    [["high", 1.9], ["low", 1.3]].forEach(([key, w]) => {
+      g.beginPath(); g.strokeStyle = color; g.lineWidth = w;
+      g.setLineDash(key === "low" ? [4, 3] : []);
+      (ser || []).forEach((d, i) => {
+        const x = X(i, ser.length), y = Y(d[key]);
+        if (i) g.lineTo(x, y); else g.moveTo(x, y);
+      });
+      g.stroke();
+    });
+    g.setLineDash([]);
+  };
+  draw(a.series, "#4ea1ff");
+  draw(b.series, "#ff9f43");
+  g.fillStyle = "#7d90aa"; g.font = "10px ui-monospace,Consolas,monospace";
+  g.fillText("队列 " + maxQ, 4, pad.t + 9);
+  g.fillText("0", 30, pad.t + ih - 2);
+  g.fillText("t=0", pad.l, H - 5);
+  g.textAlign = "right";
+  g.fillText("t=" + Math.max(a.duration_s || 0, b.duration_s || 0).toFixed(0) + "s", W - 6, H - 5);
+  g.textAlign = "left";
+  const lg = [["A 高优", "#4ea1ff"], ["A 低优(虚)", "#4ea1ff"], ["B 高优", "#ff9f43"], ["B 低优(虚)", "#ff9f43"]];
+  let lx = pad.l + 8;
+  lg.forEach(([t, c], i) => {
+    g.fillStyle = c; g.fillRect(lx, pad.t + 2, 9, 3);
+    g.fillStyle = "#c9d8ea"; g.fillText(t, lx + 12, pad.t + 7);
+    lx += 12 + g.measureText(t).width + (i === 1 ? 16 : 12);
+  });
+  const tip = _rx$("cmpTip");
+  if (tip) {
+    tip.textContent = `A：${a.scenario} × ${a.scheduler}（${(a.series || []).length} 点） · ` +
+      `B：${b.scenario} × ${b.scheduler}（${(b.series || []).length} 点） · ` +
+      "实线=高优队列，虚线=低优队列";
+  }
+}
+
+/* ------------------------------ ⑥ 置信区间 ------------------------------ */
 function htmlCi(ci) {
   if (!ci || !ci.exists || !(ci.rows || []).length) {
     return '<div class="empty">还没有重复实验产物。<br>先执行：' +
@@ -3608,6 +3818,140 @@ function stepLightbox(d) {
 }
 function closeLightbox() { _rx$("lb").classList.remove("show"); }
 
+/* ------------------------------ 重跑实验 / 导出素材包 ------------------------------ */
+/* 一键重跑：先在对话框里选"跑哪个"、把"会覆盖什么"写清楚，点确认才真的跑；
+   跑起来后每秒轮询 /api/run_status，把子进程输出实时贴出来（跑完自动刷新结果界面）。
+   导出：fetch 成 blob 再触发下载 —— 比 window.location 好，因为不会把当前页面导航走。 */
+const RUN_KINDS = [
+  ["all", "全量 15 组矩阵 + 伴生探针", "约 100~130 s · 会覆盖 results/summary.csv（服务端先备份为 summary.prev.csv）"],
+  ["stations", "多站 × 6 策略 × 3 工况 = 18 组", "约 120~150 s · 独立目录 results/stations/，不动 15 组"],
+  ["mec", "MEC 端-边-云对照 12 组", "约 110~140 s · 独立目录 results/mec/"],
+  ["replicate", "重复实验（均值 ± 95% CI）", "约 150~200 s · 3 变体 × PEAK × 2 策略 × reps 次"],
+];
+function openRunDialog() {
+  const dlg = _rx$("runDlg");
+  if (!dlg) return;
+  const body = _rx$("runBody");
+  body.innerHTML = '<p class="note">选择要重跑的实验。<b>所有实验都在后台子进程里跑</b>，' +
+    '面板与 3D 场景不受影响；跑完会自动刷新结果界面。</p>' +
+    RUN_KINDS.map(([k, label, note], i) =>
+      '<label class="opt' + (i === 0 ? " on" : "") + '" data-kind="' + k + '">' +
+      '<input type="radio" name="rk" value="' + k + '"' + (i === 0 ? " checked" : "") + '>' +
+      '<span><b>' + label + '</b><small>' + note + '</small></span></label>').join("") +
+    '<div class="warn">⚠️ 重跑会<b>覆盖</b>对应产物文件。`all` 会重写 15 组结果（旧表自动备份为 ' +
+    '<code>summary.prev.csv</code>），跑出来的数字与上一次会有正常的 wall-clock 抖动 —— ' +
+    '不要拿两次的差异当算法改进。</div>' +
+    '<label style="font-size:12px;color:var(--dim)">重复实验的 reps（仅 replicate 用）：' +
+    '<input id="runReps" type="number" min="1" max="50" value="3" ' +
+    'style="width:70px;background:#0d1a28;color:#dbe8f7;border:1px solid var(--line);' +
+    'border-radius:6px;padding:3px 6px"></label>' +
+    '<pre id="runLog" style="display:none"></pre>';
+  body.querySelectorAll(".opt").forEach((el) => {
+    el.onclick = () => {
+      body.querySelectorAll(".opt").forEach((x) => x.classList.remove("on"));
+      el.classList.add("on");
+      el.querySelector("input").checked = true;
+    };
+  });
+  _rx$("runState").textContent = "";
+  _rx$("runGo").style.display = "";
+  _rx$("runStop").style.display = "none";
+  dlg.classList.add("show");
+}
+function closeRunDialog() {
+  const dlg = _rx$("runDlg");
+  if (dlg) dlg.classList.remove("show");
+  stopRunPoll();
+}
+let _runTimer = 0;
+function stopRunPoll() {
+  if (_runTimer) { clearTimeout(_runTimer); _runTimer = 0; }
+}
+async function startRun() {
+  const body = _rx$("runBody");
+  const kind = (body.querySelector('input[name="rk"]:checked') || {}).value || "all";
+  const reps = Number((_rx$("runReps") || {}).value || 0);
+  const log = _rx$("runLog");
+  log.style.display = "";
+  log.textContent = "提交中…";
+  _rx$("runGo").style.display = "none";
+  _rx$("runStop").style.display = "";
+  _rx$("runState").innerHTML = '<span class="spin"></span> 启动中…';
+  try {
+    const j = await (await fetch("/api/run_experiment?kind=" + encodeURIComponent(kind) +
+      "&reps=" + (isFinite(reps) ? reps : 0), { cache: "no-store" })).json();
+    if (!j || j.ok === false) {
+      log.textContent = "启动失败：" + ((j && j.msg) || "未知错误");
+      _rx$("runGo").style.display = "";
+      _rx$("runState").textContent = "";
+      return;
+    }
+    log.textContent = "已启动：" + (j.label || kind) + "（预计 " + (j.eta_s || "?") + " s）\n" +
+      "会覆盖：" + (j.overwrites || "-") + (j.backup ? "\n旧表已备份到：" + j.backup : "") + "\n\n";
+    pollRun();
+  } catch (e) {
+    log.textContent = "启动失败：" + (e && e.message ? e.message : e);
+    _rx$("runGo").style.display = "";
+  }
+}
+async function pollRun() {
+  stopRunPoll();
+  try {
+    const j = await (await fetch("/api/run_status", { cache: "no-store" })).json();
+    const job = j && j.job;
+    const log = _rx$("runLog");
+    if (!job) { _runTimer = setTimeout(pollRun, 1200); return; }
+    if (log) {
+      log.textContent = job.lines.join("\n");
+      log.scrollTop = log.scrollHeight;
+    }
+    const st = _rx$("runState");
+    if (job.running) {
+      if (st) st.innerHTML = '<span class="spin"></span> 运行中…（已 ' +
+        job.total_lines + " 行输出）";
+      _runTimer = setTimeout(pollRun, 1200);
+    } else {
+      if (st) st.textContent = (job.status === "done" ? "✓ 完成" : "✗ 失败（退出码 " +
+        job.returncode + "）") + " · " + (job.finished_at || "");
+      _rx$("runStop").style.display = "none";
+      _rx$("runGo").style.display = "";
+      _rx$("runGo").textContent = "再跑一次";
+      // 跑完自动刷新结果界面（图/矩阵/回放全都变了）
+      loadResults(true);
+    }
+  } catch (e) {
+    _runTimer = setTimeout(pollRun, 2000);
+  }
+}
+async function exportBundle() {
+  const btn = _rx$("rxExport");
+  const old = btn ? btn.textContent : "";
+  if (btn) { btn.disabled = true; btn.textContent = "打包中…"; }
+  try {
+    // scope=charts：核心图 + 三张结论表 + 自动生成的结论摘要（约 2~4 MB，适合发人）
+    const r = await fetch("/api/export_bundle?scope=charts", { cache: "no-store" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const blob = await r.blob();
+    const cd = r.headers.get("Content-Disposition") || "";
+    let name = "仿真报告素材包.zip";
+    const m = /filename\*=UTF-8''([^;]+)/.exec(cd);
+    if (m) { try { name = decodeURIComponent(m[1]); } catch (e) { /* 忽略 */ } }
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 4000);
+    if (btn) btn.textContent = "✓ 已导出 " + (blob.size / 1048576).toFixed(1) + " MB";
+    setTimeout(() => { if (btn) btn.textContent = old; }, 4000);
+  } catch (e) {
+    if (btn) btn.textContent = "导出失败";
+    setTimeout(() => { if (btn) btn.textContent = old; }, 4000);
+    console.warn("[export] 失败：", e);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 /* 绑定 */
 (function bindResults() {
   const btn = _rx$("btnResults");
@@ -3616,6 +3960,18 @@ function closeLightbox() { _rx$("lb").classList.remove("show"); }
   if (close) close.onclick = () => closeResults();
   const reload = _rx$("rxReload");
   if (reload) reload.onclick = () => loadResults(true);
+  const runBtn = _rx$("rxRun");
+  if (runBtn) runBtn.onclick = () => openRunDialog();
+  const runGo = _rx$("runGo");
+  if (runGo) runGo.onclick = () => startRun();
+  const runClose = _rx$("runClose");
+  if (runClose) runClose.onclick = () => closeRunDialog();
+  const runStop = _rx$("runStop");
+  if (runStop) runStop.onclick = async () => {
+    try { await fetch("/api/stop_experiment", { cache: "no-store" }); } catch (e) { /* 忽略 */ }
+  };
+  const exp = _rx$("rxExport");
+  if (exp) exp.onclick = () => exportBundle();
   const lbClose = _rx$("lbClose");
   if (lbClose) lbClose.onclick = () => closeLightbox();
   const prev = _rx$("lbPrev"), next = _rx$("lbNext");
