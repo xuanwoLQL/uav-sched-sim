@@ -54,6 +54,7 @@
 | 2 | 静态优先级 | 高优绝对优先 | 不抢占 | 指数退避 |
 | 3 | 动态权重 | 饥饿硬补偿通路 + 四因子权重比较 | 自适应（拥堵时收缩） | **链路感知：弱网走本地缓存** |
 | 4 | MLFQ | aging 升权通路 + 分层 | level0 短 / level1 长（固定） | 指数退避 |
+| 5 | cross_node | 站内同动态权重；站间「接入哈希 + 最少连接 + 带代价迁移」（多站路径，见第 9 节） | 同动态权重（自适应） | 链路感知（同动态权重） |
 
 指数退避 = `retry_backoff_base_s × 2^min(retry-1, 3)`，与 `simulator.py` 一致。
 
@@ -78,6 +79,9 @@
 # 只构建内核
 .\gpu\build.ps1              # 已是最新会跳过
 .\gpu\build.ps1 -Rebuild     # 强制重建
+
+# 多站 + MEC（第 6 种策略 cross_node；默认 --stations 1 时行为与旧版一致）
+& ".\.venv\Scripts\python.exe" gpu\run_gpu.py --stations 3 --mec --reps 300
 ```
 
 ### 三个后端（`--backend auto|cuda|python`）
@@ -234,6 +238,11 @@ RTX 3050 Laptop（4 GB 显存，16 个 SM）：
 3. **`.ps1` 必须存成 UTF-8 with BOM**，否则 PowerShell 5.1 按 ANSI 读中文会直接语法报错。
    另外 nvcc 把 CUDA 头文件的代码页警告打到 stderr，配合
    `$ErrorActionPreference = 'Stop'` 会被当成致命错误 —— 需要临时放宽再自行判退出码。
+4. **源码里的中文字符不能紧贴字符串的 `"` 或 `\n`**（做多站章节时新踩到的）。
+   `-Xcompiler=/utf-8` 只修 host 编译器（cl.exe），**nvcc 自己的前端仍按系统代码页切词**：
+   `次\n"` 会把转义原样输出成字面量 `\n`，`次"` 直接报 `missing closing quote`。
+   规则很简单：**每个含中文的字面量都以 ASCII 字符收尾**（`…=%7.1f\n"` 这种），
+   换行必要时拆成独立的 `printf("\n")`。第 9 节的两处 console 输出就是这么改的。
 
 ## 8. 后续可做
 
@@ -243,3 +252,152 @@ RTX 3050 Laptop（4 GB 显存，16 个 SM）：
 3. 让权重真正参与决策（见第 5 节结论 4），然后重跑扫描看 α/β/γ/δ 是否变得敏感；
 4. 把扫描从「24 组」扩到全因子（含 `starvation_ms`、`starve_boost_cap`），
    用 GPU 做一遍真正的多维敏感性分析。
+
+## 9. 多站 + MEC（第 6 种策略 `cross_node`）
+
+第 1~8 节是**单站 5 策略**的分析模型。本节把它扩到「多站 + cross_node + MEC」，
+与参考实现（`src/uav_sim/station.py` / `mec.py`、`docs/11`）保持**同规则、不同实现**。
+
+### 9.1 怎么跑
+
+```powershell
+# 三站（1×CENTER + 2×EDGE）+ MEC，300 次重复：两条后端各跑一遍（对拍用）
+& ".\.venv\Scripts\python.exe" gpu\run_gpu.py --backend cuda   --stations 3 --mec --reps 300 --out-dir results\gpu\multi_cuda
+& ".\.venv\Scripts\python.exe" gpu\run_gpu.py --backend python --stations 3 --mec --reps 300 --out-dir results\gpu\multi_py
+
+# 多站但关闭 MEC（对照档：单看「接入亲和」与「跨节点均衡」的效果）
+& ".\.venv\Scripts\python.exe" gpu\run_gpu.py --backend cuda --stations 3 --reps 300 --out-dir results\gpu\multi_nomec_cuda
+
+# 纯中心（单站 + MEC 记账开启）：端到端时延的基线档
+& ".\.venv\Scripts\python.exe" gpu\run_gpu.py --backend cuda --stations 1 --mec --reps 300 --out-dir results\gpu\purecenter_cuda
+```
+
+新增开关（都有默认值，默认 = 单站 + MEC 关闭）：
+
+| 开关 | 含义 | 默认 |
+|---|---|---|
+| `--stations N` | 站点数（>1 走多站路径，并追加 `cross_node` 策略） | `1` |
+| `--mec` | 开启 MEC 分流（轻量下沉 EDGE / 重勘查回 CENTER） | 关 |
+| `--station-workers K` | 每站槽位数（默认按**总容量守恒** = `workers // stations`） | 自动 |
+| `--edge-mbps K` / `--backhaul-mbps K` | 边缘算力 / 回传带宽 | `120` / `60` |
+
+**向后兼容**：`--stations 1`（默认）时内核仍走原来的 `replication_kernel`、只跑 5 个策略；
+`--reps / --out / --coeffs / --sweep / --starve-ms` 与位置参数语义不变，
+新指标列**一律追加在 CSV 尾部**（单站路径恒为 0）。
+
+### 9.2 新增的指标键（只在尾部追加）
+
+| 指标键 | 含义 | 口径 |
+|---|---|---|
+| `station_imb` | 站间负载不均衡度 | 各站负载（已消耗 + 队列剩余服务秒，按每槽位折算）的**变异系数** σ/均值；单站恒为 0 |
+| `e2e_ms` | 端到端平均时延 | 接入 + 计算（按站算力）+ 回传（边缘任务按 `SYNC_RATIO` 回传中心）；**派发时记账、每任务只计一次**、不含排队 |
+| `edge_offload_pct` | 边缘分流比例 | 派发任务里落在 EDGE 站的占比（度量恒开，与 MEC 策略解耦） |
+| `migrations` | 任务迁移次数 | cross_node 的站间迁移次数（其它策略恒为 0） |
+| `migration_cost_ms` | 迁移平均代价 | 每次迁移 = 在途 `120 ms` + 剩余服务 ×`0.15` 折算的毫秒 |
+
+模型常量（与 `des_model.py` 顶部、`.cu` 顶部一一对应，非参数）：
+`data_mb = 服务时长(s) × 120`（数据量代理）、中心算力 `400 Mbps`、`SYNC_RATIO = 0.15`、
+中心接入 = 边缘接入 + `28 ms`、迁出水位 `1.25×` 全局平均、单轮单站最多迁 `8` 个、每任务最多迁 `2` 次。
+取「120」的用意：**边缘算力 120 Mbps 时，"站内计算时延"恰好等于任务服务时长**，
+于是不需要额外的任务大小分布，也能与 `docs/11` §4.3 的公式对齐 —— 代进分水岭闭式解
+`d* = (46−18)/(1/120 + 0.15/60 − 1/400)/1000` 正好是 docs 的 **3.36 MB**。
+
+### 9.3 两条后端对拍（各 300 次重复，同 rep = 同随机流）
+
+关键指标偏差（Python × CUDA，单位见上表）：
+
+| 配置 | 策略 | 吞吐 | 完整率% | 端到端ms | 边缘分流% | 站间不均衡 | 迁移次数 |
+|---|---|---|---|---|---|---|---|
+| 3 站 + MEC | dynamic | 30.157 / 30.170（+0.04%） | 96.340 / 96.328（−0.01%） | 52.495 / 52.473（−0.04%） | 99.068 / 99.069 | 1.324 / 1.325 | 0 |
+| 3 站 + MEC | cross_node | 30.191 / 30.186（−0.02%） | 96.323 / 96.338（+0.02%） | 51.863 / 52.068（+0.40%） | 99.058 / 99.054 | 1.324 / 1.324 | **71.440 / 71.440（0.00%）** |
+| 3 站（无 MEC） | dynamic | 26.125 / 26.118（−0.03%） | 83.543 / 83.513（−0.04%） | 223.889 / 223.885（−0.00%） | 63.593 / 63.500 | 0.224 / 0.217（−3.1%） | 0 |
+| 3 站（无 MEC） | cross_node | 25.775 / 25.753（−0.09%） | 82.282 / 82.292（+0.01%） | 225.256 / 225.509（+0.11%） | 65.784 / 65.973 | 0.174 / 0.172（−1.0%） | 649.747 / 646.490（−0.50%） |
+
+（格式：Python / CUDA（相对偏差）。跨节点迁移代价：MEC 档 121.527 / 121.527 ms、
+无 MEC 档 145.592 / 145.215 ms。）
+
+**结论**：多站 / MEC 路径的偏差全面落在 **±0.5%** 以内（个别噪声型指标如 `mlfq` 的
+`station_imb` 到 +4.3%，绝对值只有 0.193 vs 0.201）；迁移次数在 MEC 档**逐位相同**。
+这是「两条独立实现没有写错」的证据。
+
+单站路径的回归更硬：用**改多站之前**的 `results/gpu/gpu_per_replication.csv` 逐行比对新内核，
+**100 行 × 13 列全部逐位相同、0 处不一致**；新列（`station_imb` / `e2e_ms` / …）在单站路径恒为 0。
+`tests/test_des_multistation.py` 里还固定了 25 组（5 rep × 5 策略）Python 侧基线常量，用 `==` 比较。
+
+### 9.4 三档趋势（CUDA，300 次重复）
+
+| 档位 | 策略 | 端到端ms | 边缘分流% | 站间不均衡 | 完整率% | 吞吐 | 迁移次数 |
+|---|---|---|---|---|---|---|---|
+| 纯中心（1 站 + 记账） | dynamic | **120.3** | 0.00 | 0.000 | 89.96 | 28.13 | 0 |
+| 多站无 MEC（3 站） | dynamic | 223.9 | 63.50 | 0.217 | 83.51 | 26.12 | 0 |
+| **端-边-云（3 站 + MEC）** | dynamic | **52.5（−56.3%）** | 99.07 | 1.325 | 96.33 | 30.17 | 0 |
+| 多站无 MEC（3 站） | cross_node | 225.5 | 65.97 | **0.172** | 82.29 | 25.75 | 646.5 |
+| 端-边-云（3 站 + MEC） | cross_node | 52.1 | 99.05 | 1.324 | 96.34 | 30.19 | 71.4 |
+
+可以写进报告的四条：
+
+1. **端到端时延：纯中心 120.3 ms → 端-边-云 52.5 ms（−56.3 %）**，方向与 `docs/11` §4.4.1
+   （122.71 → 106.38，−13.3 %）一致；绝对值差异见下面的诚实边界。
+2. **加站 + 跨节点均衡确实压下站间不均衡**：同一 3 站拓扑、关闭 MEC 时
+   `dynamic` 0.217 → `cross_node` **0.172**（约 −21 %）；`cross_node` 触发 646.5 次迁移/次仿真，
+   平均代价 145 ms。**均衡不是免费的**：完整率 83.51 % → 82.29 %（−1.2 pp）、
+   吞吐 26.12 → 25.75、低优等待 6341 → 6490 ms（+2.3 %）。两条必须一起写。
+3. **MEC 分层会"压制"站间均衡**：端-边-云档不均衡度反而升到 1.325 —— 这不是 cross_node 失效，
+   而是**角色硬约束把重勘查任务全部钉在 CENTER**（2 个槽位要扛 75×7.5 s），
+   结构性不均是设计的结果。与 `docs/11` §4.4.2 同一条结论（1.401 → 1.399 未降）。
+4. **`cross_node` 不能替掉站内动态权重**：它的站内规则复用 `dynamic`，与 `docs/11` §3.3 一致。
+
+> 口径提醒（照抄 `docs/11` §4.3.1 的精神）：`edge_offload_pct ≈ 99 %` **不是成绩**。
+> PEAK 工况里轻量运维任务本来就占 98.8 %，MEC 又把轻量任务全部下沉，
+> 于是分流比接近 100 % 是**任务配比的算术后果**；而"关闭 MEC 时的 63.5 %"是**接入亲和**
+> （哈希落点本来就有 2/3 落在边缘站），不是 MEC 卸载。别拿这一列当结论。
+
+### 9.5 诚实边界（分析模型 ≠ 逐位复刻参考实现）
+
+1. 本节所有数字来自**同一套规则的两份实现**（Python / CUDA），不是参考仿真器的复刻；
+   一致性口径沿用第 6 节（`+42.9 %` 那类已知差异同样存在于多站路径）。
+2. **未移植**：离线标定轨迹 `WorkloadTrace`、任务分片（拒绝/切片）、单机配额、天气扰动、
+   节点宕机/网络分区/脑裂等混沌注入。多站只做「选站 + 迁移代价」与 MEC 分流。
+3. **MEC 是"任务类别代理"，不是真实数据量**：参考实现里 LIGHT/HEAVY 由任务类型
+   （GPS/HEARTBEAT… vs IMAGERY/LIDAR…）决定、数据量来自任务大小分布；
+   分析模型用「低优/短服务 = 轻量、高优/长服务 = 重勘查」近似，数据量 = 服务时长 × 120。
+   分水岭公式与 `docs/11` 一致（3.36 MB），但**单个任务的时延绝对值不可与参考实现逐个对号**。
+4. **端到端时延不含排队**（与 `mec.py` 口径一致），只含接入 + 计算 + 回传。
+   由于重勘查任务在模型里的数据量代理很大（7.5 s × 120 = 900 MB），
+   "重勘查落在边缘站"的惩罚高达约 9.8 s —— 所以「多站无 MEC」档的 e2e（223.9 ms）
+   明显高于参考实现的 96.93 ms。**方向性结论（纯中心 → 端-边-云 下降）一致，绝对值不可比**。
+5. **均衡收益比参考实现小**：参考实现报"不均衡度下降一个数量级"（0.534 → 0.099），
+   本模型是 −21 %（0.217 → 0.172）。原因是分析模型用**总容量守恒**的均匀 2 槽位/站
+   （参考实现 triple 是 CENTER 6 + EDGE 3 + 3），且迁出水位 1.25 触发得更保守，
+   迁移开销（646 次 × 145 ms）在总服务量里占的比重更大。
+6. **迁移细节做了简化**：在途时间不计入 `wait_low_ms`（单列在 `migration_cost_ms`）；
+   "禁止迁回 home"落在**目标站**上（源站恰恰就是 home），另加"每任务最多迁 2 次"；
+   迁移只搬**排队中**的任务，不搬正在运行的任务。
+7. **规模上限**：站数 ≤ 8、每站槽位 ≤ 16（保护每线程本地内存），超限自动夹紧。
+8. **单站路径的 `e2e_ms` 恒为 0**（走的是原 `simulate_one`，没有站/接入维度）。
+   要看端到端时延请加 `--mec`（会走多站记账路径）。
+
+### 9.6 新增测试
+
+`tests/test_des_multistation.py`（9 个用例，实测约 3.8 s）：
+
+| 用例 | 断言（一句话） |
+|---|---|
+| `test_frozen_single_station_baseline` | 单站 25 组基线**逐位相等**（`==`，改多站前的实测值） |
+| `test_default_params_keep_single_station` | 默认参数 = 单站 + MEC 关闭；`METRIC_KEYS` / 模式表只追加 |
+| `test_single_station_multi_equals_simulate_one` | `stations=1` 的 multi 与 `simulate_one` 逐位一致、新指标为 0 |
+| `test_multi_metrics_in_range` | 新指标区间合法；单站不均衡度退化为 0 |
+| `test_more_stations_lower_imbalance_with_cross_node` | 3 站下 `cross_node` 的不均衡度 < `dynamic` × 0.95（且确有迁移） |
+| `test_cross_node_differs_from_fcfs` | 完整率差 > 5 pp；`fcfs` 不迁移、`cross_node` 迁移 |
+| `test_mec_offloads_light_tasks_and_shortens_e2e` | 边缘分流 > 50 %；端到端时延低于无 MEC 档 |
+| `test_e2e_calibration_matches_reference_docs` | 纯中心 e2e ∈ (100,140) ms（`docs/11` §4.4.1 实测 122.71 ms） |
+| `test_station_count_is_clamped` | 站数 / 每站槽位上限生效 |
+
+### 9.7 产物
+
+`results/gpu/multi_cuda/`、`results/gpu/multi_py/`（3 站 + MEC）、
+`results/gpu/multi_nomec_cuda/`、`results/gpu/multi_nomec_py/`（3 站无 MEC）、
+`results/gpu/purecenter_cuda/`、`results/gpu/purecenter_py/`（纯中心）、
+`results/gpu/single_cuda/`、`results/gpu/single_py/`（单站 5 策略基线）；
+每个目录都是 `gpu_per_replication.csv`（逐次，含新列）+ `gpu_replication_summary.csv`
+（均值 ± 95 % CI）+ `gpu_paired_dynamic_vs_priority.csv`。

@@ -31,6 +31,14 @@ _SRC = _ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+# 控制台代码页可能是 GBK（PowerShell 默认），表格里的 ✔ 会直接抛 UnicodeEncodeError。
+# 这里放宽为「无法编码的字符用 ? 代替」，不影响任何计算结果（与 tests/ 同一处理方式）。
+try:
+    sys.stdout.reconfigure(errors="replace")
+    sys.stderr.reconfigure(errors="replace")
+except Exception:  # pragma: no cover - 老解释器没有 reconfigure
+    pass
+
 from uav_sim import statistics as st  # noqa: E402
 
 EXE = _HERE / "replication_kernel.exe"
@@ -43,6 +51,7 @@ SCHED_LABELS = {
     "priority": "静态优先级",
     "dynamic": "动态权重自适应（本方案）",
     "mlfq": "多级反馈队列 MLFQ",
+    "cross_node": "跨节点负载均衡（多站）",
 }
 
 #: 逐次 CSV 里的指标列 -> (中文名, 单位, 越大越好)
@@ -59,7 +68,23 @@ GPU_METRICS: Dict[str, tuple] = {
     "cached": ("本地缓存次数", "次", False),
 }
 
+#: 多站 / MEC 才非零的指标列（**追加在 CSV 尾部**，旧的列顺序不动）
+MULTI_METRICS: Dict[str, tuple] = {
+    "station_imb": ("站间负载不均衡度", "σ/均值", False),
+    "e2e_ms": ("端到端平均时延", "ms", False),
+    "edge_offload_pct": ("边缘分流比例", "%", True),
+    "migrations": ("任务迁移次数", "次", False),
+    "migration_cost_ms": ("迁移平均代价", "ms", False),
+}
+
+#: 聚合/配对比较用的全量指标（读取时按表头取名，与列顺序无关）
+ALL_METRICS: Dict[str, tuple] = {**GPU_METRICS, **MULTI_METRICS}
+
 MAIN_METRICS = ("throughput", "wait_low_ms", "starvation_low_pct", "completion_pct")
+MULTI_MAIN_METRICS = ("station_imb", "e2e_ms", "edge_offload_pct", "migrations")
+#: 多站模式下要跑的策略：前 5 种 + cross_node（单站模式保持 5 种不变）
+MODES_SINGLE = ["fcfs", "rr", "priority", "dynamic", "mlfq"]
+MODES_MULTI = MODES_SINGLE + ["cross_node"]
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +138,17 @@ def run_cuda(args, out_csv: Path, coeff_path: Path | None = None) -> str:
         cmd.append("--sweep")
         if coeff_path is not None:
             cmd += ["--coeffs", str(coeff_path)]
+    else:
+        # 多站 / MEC：透传给内核（默认 --stations 1 -> 内核仍走原 replication_kernel 路径）
+        cmd += ["--stations", str(args.stations)]
+        if args.mec:
+            cmd.append("--mec")
+        if args.station_workers:
+            cmd += ["--station-workers", str(args.station_workers)]
+        if args.edge_mbps:
+            cmd += ["--edge-mbps", str(args.edge_mbps)]
+        if args.backhaul_mbps:
+            cmd += ["--backhaul-mbps", str(args.backhaul_mbps)]
     proc = subprocess.run(cmd, capture_output=True, text=True,
                           encoding="utf-8", errors="replace")
     out = (proc.stdout or "") + (proc.stderr or "")
@@ -126,12 +162,15 @@ def run_fallback(backend: str, args, out_csv: Path,
     """纯 Python 回退（调用 gpu/des_model.py 的同一套模型，多进程并行）。"""
     from des_model import run_study  # noqa: PLC0415
 
-    modes = ["fcfs", "rr", "priority", "dynamic", "mlfq"]
+    modes = MODES_MULTI if is_multi_run(args) else MODES_SINGLE
     coeffs = None
     if args.sweep:
         coeffs = read_coeff_file(coeff_path) if coeff_path else default_grid()
     t0 = time.perf_counter()
-    rows = run_study(reps=args.reps, modes=modes, coeffs=coeffs)
+    rows = run_study(reps=args.reps, modes=modes, coeffs=coeffs,
+                     stations=args.stations, mec=args.mec,
+                     station_workers=args.station_workers,
+                     edge_mbps=args.edge_mbps, backhaul_mbps=args.backhaul_mbps)
     wall = time.perf_counter() - t0
     write_rows(out_csv, rows)
     n = len(rows)
@@ -139,10 +178,16 @@ def run_fallback(backend: str, args, out_csv: Path,
             f"（{n / max(wall, 1e-9):.0f} 次/秒）\n")
 
 
+def is_multi_run(args) -> bool:
+    """本次是否走多站 / MEC 路径（与 .cu / des_model 的判据一致）。"""
+    return int(args.stations) > 1 or bool(args.mec)
+
+
 def write_rows(path: Path, rows: List[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     cols = ["scheduler", "coeff_index", "alpha", "beta", "gamma", "delta", "rep",
-            "starve_ms", *GPU_METRICS.keys(), "max_low_depth", "submitted", "done"]
+            "starve_ms", *GPU_METRICS.keys(), "max_low_depth", "submitted", "done",
+            *MULTI_METRICS.keys()]          # 新增列一律追加在尾部
     with path.open("w", newline="", encoding="utf-8") as fp:
         w = csv.DictWriter(fp, fieldnames=cols)
         w.writeheader()
@@ -201,9 +246,10 @@ def load_rows(csv_path: Path) -> Dict[str, Dict[str, List[float]]]:
     with csv_path.open("r", encoding="utf-8", newline="") as fp:
         for row in csv.DictReader(fp):
             sched = row["scheduler"]
-            bucket = data.setdefault(sched, {m: [] for m in GPU_METRICS})
-            for m in GPU_METRICS:
-                bucket[m].append(float(row[m]))
+            bucket = data.setdefault(sched, {m: [] for m in ALL_METRICS})
+            for m in ALL_METRICS:
+                raw = row.get(m)
+                bucket[m].append(float(raw) if raw not in (None, "") else 0.0)
     return data
 
 
@@ -240,13 +286,31 @@ def print_normal(data: Dict[str, Dict[str, List[float]]], reps: int) -> None:
     header = f"{'策略':<24}" + "".join(f"{GPU_METRICS[m][0][:8]:>18}" for m in MAIN_METRICS)
     print(header)
     print("-" * len(header))
-    for sched in ("fcfs", "rr", "priority", "mlfq", "dynamic"):
+    for sched in ("fcfs", "rr", "priority", "mlfq", "dynamic", "cross_node"):
         if sched not in data:
             continue
         line = f"{SCHED_LABELS.get(sched, sched):<24}"
         for m in MAIN_METRICS:
             agg = st.aggregate(m, data[sched][m])
             line += f"{agg.mean:>9.2f}±{agg.ci_half:<8.2f}"
+        print(line)
+
+
+def print_multi(data: Dict[str, Dict[str, List[float]]], reps: int) -> None:
+    """多站 / MEC 专属指标表（站间不均衡、端到端时延、边缘分流、迁移）。"""
+    print("\n" + "=" * 96)
+    print(f"  多站 / MEC 指标（n={reps}；站间负载不均衡度越小越好）")
+    print("=" * 96)
+    header = f"{'策略':<24}" + "".join(f"{MULTI_METRICS[m][0][:10]:>20}" for m in MULTI_MAIN_METRICS)
+    print(header)
+    print("-" * len(header))
+    for sched in ("fcfs", "rr", "priority", "mlfq", "dynamic", "cross_node"):
+        if sched not in data:
+            continue
+        line = f"{SCHED_LABELS.get(sched, sched):<24}"
+        for m in MULTI_MAIN_METRICS:
+            agg = st.aggregate(m, data[sched][m])
+            line += f"{agg.mean:>11.3f}±{agg.ci_half:<8.3f}"
         print(line)
 
 
@@ -259,7 +323,7 @@ def print_paired(data: Dict[str, Dict[str, List[float]]],
     print(f"{'指标':<18}{'基线':>13}{'目标':>13}{'差值 ± 95%':>24}{'显著':>6}{'更优':>6}")
     print("-" * 82)
     rows = []
-    for m, (label, unit, higher_better) in GPU_METRICS.items():
+    for m, (label, unit, higher_better) in ALL_METRICS.items():
         a, b = data[target][m], data[baseline][m]
         diff, half, sig = st.paired_ci95(a, b)
         better = (diff > 0) if higher_better else (diff < 0)
@@ -361,6 +425,14 @@ def main(argv: List[str] | None = None) -> int:
     ap.add_argument("--rebuild", action="store_true", help="强制重新构建 CUDA 内核")
     ap.add_argument("--compare", action="store_true", help="与参考模型对照")
     ap.add_argument("--out-dir", default=None, help="输出目录（默认 results/gpu）")
+    ap.add_argument("--stations", type=int, default=1,
+                    help="站点数（>1 走多站路径，并追加 cross_node 策略；默认 1=单站）")
+    ap.add_argument("--mec", action="store_true",
+                    help="开启 MEC 分流（轻量任务下沉 EDGE / 重勘查回 CENTER）")
+    ap.add_argument("--station-workers", type=int, default=None,
+                    help="每站槽位数（默认按「总容量守恒」= workers // stations）")
+    ap.add_argument("--edge-mbps", type=float, default=None, help="边缘算力 Mbps（默认 120）")
+    ap.add_argument("--backhaul-mbps", type=float, default=None, help="回传带宽 Mbps（默认 60）")
     args = ap.parse_args(argv)
 
     out_dir = Path(args.out_dir) if args.out_dir else (_ROOT / "results" / "gpu")
@@ -379,7 +451,11 @@ def main(argv: List[str] | None = None) -> int:
         print(f"[run] 参数扫描：{n_coeffs} 组系数 x {args.reps} 次 = {n_coeffs * args.reps} 次仿真")
     else:
         raw_csv = out_dir / "gpu_per_replication.csv"
-        print(f"[run] {args.reps} 次重复 x 5 策略 = {args.reps * 5} 次仿真")
+        if is_multi_run(args):
+            print(f"[run] 多站/MEC：{args.reps} 次重复 x 6 策略 = {args.reps * 6} 次仿真"
+                  f"（stations={args.stations}, mec={'on' if args.mec else 'off'}）")
+        else:
+            print(f"[run] {args.reps} 次重复 x 5 策略 = {args.reps * 5} 次仿真")
 
     if backend == "cuda":
         if args.rebuild:
@@ -405,8 +481,12 @@ def main(argv: List[str] | None = None) -> int:
 
     data = load_rows(raw_csv)
     print_normal(data, args.reps)
+    if is_multi_run(args):
+        print_multi(data, args.reps)
     paired_rows = print_paired(data, "dynamic", "priority")
     print_paired(data, "dynamic", "mlfq")
+    if is_multi_run(args):
+        print_paired(data, "cross_node", "dynamic")
 
     summary = out_dir / "gpu_replication_summary.csv"
     with summary.open("w", newline="", encoding="utf-8-sig") as fp:
@@ -415,7 +495,7 @@ def main(argv: List[str] | None = None) -> int:
                     "n", "mean", "std", "ci95_half", "ci95_low", "ci95_high", "rel_ci_pct"])
         for sched, cols in data.items():
             for m, vals in cols.items():
-                label, unit, _ = GPU_METRICS[m]
+                label, unit, _ = ALL_METRICS[m]
                 agg = st.aggregate(m, vals)
                 w.writerow([sched, SCHED_LABELS.get(sched, sched), m, label, unit,
                             agg.n, f"{agg.mean:.6f}", f"{agg.std:.6f}", f"{agg.ci_half:.6f}",

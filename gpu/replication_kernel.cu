@@ -43,9 +43,11 @@
 // ---------------------------------------------------------------------------
 #define MAX_TASKS   2048    // 一次 replication 最多生成的任务数（超出即截断）
 #define MAX_UAV     64      // 最大无人机数
-#define MAX_WORKERS 64      // 最大工作线程数（= 地面站并发处理能力）
+#define MAX_WORKERS 64      // 最大工作线程数（= 地面站并发处理能力，单站路径用）
 #define MAX_PENDING 1024    // 退避重传待办表容量（对应 simulator._retry_pending）
 #define MAX_COEFFS  4096    // 参数扫描的组合数上限
+#define MAX_STATIONS 8      // 站点数上限（多站路径；1 个 CENTER + 若干 EDGE）
+#define MAX_WORKERS_PER_STATION 16   // 每站槽位上限（多站路径；限制每线程本地内存）
 
 // ---------------------------------------------------------------------------
 // 与 config.yaml 对齐的模型超参
@@ -81,6 +83,15 @@ struct ModelParams {
     float health_sigma;      // 链路健康度波动
     float svc_high_mu_s;     // 勘查任务平均服务时长（仿真秒）
     float svc_low_mu_s;      // 运维任务平均服务时长
+    // ---- 多站 / MEC（尾部追加；字段顺序必须与 des_model.PARAM_ORDER 严格一致）----
+    int   n_stations;          // 站点数（1 = 单站；>1 = 1×CENTER + 若干 EDGE）
+    int   stations_workers;    // 每站槽位数
+    int   mec_enable;          // 1 = 开启 MEC 分流（轻量下沉 EDGE / 重勘查回 CENTER）
+    float edge_compute_mbps;   // 边缘算力（MEC 端到端时延）
+    float backhaul_mbps;       // 边缘 -> 中心回传带宽
+    float access_ms;           // 边缘接入时延基础值（中心 = 该值 + 28ms）
+    float migration_latency_ms;   // 迁移在途耗时（在途期间不占任何槽位）
+    float migration_bw_penalty;   // 迁移带宽损耗（剩余服务时长 ×(1+该值)）
 };
 
 // ---------------------------------------------------------------------------
@@ -100,6 +111,12 @@ struct Metrics {
     float max_low_depth;      // 低优队列峰值堆积
     int   submitted;          // 生成任务数
     int   done;               // 完成数
+    // ---- 多站 / MEC（尾部追加；与 des_model.METRIC_KEYS 尾部一致）----
+    float station_imb;        // 站间负载不均衡度（各站负载的变异系数，0 = 均衡）
+    float e2e_ms;             // 端到端平均时延（接入 + 计算 + 回传；派发时记账）
+    float edge_offload_pct;   // 边缘分流比例（%）
+    float migrations;         // 任务迁移次数
+    float migration_cost_ms;  // 迁移平均代价（ms/次）
 };
 
 // ---------------------------------------------------------------------------
@@ -127,18 +144,37 @@ __device__ inline float clampf(float v, float lo, float hi) {
 #define MODE_PRIORITY  2
 #define MODE_DYNAMIC   3
 #define MODE_MLFQ      4
-#define MODE_COUNT     5
+#define MODE_CROSS_NODE 5   // 跨节点负载均衡（多站；站内复用 dynamic 规则）
+#define MODE_COUNT     5    // 单站路径参与的策略数（保持向后兼容）
+#define MODE_COUNT_ALL 6    // 多站路径参与的策略数（含 cross_node）
 __device__ __host__ inline const char *mode_name(int m) {
     switch (m) {
         case MODE_FCFS: return "fcfs";
         case MODE_RR: return "rr";
         case MODE_PRIORITY: return "priority";
         case MODE_DYNAMIC: return "dynamic";
+        case MODE_CROSS_NODE: return "cross_node";
         default: return "mlfq";
     }
 }
-// 链路感知：只有动态权重策略具备（对应 scheduler.link_aware）
-__device__ inline bool mode_link_aware(int m) { return m == MODE_DYNAMIC; }
+// 链路感知：动态权重与 cross_node（站内复用动态权重）具备（对应 scheduler.link_aware）
+__device__ inline bool mode_link_aware(int m) { return m == MODE_DYNAMIC || m == MODE_CROSS_NODE; }
+
+// ---------------------------------------------------------------------------
+// 多站 / MEC 的模型常量（与 des_model.py 顶部常量一一对应）
+// ---------------------------------------------------------------------------
+#define STATION_ROLE_CENTER 0
+#define STATION_ROLE_EDGE   1
+// 任务数据量代理：data_mb = 服务时长(s) × 该基准算力。
+// 取 120 的意义：边缘算力默认 120 Mbps 时，站内计算时延恰好等于任务服务时长，
+// 于是不需要额外的任务大小分布也能与 docs/11 §4.3 的时延口径对齐（分水岭 3.36 MB）。
+#define DATA_MB_PER_SVC_S   120.0f
+#define CENTER_COMPUTE_MBPS 400.0f    // 中心算力（docs 默认）
+#define SYNC_RATIO          0.15f     // 边缘需回传中心同步的数据比例
+#define CENTER_ACCESS_GAP_MS 28.0f    // 中心接入 - 边缘接入 = 46 - 18
+#define MIGRATION_LOAD_RATIO 1.25f    // 迁出水位：本站负载 > 全局平均 × 1.25
+#define MIGRATION_BATCH      8        // 单轮单站最多迁出任务数
+#define MIGRATION_MAX_PER_TASK 2      // 同一任务最多被迁 2 次（防迁移抖动）
 
 // ---------------------------------------------------------------------------
 // 链路健康度：确定性时变曲线（同一 seed 复现同一条曲线）
@@ -175,6 +211,9 @@ __device__ Metrics simulate_one(int rep, int mode, const ModelParams &p) {
     m.starvation_low_pct = 0.f; m.completion_pct = 0.f; m.util_pct = 0.f;
     m.retry_pct = 0.f; m.preempts = 0.f; m.promotions = 0.f; m.cached = 0.f;
     m.max_low_depth = 0.f; m.submitted = 0; m.done = 0;
+    // 多站 / MEC 的新指标：单站路径恒为 0（与 des_model 的"尾部补 0"一致）
+    m.station_imb = 0.f; m.e2e_ms = 0.f; m.edge_offload_pct = 0.f;
+    m.migrations = 0.f; m.migration_cost_ms = 0.f;
 
     // ---- 每线程独立随机流：rep 决定种子（跨策略同 rep 同种子 = CRN） ----
     unsigned long long rng =
@@ -453,6 +492,539 @@ __device__ Metrics simulate_one(int rep, int mode, const ModelParams &p) {
 
 #undef ENQ
 
+// ===========================================================================
+// 多站 + MEC 的一次完整仿真（分析模型；对应 des_model.simulate_one_multi）
+// ===========================================================================
+// 规则（与 Python 侧、与 src/uav_sim 的语义一一对应）：
+//   ① 接入亲和：uav_id 一致性哈希 -> 原生接入站（station_home，不消耗 RNG）
+//   ② MEC 分流：轻量任务（低优/短服务）-> EDGE；重勘查（高优/长服务）-> CENTER
+//   ③ cross_node：站内复用动态权重规则；站间"本站负载 > 全局平均 ×1.25"则把排队中的
+//      任务迁往最闲的站，禁止迁回 home、每任务最多迁 2 次、单轮单站最多 8 个；
+//      迁移付两笔代价：migration_latency_ms 在途（不占槽位）+ 剩余服务 ×(1+penalty)
+//   ④ 端到端时延：接入 + 计算（按站算力）+ 回传（边缘任务按 SYNC_RATIO 回传中心），
+//      在"派发时"记账，每个任务只计一次。
+//
+// 注意：本函数只在 `--stations > 1` 或 `--mec` 时被调用，单站默认路径仍走
+// simulate_one（因此旧结果逐位不变）。
+__device__ inline int station_role(int sid) {
+    return sid == 0 ? STATION_ROLE_CENTER : STATION_ROLE_EDGE;
+}
+// 一致性哈希的简化替身：同一 uav 永远落到同一接入站（可复现、不消耗 RNG）
+__device__ inline int station_home(int uav, int n_stations) {
+    unsigned int h = (unsigned int)uav * 2654435761u + 0x9E3779B9u;
+    return (int)(h % (unsigned int)(n_stations > 0 ? n_stations : 1));
+}
+
+// 每站两级队列的入队宏（尾插）
+#define M_ENQ(IDX, SID, NOW)                                                    \
+    do {                                                                        \
+        enq[(IDX)] = (NOW); nxt[(IDX)] = -1;                                     \
+        if (prio[(IDX)] == 1) {                                                  \
+            if (tails_h[(SID)] >= 0) nxt[tails_h[(SID)]] = (IDX);                \
+            else heads_h[(SID)] = (IDX);                                         \
+            tails_h[(SID)] = (IDX); ++depth_h[(SID)];                            \
+        } else {                                                                 \
+            if (tails_l[(SID)] >= 0) nxt[tails_l[(SID)]] = (IDX);                \
+            else heads_l[(SID)] = (IDX);                                         \
+            tails_l[(SID)] = (IDX); ++depth_l[(SID)];                            \
+            if (depth_l[(SID)] > max_low_depth) max_low_depth = depth_l[(SID)];  \
+        }                                                                        \
+    } while (0)
+
+__device__ Metrics simulate_one_multi(int rep, int mode, const ModelParams &p) {
+    Metrics m;
+    m.throughput = 0.f; m.wait_high_ms = 0.f; m.wait_low_ms = 0.f;
+    m.starvation_low_pct = 0.f; m.completion_pct = 0.f; m.util_pct = 0.f;
+    m.retry_pct = 0.f; m.preempts = 0.f; m.promotions = 0.f; m.cached = 0.f;
+    m.max_low_depth = 0.f; m.submitted = 0; m.done = 0;
+    m.station_imb = 0.f; m.e2e_ms = 0.f; m.edge_offload_pct = 0.f;
+    m.migrations = 0.f; m.migration_cost_ms = 0.f;
+
+    int n_stations = p.n_stations;
+    if (n_stations < 1) n_stations = 1;
+    if (n_stations > MAX_STATIONS) n_stations = MAX_STATIONS;
+    int sw = p.stations_workers;
+    if (sw < 1) sw = p.workers;
+    if (sw < 1) sw = 1;
+    if (sw > MAX_WORKERS_PER_STATION) sw = MAX_WORKERS_PER_STATION;
+    const int n_slots = n_stations * sw;
+    const bool mec_on = (p.mec_enable != 0);
+    const bool cross = (mode == MODE_CROSS_NODE);
+    const bool link_aware = mode_link_aware(mode);
+
+    float edge_mbps = p.edge_compute_mbps > 0.f ? p.edge_compute_mbps : 1e-9f;
+    float backhaul  = p.backhaul_mbps  > 0.f ? p.backhaul_mbps  : 1e-9f;
+    float access_edge = p.access_ms > 0.f ? p.access_ms : 0.f;
+    float access_center = access_edge + CENTER_ACCESS_GAP_MS;
+    float mig_lat = p.migration_latency_ms > 0.f ? p.migration_latency_ms : 0.f;
+    float mig_pen = p.migration_bw_penalty > 0.f ? p.migration_bw_penalty : 0.f;
+
+    // ---- 每线程独立随机流：与单站版逐位一致（同 rep 同种子 = CRN） ----
+    unsigned long long rng =
+        0x9E3779B97F4A7C15ULL ^ (unsigned long long)(rep + 1) * 0xBF58476D1CE4E5B9ULL;
+    float phase = (float)(rng_uniform(rng) * 6.2831853f);
+
+    // ---- 任务表 ----
+    float svc[MAX_TASKS];
+    float remain[MAX_TASKS];
+    float enq[MAX_TASKS];
+    float wait_acc[MAX_TASKS];
+    unsigned char prio[MAX_TASKS];
+    unsigned char uav_of[MAX_TASKS];
+    unsigned char retry_of[MAX_TASKS];
+    unsigned char st_of[MAX_TASKS];
+    unsigned char mig_of[MAX_TASKS];
+    unsigned char counted[MAX_TASKS];      // 端到端时延是否已记账（派发时只计一次）
+    int nxt[MAX_TASKS];
+    int n = 0;
+
+    // ---- 每架无人机的两条到达流 ----
+    float next_high[MAX_UAV], next_low[MAX_UAV];
+    for (int u = 0; u < p.n_uav; ++u) {
+        next_high[u] = rng_exp(rng, p.survey_gap_s);
+        next_low[u]  = rng_exp(rng, p.ops_gap_s);
+    }
+
+    // ---- 每站两级就绪队列 + 槽位 ----
+    int heads_h[MAX_STATIONS], tails_h[MAX_STATIONS], depth_h[MAX_STATIONS];
+    int heads_l[MAX_STATIONS], tails_l[MAX_STATIONS], depth_l[MAX_STATIONS];
+    int active_cnt[MAX_STATIONS];
+    for (int s = 0; s < n_stations; ++s) {
+        heads_h[s] = tails_h[s] = heads_l[s] = tails_l[s] = -1;
+        depth_h[s] = depth_l[s] = active_cnt[s] = 0;
+    }
+    int max_low_depth = 0;
+
+    int   w_task[MAX_STATIONS * MAX_WORKERS_PER_STATION];
+    float w_finish[MAX_STATIONS * MAX_WORKERS_PER_STATION];
+    float w_run[MAX_STATIONS * MAX_WORKERS_PER_STATION];
+    float busy_by_station[MAX_STATIONS];
+    for (int i = 0; i < n_slots; ++i) { w_task[i] = -1; w_finish[i] = 0.f; w_run[i] = 0.f; }
+    for (int s = 0; s < n_stations; ++s) busy_by_station[s] = 0.f;
+
+    // ---- 退避待办表 + 迁移在途表 ----
+    int   pend_idx[MAX_PENDING];
+    float pend_due[MAX_PENDING];
+    int   pend_n = 0;
+    int   transit_idx[MAX_TASKS];
+    float transit_due[MAX_TASKS];
+    int   transit_n = 0;
+
+    double sum_wait_high = 0.0, sum_wait_low = 0.0;
+    int starved_low = 0, done_high = 0, done_low = 0, retries = 0, preempts = 0;
+    int promotions = 0, cached_cnt = 0, submitted_low = 0;
+    double busy_service = 0.0;
+    double e2e_sum = 0.0;
+    int dispatched = 0, edge_dispatched = 0, migrations = 0;
+    double migration_cost_total = 0.0;
+    float t = 0.f;
+    long guard = 0;
+
+    // ======================= 主循环：事件驱动 =======================
+    while (t < p.duration && guard++ < 5000000L) {
+        // ---------- 1) 最近事件（到达 / 完成 / 退避到期 / 迁移到站） ----------
+        float next_arrival = 1e30f;
+        for (int u = 0; u < p.n_uav; ++u) {
+            if (next_high[u] < next_arrival) next_arrival = next_high[u];
+            if (next_low[u]  < next_arrival) next_arrival = next_low[u];
+        }
+        float next_finish = 1e30f;
+        for (int i = 0; i < n_slots; ++i)
+            if (w_task[i] >= 0 && w_finish[i] < next_finish) next_finish = w_finish[i];
+        float next_pend = 1e30f;
+        for (int i = 0; i < pend_n; ++i) if (pend_due[i] < next_pend) next_pend = pend_due[i];
+        float next_transit = 1e30f;
+        for (int i = 0; i < transit_n; ++i)
+            if (transit_due[i] < next_transit) next_transit = transit_due[i];
+
+        float t_next = next_arrival;
+        if (next_finish < t_next) t_next = next_finish;
+        if (next_pend < t_next) t_next = next_pend;
+        if (next_transit < t_next) t_next = next_transit;
+        if (t_next > p.duration) t_next = p.duration;
+        if (t_next > t) t = t_next;
+
+        // ---------- 2) 退避到期 -> 回到所属站的就绪队列 ----------
+        for (int i = 0; i < pend_n; ) {
+            if (pend_due[i] <= t) {
+                int idx = pend_idx[i];
+                int sid = (int)st_of[idx];
+                M_ENQ(idx, sid, pend_due[i]);
+                pend_idx[i] = pend_idx[--pend_n];
+                pend_due[i] = pend_due[pend_n];
+            } else ++i;
+        }
+
+        // ---------- 2b) 迁移在途到期 -> 投入目标站队列 ----------
+        for (int i = 0; i < transit_n; ) {
+            if (transit_due[i] <= t) {
+                int idx = transit_idx[i];
+                int sid = (int)st_of[idx];
+                M_ENQ(idx, sid, transit_due[i]);
+                transit_idx[i] = transit_idx[--transit_n];
+                transit_due[i] = transit_due[transit_n];
+            } else ++i;
+        }
+
+        // ---------- 3) 处理到达（生成任务 -> 选站 -> 入队） ----------
+        for (int u = 0; u < p.n_uav; ++u) {
+            while (next_high[u] <= t && n < MAX_TASKS) {
+                float arr = next_high[u];
+                int idx = n++;
+                prio[idx] = 1; uav_of[idx] = (unsigned char)u; retry_of[idx] = 0;
+                mig_of[idx] = 0; counted[idx] = 0;
+                svc[idx] = rng_exp(rng, p.svc_high_mu_s);
+                remain[idx] = svc[idx];
+                wait_acc[idx] = 0.f;
+                int sid = station_home(u, n_stations);
+                if (mec_on) {  // MEC：重勘查 -> CENTER
+                    if (station_role(sid) != STATION_ROLE_CENTER) {
+                        int best = -1; float best_ratio = 0.f; int best_depth = 0;
+                        for (int pass = 0; pass < 2 && best < 0; ++pass) {
+                            for (int k = 0; k < n_stations; ++k) {
+                                if (pass == 0 && station_role(k) != STATION_ROLE_CENTER) continue;
+                                float ratio = (float)active_cnt[k] / (float)sw;
+                                int dep = depth_h[k] + depth_l[k];
+                                if (best < 0 || ratio < best_ratio
+                                    || (ratio == best_ratio
+                                        && (dep < best_depth || (dep == best_depth && k < best)))) {
+                                    best = k; best_ratio = ratio; best_depth = dep;
+                                }
+                            }
+                        }
+                        if (best >= 0) sid = best;
+                    }
+                }
+                st_of[idx] = (unsigned char)sid;
+                M_ENQ(idx, sid, arr);
+                next_high[u] = arr + rng_exp(rng, p.survey_gap_s);
+            }
+            while (next_low[u] <= t && n < MAX_TASKS) {
+                float arr = next_low[u];
+                int idx = n++;
+                prio[idx] = 0; uav_of[idx] = (unsigned char)u; retry_of[idx] = 0;
+                mig_of[idx] = 0; counted[idx] = 0;
+                svc[idx] = rng_exp(rng, p.svc_low_mu_s);
+                remain[idx] = svc[idx];
+                wait_acc[idx] = 0.f;
+                ++submitted_low;
+                int sid = station_home(u, n_stations);
+                if (mec_on) {  // MEC：轻量运维 -> EDGE
+                    if (station_role(sid) != STATION_ROLE_EDGE) {
+                        int best = -1; float best_ratio = 0.f; int best_depth = 0;
+                        for (int pass = 0; pass < 2 && best < 0; ++pass) {
+                            for (int k = 0; k < n_stations; ++k) {
+                                if (pass == 0 && station_role(k) != STATION_ROLE_EDGE) continue;
+                                float ratio = (float)active_cnt[k] / (float)sw;
+                                int dep = depth_h[k] + depth_l[k];
+                                if (best < 0 || ratio < best_ratio
+                                    || (ratio == best_ratio
+                                        && (dep < best_depth || (dep == best_depth && k < best)))) {
+                                    best = k; best_ratio = ratio; best_depth = dep;
+                                }
+                            }
+                        }
+                        if (best >= 0) sid = best;
+                    }
+                }
+                st_of[idx] = (unsigned char)sid;
+                M_ENQ(idx, sid, arr);
+                next_low[u] = arr + rng_exp(rng, p.ops_gap_s);
+            }
+        }
+        m.submitted = n;
+        if (n >= MAX_TASKS) {
+            for (int u = 0; u < p.n_uav; ++u) { next_high[u] = 1e30f; next_low[u] = 1e30f; }
+        }
+
+        // ---------- 3b) cross_node：站间改判（带代价迁移） ----------
+        if (cross) {
+            float loads[MAX_STATIONS];
+            for (int s = 0; s < n_stations; ++s)
+                loads[s] = (float)(active_cnt[s] + depth_h[s] + depth_l[s]) / (float)sw;
+            float lmean = 0.f;
+            for (int s = 0; s < n_stations; ++s) lmean += loads[s];
+            lmean /= (float)n_stations;
+            if (lmean > 1e-12f) {
+                for (int sid = 0; sid < n_stations; ++sid) {
+                    if (loads[sid] <= lmean * MIGRATION_LOAD_RATIO) continue;
+                    int budget = MIGRATION_BATCH;
+                    while (budget > 0 && loads[sid] > lmean * MIGRATION_LOAD_RATIO) {
+                        // 摘出一个可迁任务（优先低优队头；只受"最多迁 2 次"限制）
+                        int victim = -1, vprev = -1; bool vlow = false;
+                        for (int pass = 0; pass < 2 && victim < 0; ++pass) {
+                            bool is_low = (pass == 0);
+                            int i2 = is_low ? heads_l[sid] : heads_h[sid];
+                            int pv = -1;
+                            while (i2 >= 0) {
+                                if (mig_of[i2] < MIGRATION_MAX_PER_TASK) {
+                                    victim = i2; vprev = pv; vlow = is_low; break;
+                                }
+                                pv = i2; i2 = nxt[i2];
+                            }
+                        }
+                        if (victim < 0) break;
+                        {   // 从队列摘除
+                            int j2 = nxt[victim];
+                            if (vprev < 0) {
+                                if (vlow) heads_l[sid] = j2; else heads_h[sid] = j2;
+                            } else nxt[vprev] = j2;
+                            if (j2 < 0) {
+                                if (vlow) tails_l[sid] = vprev; else tails_h[sid] = vprev;
+                            }
+                            if (vlow) --depth_l[sid]; else --depth_h[sid];
+                        }
+                        // 目标站：禁止迁回 home + MEC 角色约束 + 取最闲（同负载取小 id）
+                        int home = station_home((int)uav_of[victim], n_stations);
+                        int dst = -1; float dst_load = 0.f;
+                        for (int k = 0; k < n_stations; ++k) {
+                            if (k == sid || k == home) continue;
+                            if (mec_on && ((k != 0) != (prio[victim] == 0))) continue;
+                            if (dst < 0 || loads[k] < dst_load
+                                || (loads[k] == dst_load && k < dst)) {
+                                dst = k; dst_load = loads[k];
+                            }
+                        }
+                        if (dst < 0) { M_ENQ(victim, sid, enq[victim]); break; }
+                        // 代价记账
+                        wait_acc[victim] += fmaxf(0.f, (t - enq[victim]) * 1000.f);
+                        float extra_ms = remain[victim] * mig_pen * 1000.f;
+                        remain[victim] *= (1.f + mig_pen);
+                        if (mig_of[victim] < 255) mig_of[victim] = (unsigned char)(mig_of[victim] + 1);
+                        ++migrations;
+                        migration_cost_total += (double)mig_lat + (double)extra_ms;
+                        st_of[victim] = (unsigned char)dst;
+                        if (transit_n < MAX_TASKS) {
+                            transit_idx[transit_n] = victim;
+                            transit_due[transit_n] = t + mig_lat / 1000.f;
+                            ++transit_n;
+                        }
+                        loads[sid] -= 1.f / (float)sw;
+                        loads[dst] += 1.f / (float)sw;
+                        --budget;
+                    }
+                }
+            }
+        }
+
+        // ---------- 4) 完成 / 时间片到期 ----------
+        for (int i = 0; i < n_slots; ++i) {
+            if (w_task[i] < 0 || w_finish[i] > t + 1e-6f) continue;
+            int idx = w_task[i];
+            int sid = i / sw;
+            w_task[i] = -1;
+            --active_cnt[sid];
+            float ran = w_run[i];
+            remain[idx] -= ran;
+            busy_service += ran;
+            busy_by_station[sid] += ran;
+
+            if (remain[idx] > 1e-6f) {
+                preempts++;
+                M_ENQ(idx, (int)st_of[idx], t);
+                continue;
+            }
+            float h = link_health(uav_of[idx], t, p, phase);
+            float p_fail = clampf((1.f - h / 100.f) * p.retry_gain, 0.f, 1.f);
+            if (rng_uniform(rng) < p_fail) {
+                retries++;
+                int rk = (int)retry_of[idx];
+                if (rk < 255) retry_of[idx] = (unsigned char)(rk + 1);
+                float delay;
+                if (link_aware && h < p.cache_health_threshold) {
+                    cached_cnt++;
+                    delay = p.cache_retry_backoff_s;
+                } else {
+                    int e = rk < 3 ? rk : 3;
+                    delay = p.retry_backoff_base_s * (float)(1 << e);
+                }
+                remain[idx] = svc[idx];
+                if (pend_n < MAX_PENDING) {
+                    pend_idx[pend_n] = idx; pend_due[pend_n] = t + delay; ++pend_n;
+                } else {
+                    M_ENQ(idx, (int)st_of[idx], t + delay);
+                }
+                continue;
+            }
+            float wait = wait_acc[idx];
+            if (prio[idx]) { sum_wait_high += wait; done_high++; }
+            else { sum_wait_low += wait; done_low++;
+                   if (wait > p.metric_starve_ms) starved_low++; }
+        }
+
+        // ---------- 5) 调度：每站各自填满本站空槽 ----------
+        for (int sid = 0; sid < n_stations; ++sid) {
+            for (;;) {
+                int free_w = -1;
+                int base = sid * sw;
+                for (int i = base; i < base + sw; ++i)
+                    if (w_task[i] < 0) { free_w = i; break; }
+                if (free_w < 0) break;
+                if (heads_h[sid] < 0 && heads_l[sid] < 0) break;
+
+                float cong = (float)(depth_h[sid] + depth_l[sid]) / (float)p.queue_capacity;
+                cong = clampf(cong, 0.f, 1.f);
+                int pick = -1;
+
+                if (mode == MODE_FCFS || mode == MODE_RR) {
+                    if (heads_h[sid] >= 0 && heads_l[sid] >= 0)
+                        pick = (enq[heads_h[sid]] <= enq[heads_l[sid]]) ? heads_h[sid] : heads_l[sid];
+                    else
+                        pick = (heads_h[sid] >= 0) ? heads_h[sid] : heads_l[sid];
+                } else if (mode == MODE_PRIORITY) {
+                    pick = (heads_h[sid] >= 0) ? heads_h[sid] : heads_l[sid];
+                } else if (mode == MODE_MLFQ) {
+                    if (heads_l[sid] >= 0 && (t - enq[heads_l[sid]]) * 1000.f > p.mlfq_aging_ms) {
+                        pick = heads_l[sid]; promotions++;
+                    } else {
+                        pick = (heads_h[sid] >= 0) ? heads_h[sid] : heads_l[sid];
+                    }
+                } else {
+                    // 动态权重；cross_node 的站内规则与 dynamic 完全相同
+                    if (heads_l[sid] >= 0 && (t - enq[heads_l[sid]]) * 1000.f > p.starvation_ms) {
+                        pick = heads_l[sid]; promotions++;
+                    } else {
+                        float wh = -1.f, wl = -1.f;
+                        if (heads_h[sid] >= 0) {
+                            float qh = clampf((float)depth_h[sid] / (float)p.queue_capacity, 0.f, 1.f);
+                            float wf = clampf((t - enq[heads_h[sid]]) * 1000.f / p.starvation_ms, 0.f, 1.f);
+                            float L = link_health(uav_of[heads_h[sid]], t, p, phase) / 100.f;
+                            wh = p.base_high * (p.w0 + p.alpha * qh + p.beta * wf + p.gamma * L);
+                            if ((t - enq[heads_h[sid]]) * 1000.f > p.starvation_ms)
+                                wh *= fminf(p.starve_boost_cap, 1.f + p.starve_boost * wf);
+                            if (L * 100.f < p.cache_health_threshold) wh *= p.weaknet_downweight;
+                        }
+                        if (heads_l[sid] >= 0) {
+                            float ql = clampf((float)depth_l[sid] / (float)p.queue_capacity, 0.f, 1.f);
+                            float wf = clampf((t - enq[heads_l[sid]]) * 1000.f / p.starvation_ms, 0.f, 1.f);
+                            float L = link_health(uav_of[heads_l[sid]], t, p, phase) / 100.f;
+                            wl = p.base_low * (p.w0 + p.alpha * ql + p.beta * wf + p.gamma * L);
+                            if ((t - enq[heads_l[sid]]) * 1000.f > p.starvation_ms)
+                                wl *= fminf(p.starve_boost_cap, 1.f + p.starve_boost * wf);
+                            if (L * 100.f < p.cache_health_threshold) wl *= p.weaknet_downweight;
+                        }
+                        pick = (wh >= wl) ? heads_h[sid] : heads_l[sid];
+                        if (pick < 0) pick = (heads_h[sid] >= 0) ? heads_h[sid] : heads_l[sid];
+                    }
+                }
+                if (pick < 0) break;
+
+                int pp = prio[pick];
+                if (pp == 1) {
+                    heads_h[sid] = nxt[heads_h[sid]];
+                    if (heads_h[sid] < 0) tails_h[sid] = -1;
+                    --depth_h[sid];
+                } else {
+                    heads_l[sid] = nxt[heads_l[sid]];
+                    if (heads_l[sid] < 0) tails_l[sid] = -1;
+                    --depth_l[sid];
+                }
+
+                wait_acc[pick] += fmaxf(0.f, (t - enq[pick]) * 1000.f);
+                enq[pick] = t;
+
+                // ---- MEC 端到端时延：派发时记账，每个任务只计一次 ----
+                if (!counted[pick]) {
+                    counted[pick] = 1;
+                    float data_mb = svc[pick] * DATA_MB_PER_SVC_S;
+                    if (station_role(sid) == STATION_ROLE_CENTER) {
+                        e2e_sum += (double)(access_center + data_mb / CENTER_COMPUTE_MBPS * 1000.f);
+                    } else {
+                        e2e_sum += (double)(access_edge + data_mb / edge_mbps * 1000.f
+                                            + SYNC_RATIO * data_mb / backhaul * 1000.f);
+                        ++edge_dispatched;
+                    }
+                    ++dispatched;
+                }
+
+                float slice_ms;
+                if (mode == MODE_FCFS || mode == MODE_PRIORITY) {
+                    slice_ms = 1e7f;
+                } else if (mode == MODE_RR) {
+                    slice_ms = p.rr_slice_ms;
+                } else if (mode == MODE_MLFQ) {
+                    slice_ms = (pp == 1) ? p.mlfq_slice0_ms : p.mlfq_slice1_ms;
+                } else if (pp == 1) {
+                    if (cong < p.slice_preempt_threshold) slice_ms = 1e7f;
+                    else slice_ms = clampf(p.slice_high_base_ms * (1.f - p.slice_shrink * cong),
+                                           p.slice_high_min_ms, p.slice_high_max_ms);
+                } else {
+                    slice_ms = clampf(p.slice_low_base_ms * (1.f - p.slice_shrink * cong),
+                                      p.slice_low_min_ms, p.slice_low_max_ms);
+                }
+                float run = fminf(slice_ms / 1000.f, remain[pick]);
+                if (run < 1e-9f) run = remain[pick];
+
+                w_task[free_w] = pick;
+                w_finish[free_w] = t + run;
+                w_run[free_w] = run;
+                ++active_cnt[sid];
+            }
+        }
+
+        if (next_arrival > p.duration && next_finish > p.duration
+            && next_pend > p.duration && next_transit > p.duration) break;
+    }
+
+    // ======================= 结算指标 =======================
+    float dur = p.duration > 0.f ? p.duration : 1.f;
+    int cap = n_slots > 0 ? n_slots : 1;
+    m.done = done_high + done_low;
+    m.throughput = (float)m.done / dur;
+    m.wait_high_ms = done_high > 0 ? (float)(sum_wait_high / done_high) : 0.f;
+    m.wait_low_ms  = done_low  > 0 ? (float)(sum_wait_low  / done_low ) : 0.f;
+    int low_total = submitted_low > 0 ? submitted_low : 1;
+    m.starvation_low_pct = 100.f * (float)starved_low / (float)low_total;
+    int submitted = n > 0 ? n : 1;
+    m.completion_pct = 100.f * (float)m.done / (float)submitted;
+    m.util_pct = 100.f * (float)busy_service / (double)(dur * cap);
+    m.retry_pct = 100.f * (float)retries / (float)submitted;
+    m.preempts = (float)preempts;
+    m.promotions = (float)promotions;
+    m.cached = (float)cached_cnt;
+    m.max_low_depth = (float)max_low_depth;
+
+    // 站间不均衡度 = 各站负载的变异系数（σ/均值；站负载按"每槽位服务秒"折算）
+    float loads[MAX_STATIONS];
+    for (int s = 0; s < n_stations; ++s) {
+        double queued = 0.0;
+        for (int k = heads_h[s]; k >= 0; k = nxt[k]) queued += remain[k];
+        for (int k = heads_l[s]; k >= 0; k = nxt[k]) queued += remain[k];
+        loads[s] = (float)(((double)busy_by_station[s] + queued) / (double)sw);
+    }
+    if (n_stations < 2) {
+        m.station_imb = 0.f;
+    } else {
+        float lmean = 0.f;
+        for (int s = 0; s < n_stations; ++s) lmean += loads[s];
+        lmean /= (float)n_stations;
+        if (lmean <= 1e-12f) {
+            m.station_imb = 0.f;
+        } else {
+            float lvar = 0.f;
+            for (int s = 0; s < n_stations; ++s) lvar += (loads[s] - lmean) * (loads[s] - lmean);
+            lvar /= (float)n_stations;
+            m.station_imb = sqrtf(lvar) / lmean;
+        }
+    }
+    m.e2e_ms = dispatched > 0 ? (float)(e2e_sum / dispatched) : 0.f;
+    m.edge_offload_pct = dispatched > 0 ? 100.f * (float)edge_dispatched / (float)dispatched : 0.f;
+    m.migrations = (float)migrations;
+    m.migration_cost_ms = migrations > 0 ? (float)(migration_cost_total / migrations) : 0.f;
+    return m;
+}
+
+#undef M_ENQ
+
+// ---------------------------------------------------------------------------
+// 多站内核入口：每个线程跑一个 replication（多站 + MEC / cross_node）
+// ---------------------------------------------------------------------------
+__global__ void multi_kernel(int n_reps, int mode, ModelParams p, Metrics *out) {
+    int rep = blockIdx.x * blockDim.x + threadIdx.x;
+    if (rep >= n_reps) return;
+    out[rep] = simulate_one_multi(rep, mode, p);
+}
+
 // ---------------------------------------------------------------------------
 // 内核入口：每个线程跑一个 replication，把指标写回 out[rep]
 // ---------------------------------------------------------------------------
@@ -513,21 +1085,28 @@ static ModelParams default_params() {
     // cache_health_threshold=40，从而真正触发动态权重的「本地缓存」通路）
     p.health_mu = 52.f; p.health_sigma = 18.f;
     p.svc_high_mu_s = 7.5f; p.svc_low_mu_s = 0.01f;
+    // ---- 多站 / MEC：默认 = 单站 + 关闭 MEC（因此默认行为与旧版完全一致）----
+    p.n_stations = 1; p.stations_workers = 8; p.mec_enable = 0;
+    p.edge_compute_mbps = 120.f; p.backhaul_mbps = 60.f; p.access_ms = 18.f;
+    p.migration_latency_ms = 120.f; p.migration_bw_penalty = 0.15f;
     return p;
 }
 
 static const char *CSV_HEADER =
     "scheduler,coeff_index,alpha,beta,gamma,delta,starve_ms,rep,throughput,wait_high_ms,"
     "wait_low_ms,starvation_low_pct,completion_pct,util_pct,retry_pct,"
-    "preempts,promotions,cached,max_low_depth,submitted,done\n";
+    "preempts,promotions,cached,max_low_depth,submitted,done,"
+    "station_imb,e2e_ms,edge_offload_pct,migrations,migration_cost_ms\n";
 
 static void dump_row(FILE *fp, const char *sched, int ci,
                      float a, float b, float g, float d, float sm, int rep, const Metrics &r) {
     fprintf(fp, "%s,%d,%.4f,%.4f,%.4f,%.4f,%.1f,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
-                "%.6f,%.6f,%.6f,%.6f,%d,%d\n",
+                "%.6f,%.6f,%.6f,%.6f,%d,%d,"
+                "%.6f,%.6f,%.6f,%.6f,%.6f\n",
             sched, ci, a, b, g, d, sm, rep, r.throughput, r.wait_high_ms, r.wait_low_ms,
             r.starvation_low_pct, r.completion_pct, r.util_pct, r.retry_pct,
-            r.preempts, r.promotions, r.cached, r.max_low_depth, r.submitted, r.done);
+            r.preempts, r.promotions, r.cached, r.max_low_depth, r.submitted, r.done,
+            r.station_imb, r.e2e_ms, r.edge_offload_pct, r.migrations, r.migration_cost_ms);
 }
 
 int main(int argc, char **argv) {
@@ -536,6 +1115,12 @@ int main(int argc, char **argv) {
     const char *coeff_path = nullptr;
     bool sweep = false;
     float starve_override = 0.f;    // --starve-ms：覆盖动态权重的 aging 触发阈值
+    // ---- 多站 / MEC 参数（默认单站、MEC 关闭 -> 与旧版行为完全一致）----
+    int stations = 1;
+    bool mec = false;
+    int station_workers = 0;        // 0 = 按"总容量守恒"自动分摊 workers
+    float edge_mbps = 0.f;          // 0 = 用默认 120
+    float backhaul_mbps = 0.f;      // 0 = 用默认 60
 
     for (int i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--reps") && i + 1 < argc) n_reps = atoi(argv[++i]);
@@ -543,16 +1128,40 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--coeffs") && i + 1 < argc) coeff_path = argv[++i];
         else if (!strcmp(argv[i], "--starve-ms") && i + 1 < argc) starve_override = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--sweep")) sweep = true;
+        else if (!strcmp(argv[i], "--stations") && i + 1 < argc) stations = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--mec")) mec = true;
+        else if (!strcmp(argv[i], "--station-workers") && i + 1 < argc) station_workers = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--edge-mbps") && i + 1 < argc) edge_mbps = (float)atof(argv[++i]);
+        else if (!strcmp(argv[i], "--backhaul-mbps") && i + 1 < argc) backhaul_mbps = (float)atof(argv[++i]);
         else if (argv[i][0] >= '0' && argv[i][0] <= '9') n_reps = atoi(argv[i]);  // 位置参数：重复次数
         else if (!out_path) out_path = argv[i];                                   // 位置参数：输出 CSV
     }
 
     ModelParams p = default_params();
     if (starve_override > 0.f) p.starvation_ms = starve_override;
+    // 多站：站数 > 1 或开启 MEC 时走 multi_kernel（默认 1/关闭 -> 原路径，行为不变）
+    if (stations < 1) stations = 1;
+    if (stations > MAX_STATIONS) stations = MAX_STATIONS;
+    if (station_workers <= 0) station_workers = p.workers / (stations > 0 ? stations : 1);
+    if (station_workers < 1) station_workers = 1;
+    if (station_workers > MAX_WORKERS_PER_STATION) station_workers = MAX_WORKERS_PER_STATION;
+    p.n_stations = stations;
+    p.stations_workers = station_workers;
+    p.mec_enable = mec ? 1 : 0;
+    if (edge_mbps > 0.f) p.edge_compute_mbps = edge_mbps;
+    if (backhaul_mbps > 0.f) p.backhaul_mbps = backhaul_mbps;
+    const bool multi = (p.n_stations > 1 || p.mec_enable != 0);
     cudaDeviceProp prop{};
     cudaGetDeviceProperties(&prop, 0);
     printf("GPU: %s  sm_%d%d  SMs=%d\n", prop.name, prop.major, prop.minor,
            prop.multiProcessorCount);
+    if (multi) {
+        printf("多站/MEC：stations=%d（1×CENTER + %d×EDGE）每站槽位=%d 共 %d 槽位  MEC=%s"
+               "  边缘算力=%.0f Mbps  回传=%.0f Mbps\n",
+               p.n_stations, p.n_stations - 1, p.stations_workers,
+               p.n_stations * p.stations_workers, p.mec_enable ? "on" : "off",
+               p.edge_compute_mbps, p.backhaul_mbps);
+    }
 
     int threads = 256;
     FILE *fp = nullptr;
@@ -596,8 +1205,10 @@ int main(int argc, char **argv) {
         }
         for (int i = 0; i < n_coeffs; ++i)
             if (h_starve[i] <= 0.f) h_starve[i] = p.starvation_ms;
-        printf("参数扫描：%d 组系数 x %d 次重复 = %d 次仿真\n",
+        // 每个字面量都以 ASCII 收尾（中文紧跟 " 或 \n 会被 nvcc 前端吞掉）
+        printf("参数扫描：%d 组系数 x %d 次重复 = %d 次仿真 ",
                n_coeffs, n_reps, n_coeffs * n_reps);
+        printf("\n");
 
         float4 *d_coeffs = nullptr;
         float *d_starve = nullptr;
@@ -616,7 +1227,8 @@ int main(int argc, char **argv) {
         cudaDeviceSynchronize();
         cudaEventRecord(b); cudaEventSynchronize(b);
         float ms = 0.f; cudaEventElapsedTime(&ms, a, b);
-        printf("内核耗时 %.2f ms（%d 次仿真）\n", ms, (int)total);
+        printf("内核耗时 %.2f ms（%d 次仿真） ", ms, (int)total);
+        printf("\n");
 
         Metrics *h_out = (Metrics *)malloc(sizeof(Metrics) * total);
         cudaMemcpy(h_out, d_out, sizeof(Metrics) * total, cudaMemcpyDeviceToHost);
@@ -634,31 +1246,46 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    // ---------------- 常规模式：5 个策略各跑 n_reps 次 ----------------
+    // ---------------- 常规模式：策略各跑 n_reps 次 ----------------
+    // 单站默认（stations=1 且 MEC 关闭）仍走原来的 replication_kernel，行为逐位不变；
+    // 多站 / MEC 才走 multi_kernel（并追加 cross_node 这第 6 种策略）。
+    const int n_modes = multi ? MODE_COUNT_ALL : MODE_COUNT;
     Metrics *d_out = nullptr;
     cudaMalloc(&d_out, sizeof(Metrics) * n_reps);
     Metrics *h_out = (Metrics *)malloc(sizeof(Metrics) * n_reps);
 
-    for (int mode = 0; mode < MODE_COUNT; ++mode) {
+    for (int mode = 0; mode < n_modes; ++mode) {
         cudaEvent_t a, b; cudaEventCreate(&a); cudaEventCreate(&b);
         cudaEventRecord(a);
         int blocks = (n_reps + threads - 1) / threads;
-        replication_kernel<<<blocks, threads>>>(n_reps, mode, p, d_out);
+        if (multi) multi_kernel<<<blocks, threads>>>(n_reps, mode, p, d_out);
+        else       replication_kernel<<<blocks, threads>>>(n_reps, mode, p, d_out);
         cudaDeviceSynchronize();
         cudaEventRecord(b); cudaEventSynchronize(b);
         float ms = 0.f; cudaEventElapsedTime(&ms, a, b);
         cudaMemcpy(h_out, d_out, sizeof(Metrics) * n_reps, cudaMemcpyDeviceToHost);
 
-        double th = 0, wl = 0, starv = 0, comp = 0, util = 0;
+        double th = 0, wl = 0, starv = 0, comp = 0, util = 0, imb = 0, e2e = 0,
+               edge = 0, mig = 0;
         for (int i = 0; i < n_reps; ++i) {
             th += h_out[i].throughput; wl += h_out[i].wait_low_ms;
             starv += h_out[i].starvation_low_pct; comp += h_out[i].completion_pct;
             util += h_out[i].util_pct;
+            imb += h_out[i].station_imb; e2e += h_out[i].e2e_ms;
+            edge += h_out[i].edge_offload_pct; mig += h_out[i].migrations;
         }
         printf("%-9s | %6d reps 于 %8.2f ms | 吞吐=%6.2f/s  低优时延=%8.1fms  "
                "低优饥饿=%5.1f%%  完整率=%5.1f%%  利用率=%5.1f%%\n",
                mode_name(mode), n_reps, ms, th / n_reps, wl / n_reps,
                starv / n_reps, comp / n_reps, util / n_reps);
+        if (multi) {
+            // 注意：源码里的多字节中文紧贴 " 或 \n 时，nvcc 前端会把两者一起吞掉
+            // （表现为 "missing closing quote"，或 \n 原样输出成字面量）。
+            // 因此这里的每个字符串字面量都以 ASCII 字符收尾（与 README §7 的 /utf-8 坑同源）。
+            printf("            | 站间不均衡=%6.3f  端到端时延=%7.1fms  "
+                   "边缘分流=%5.1f%%  迁移次数=%7.1f\n",
+                   imb / n_reps, e2e / n_reps, edge / n_reps, mig / n_reps);
+        }
 
         if (fp) {
             for (int i = 0; i < n_reps; ++i)

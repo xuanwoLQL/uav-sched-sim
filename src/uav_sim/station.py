@@ -277,6 +277,15 @@ class StationNode:
         self.down_until: float = 0.0
         self.crashed_at: float = 0.0
 
+        # ---- 最小 quorum 共识（教学用 P4）：本站在当前 term 内的投票状态 ----
+        #: 最近一次投票所属的任期号（与 ``StationCluster.term`` 对齐）。
+        self.voted_term: int = 0
+        #: 本任期是否投出赞成票。简化模型：新任期开始时**全站一致赞成**，
+        #: 不做选举超时 / 拉票 / 日志比较（见 docs/11 §5 与 §8 诚实清单）。
+        self.vote_granted: bool = True
+        #: 所属簇的回引 —— 只为 ``to_dict()`` 计算 ``is_majority``（未挂簇时视为有多数派）。
+        self.cluster: Optional["StationCluster"] = None
+
         # ---- 接入的无人机集合 ----
         self.uavs: set = set()
 
@@ -325,8 +334,15 @@ class StationNode:
 
     def to_dict(self, extra_running_s: float = 0.0,
                 elapsed_s: float = 0.0) -> Dict[str, Any]:
-        """站级快照（= ``/api/state.live.stations[]`` 的一条，契约键名不可改）。"""
+        """站级快照（= ``/api/state.live.stations[]`` 的一条，契约键名不可改）。
+
+        P4 只**增**两个键（不动既有键）：
+            * ``partition_group``：当前分区组号（0 = 未分区）；
+            * ``is_majority``：该站所在分区组是否达到多数派（未挂簇时视为 True，
+              单站时 majority=1 -> True，与改造前等价）。
+        """
         q = self.queue
+        cluster = self.cluster
         return {
             "id": int(self.spec.id),
             "name": str(self.spec.name),
@@ -335,6 +351,9 @@ class StationNode:
             "online": bool(self.online),
             "partitioned": bool(self.partition_group > 0),
             "partition_group": int(self.partition_group),
+            # 该站所在分区组是否达到多数派（脑裂截图里"两侧各自是否自认多数"的读数）
+            "is_majority": (bool(cluster.group_has_quorum(int(self.spec.id)))
+                            if cluster is not None else True),
             "workers": int(self.spec.workers),
             "active": int(self.active),
             "idle": max(0, int(self.spec.concurrency) - int(self.active)),
@@ -744,29 +763,26 @@ class StationCluster:
         self.load_horizon_s: float = 2.0
 
         # ---- 每站容量参数（单站时与改造前完全一致） ----
-        capacity = cfg_get_int(cfg, "server.queue_capacity", 5000)
-        starvation_ms = cfg_get_float(cfg, "server.starvation_threshold_ms", 3000.0)
-        mem = cfg_get_float(cfg, "server.max_task_memory_mb", 2048.0)
-        quota = cfg_get_int(cfg, "server.per_uav_quota", 2)
-        chunking = bool((cfg.get("server") or {}).get("enable_chunking", True))
+        # 抽成实例字段，是为了让运行期 ``add_node()`` 能复用**同一份**构造逻辑
+        # （见 ``_make_node``），而不是在第二处再抄一遍参数解析。
+        self._cap_capacity = cfg_get_int(cfg, "server.queue_capacity", 5000)
+        self._cap_starvation_ms = cfg_get_float(cfg, "server.starvation_threshold_ms", 3000.0)
+        self._cap_mem = cfg_get_float(cfg, "server.max_task_memory_mb", 2048.0)
+        self._cap_quota = cfg_get_int(cfg, "server.per_uav_quota", 2)
+        self._cap_chunking = bool((cfg.get("server") or {}).get("enable_chunking", True))
         # 拥堵度基准按"核数占比"分摊：单站时恰好等于 congestion_reference_depth
-        ref_total = cfg_get_float(cfg, "server.congestion_reference_depth",
-                                  4.0 * max(1, cfg_get_int(cfg, "runtime.worker_threads", 8)))
-        workers_total = max(1, sum(int(s.workers) for s in specs))
+        self._ref_total = cfg_get_float(
+            cfg, "server.congestion_reference_depth",
+            4.0 * max(1, cfg_get_int(cfg, "runtime.worker_threads", 8)))
 
-        self.nodes: List[StationNode] = []
-        for i, spec in enumerate(specs):
-            ref = ref_total * (float(spec.workers) / float(workers_total))
-            self.nodes.append(StationNode(
-                spec=spec, cfg=cfg, color=STATION_COLORS[i % len(STATION_COLORS)],
-                capacity=capacity, congestion_ref=max(1e-9, ref),
-                starvation_threshold_ms=starvation_ms,
-                max_task_memory_mb=mem, per_uav_quota=quota,
-                enable_chunking=chunking,
-            ))
-        self.by_id: Dict[int, StationNode] = {n.spec.id: n for n in self.nodes}
-        self.default_id: int = int(self.nodes[0].spec.id)
         self._lock = threading.RLock()
+        self.nodes: List[StationNode] = []
+        self.by_id: Dict[int, StationNode] = {}
+        self.default_id: int = int(specs[0].id) if specs else 1
+        workers_total = max(1, sum(int(s.workers) for s in specs))
+        for i, spec in enumerate(specs):
+            self.nodes.append(self._make_node(spec, i, workers_total=workers_total))
+        self._reindex()
 
         # ---- 迁移参数（"迁移不是瞬移"的三个旋钮） ----
         self.migration_latency_ms: float = cfg_get_float(
@@ -783,10 +799,60 @@ class StationCluster:
         #: 脑裂标志（分区两侧各自认为自己是主）
         self.split_brain: bool = False
 
+        # ---- 最小 quorum 共识（教学用 P4） ----
+        #: 任期号。**只在分区/脑裂注入与恢复时 +1** —— 这是"教学用最小共识"的简化：
+        #: 不做选举超时、不做选票拉取、不做日志复制与成员变更（见 docs/11 §8）。
+        #: 目的不是实现 Raft，而是让"分区两侧各自处于哪个任期、各自是否还是多数派"
+        #: 变成可观测、可截图的读数。
+        self.term: int = 0
+        self._refresh_votes()
+
         # ---- 一致性哈希环（跨节点负载均衡的"亲和性"通道） ----
         self._ring: List[int] = []
         self._owner: Dict[int, int] = {}
         self._build_ring()
+
+    # ------------------------------------------------------------------ 节点构造
+    def _make_node(self, spec: StationSpec, idx: int,
+                   workers_total: Optional[int] = None) -> StationNode:
+        """按站点规格造一个 ``StationNode``（**唯一**的构造工厂）。
+
+        ``__init__`` 与运行期 ``add_node()`` 都走这里，避免"两处各写一遍容量参数"
+        而在后续改动中悄悄分叉。``idx`` 决定配色（按站序循环取 palette）。
+        """
+        total = max(1, int(workers_total if workers_total else spec.workers))
+        ref = self._ref_total * (float(spec.workers) / float(total))
+        node = StationNode(
+            spec=spec, cfg=self.cfg, color=STATION_COLORS[idx % len(STATION_COLORS)],
+            capacity=self._cap_capacity, congestion_ref=max(1e-9, ref),
+            starvation_threshold_ms=self._cap_starvation_ms,
+            max_task_memory_mb=self._cap_mem, per_uav_quota=self._cap_quota,
+            enable_chunking=self._cap_chunking,
+        )
+        node.cluster = self
+        return node
+
+    def _reindex(self) -> None:
+        """按 id 升序整理节点表，并按"核数占比"重算各站拥堵度基准。
+
+        为什么增删站后要重算拥堵度基准：``congestion_ref`` 的口径是
+        "本站在全簇核数中的占比 × 基准深度"，站数变了占比就变了；不重算会让
+        "总拥堵度基准随站数漂移"，破坏"多站 = 把同样的容量切给更多节点"这一
+        控制变量前提。既有节点的队列/限流器对象**原地保留**（任务与限流状态不丢）。
+        """
+        if not self.nodes:
+            raise ValueError("站点簇至少要保留 1 个站")
+        # 整体换引用（而不是原地 sort）：运行期增删站时，仿真主循环可能正在遍历
+        # self.nodes，换引用让读端"要么看到旧表、要么看到新表"，不会读到半排序状态。
+        ordered = sorted(self.nodes, key=lambda n: int(n.spec.id))
+        workers_total = max(1, sum(int(n.spec.workers) for n in ordered))
+        for n in ordered:
+            n.queue.congestion_ref = max(
+                1e-9, self._ref_total * (float(n.spec.workers) / float(workers_total)))
+            n.cluster = self
+        self.nodes = ordered
+        self.by_id = {int(n.spec.id): n for n in ordered}
+        self.default_id = int(ordered[0].spec.id)
 
     # ------------------------------------------------------------------ 哈希环
     def _build_ring(self) -> None:
@@ -804,8 +870,77 @@ class StationCluster:
         self._ring = [ring[i] for i in order]
         self._owner = owner
 
+    def rebuild_ring(self) -> int:
+        """按**当前**节点集合重建一致性哈希环（P2 运行期再平衡的入口）。
+
+        返回环上虚拟节点总数（= 站数 × ``stations.hash_virtual_nodes``）。
+        为什么必须显式重建：环原先只在 ``__init__`` 建一次，增/删站后若不重建，
+        ``hash_owner()`` 会把新站"视而不见"（永远收不到 key），再平衡也就无从验证。
+        """
+        self._build_ring()
+        return len(self._ring)
+
+    def add_node(self, spec: StationSpec, rebuild: bool = True) -> StationNode:
+        """运行期加入一个新站（P2）：建节点 -> 重排 -> 重建环。
+
+        容量参数复用 ``_make_node``（与单站/初始多站同一份逻辑）；既有节点的
+        队列、限流器、在线状态、接入无人机集合**一律不动**（只有拥堵度基准按新
+        核数占比重算，见 ``_reindex``）。
+
+        ``id`` 重复时抛 ``ValueError``（不静默覆盖一个活站）。
+        """
+        if int(spec.id) in self.by_id:
+            raise ValueError(f"站点 id {int(spec.id)} 已存在，不能重复加入")
+        workers_total = sum(int(n.spec.workers) for n in self.nodes) + int(spec.workers)
+        node = self._make_node(spec, len(self.nodes), workers_total=workers_total)
+        self.nodes.append(node)
+        self._reindex()
+        if rebuild:
+            self.rebuild_ring()
+        return node
+
+    def remove_node(self, station_id: int, now: float = 0.0,
+                    evacuate: bool = False) -> Tuple[bool, str]:
+        """运行期摘除一个站（P2）：返回 ``(是否成功, 说明)``。
+
+        拒绝条件（**拒绝时不改动任何状态**，返回原因供调用方决策）：
+            * 未知站号；或只剩最后一个站（簇里至少要留 1 个站）；
+            * 该站仍有"排队中"的任务 —— ``evacuate=True`` 时先尝试疏散到同分区
+              存活站（走 ``evacuate_station``，带迁移代价），仍剩任务则拒绝；
+            * 该站仍有"在跑"的任务 —— 运行中的任务不能搬，必须等它跑完再删。
+
+        成功时：节点出表 -> 重建环；在途迁往该站的任务由 ``flush_migrations``
+        自动改派（它本就对"目标站不存在"做了兜底，任务不会丢）。
+        """
+        sid = int(station_id)
+        node = self.by_id.get(sid)
+        if node is None:
+            return False, f"未知站点 {sid}"
+        if len(self.nodes) <= 1:
+            return False, "至少保留 1 个站：不能删除簇里最后一个站"
+        evacuated = 0
+        if node.queue.total_depth > 0:
+            if not evacuate:
+                return False, (f"站点 {sid} 仍有 {node.queue.total_depth} 个排队任务；"
+                               "请先疏散（evacuate=True）或等其排空")
+            evacuated = self.evacuate_station(sid, now)
+            if node.queue.total_depth > 0:
+                return False, (f"站点 {sid} 仍有 {node.queue.total_depth} 个排队任务"
+                               "（同分区内没有可用站可接管），暂不能删除")
+        if int(node.limiter.running) > 0:
+            return False, (f"站点 {sid} 仍有 {int(node.limiter.running)} 个任务在跑；"
+                           "运行中的任务不能搬，请等它跑完再删")
+        self.nodes = [n for n in self.nodes if int(n.spec.id) != sid]
+        self._reindex()
+        self.rebuild_ring()
+        return True, f"已删除站点 {sid}（疏散排队任务 {evacuated} 个）"
+
     def hash_owner(self, key: Any) -> int:
-        """一致性哈希定位（纯函数、可复现）：同一 key 永远落到同一站。"""
+        """一致性哈希定位（纯函数、可复现）：同一 key 永远落到同一站。
+
+        注意：本方法只看**环**，不看在线状态（纯映射，测试单调性用它）；
+        "跳过不可用站"由 ``pick_by_hash`` 负责。
+        """
         if not self._ring:
             return self.default_id
         h = _hash32(str(key))
@@ -813,6 +948,7 @@ class StationCluster:
         if idx >= len(self._ring):
             idx = 0
         return int(self._owner[self._ring[idx]])
+
 
     # ------------------------------------------------------------------ 可达性
     def node_of_task(self, task: Task) -> StationNode:
@@ -1070,7 +1206,11 @@ class StationCluster:
         return True
 
     def set_partition(self, groups: Sequence[Sequence[int]]) -> List[List[int]]:
-        """设置网络分区：每个子列表是一组互通站点，跨组不可达。"""
+        """设置网络分区：每个子列表是一组互通站点，跨组不可达。
+
+        分区 = **进入新任期**（``term += 1``）：两侧各自开始一个任期、各自
+        重新投票（教学用简化，见 ``bump_term``）。
+        """
         for node in self.nodes:
             node.partition_group = 0
         for gi, group in enumerate(groups, start=1):
@@ -1079,20 +1219,103 @@ class StationCluster:
                 if node is not None:
                     node.partition_group = gi
         self.split_brain = False
+        self.bump_term("partition")
         return self.partitions_view()
 
     def clear_partition(self) -> None:
+        """解除分区 = 合并回一个任期（``term += 1``），并清脑裂标志。"""
         for node in self.nodes:
             node.partition_group = 0
         self.split_brain = False
+        self.bump_term("heal")
 
     def recover_all(self) -> None:
+        """一键恢复（全部上线 + 解除分区 + 清脑裂）= 合并回一个任期。"""
         for node in self.nodes:
             node.online = True
             node.partition_group = 0
             node.down_until = 0.0
             node.crashed_at = 0.0
         self.split_brain = False
+        self.bump_term("recover")
+
+    # ------------------------------------------------------------------ 最小 quorum 共识（P4）
+    @property
+    def majority(self) -> int:
+        """多数派门槛 = ``floor(N/2) + 1``，**按总站数 N** 计算（Raft 口径）。
+
+        刻意**不按在线站数**算：否则"3 站挂掉 2 站后剩下那 1 站自认多数派"，
+        共识语义立刻失效（Raft 里多数派随成员数走，不随存活数走）。
+        """
+        return len(self.nodes) // 2 + 1
+
+    def bump_term(self, reason: str = "") -> int:
+        """进入新任期（分区/脑裂注入与恢复时调用），并刷新各站投票状态。
+
+        这是"教学用最小共识"的**唯一**任期推进点：不实现选举超时、拉票与日志
+        比较，只让"现在处于第几任、各站投过谁"可观测。``reason`` 仅用于日志/追溯。
+        """
+        self.term = int(self.term) + 1
+        self._refresh_votes()
+        logger.debug("StationCluster 进入新任期 term=%d（%s）", self.term, reason or "-")
+        return self.term
+
+    def _refresh_votes(self) -> None:
+        """新任期开始时的投票状态刷新（简化：要求全站投出赞成票）。"""
+        for n in self.nodes:
+            n.voted_term = int(self.term)
+            n.vote_granted = True
+
+    def _quorum_group_of(self, node: StationNode) -> List[StationNode]:
+        """该站当前所属的"在线分区组"（同 ``partition_group`` 的在线站）。
+
+        未分区时全体在线站天然属于同一组（``partition_group`` 都是 0），
+        因此不需要为"未分区"单开分支 —— 退化正确。
+        """
+        return [n for n in self.nodes if n.online
+                and int(n.partition_group) == int(node.partition_group)]
+
+    def group_has_quorum(self, station_id: int) -> bool:
+        """某站所在分区组是否达到多数派（写入确认的判据）。
+
+        站已离线 / 未知 -> ``False``：离线的站不属于任何**在线**组，
+        它上面的写确认当然不可能通过（脑裂里"失联侧"正是这个语义）。
+        """
+        node = self.by_id.get(int(station_id))
+        if node is None or not node.online:
+            return False
+        return len(self._quorum_group_of(node)) >= self.majority
+
+    def quorum_view(self) -> Dict[str, Any]:
+        """当前 quorum 视图（``/api/state.live.quorum`` 与站卡片 ``is_majority`` 共用）。
+
+        结构（键名冻结，前端 app3d.html / os_inspect.js 均按此消费）::
+
+            {"term": int,
+             "majority": int,                     # floor(N/2)+1，按总站数
+             "groups": [{"ids": [int,...], "size": int, "has_quorum": bool}, ...],
+             "has_majority_anywhere": bool}
+
+        分组口径：按 ``partition_group`` 聚合**在线**站（未分区 = 全体在线站一组）；
+        单站退化：``majority=1``、唯一一组 ``{1}``、``has_quorum=True``。
+        """
+        maj = self.majority
+        buckets: Dict[int, List[int]] = {}
+        for n in self.nodes:
+            if not n.online:
+                continue
+            buckets.setdefault(int(n.partition_group), []).append(int(n.spec.id))
+        groups: List[Dict[str, Any]] = []
+        for _gid, ids in sorted(buckets.items()):
+            ordered = sorted(ids)
+            groups.append({"ids": ordered, "size": len(ordered),
+                           "has_quorum": len(ordered) >= maj})
+        return {
+            "term": int(self.term),
+            "majority": int(maj),
+            "groups": groups,
+            "has_majority_anywhere": any(g["has_quorum"] for g in groups),
+        }
 
     # ------------------------------------------------------------------ 视图
     def snapshot(self, running_remaining_by_station: Dict[int, float],

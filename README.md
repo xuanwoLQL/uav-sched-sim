@@ -128,18 +128,19 @@ D:\study\uav_sched_sim\
 
 | 命令 | 作用 | 可用参数 | 退出码 |
 |---|---|---|---|
-| `<PY> run.py check` | 环境自检：Python 版本、5 个依赖、配置可解析、3 个输出目录可写、MySQL 连通性、中文字体、12 个模块可导入、5 个调度器注册齐全 | `--config <路径>` | 0 通过 / 2 有 `[PROBLEM]` |
+| `<PY> run.py check` | 环境自检：Python 版本、5 个依赖、配置可解析、3 个输出目录可写、MySQL 连通性、中文字体、12 个模块可导入、**6 个调度器**注册齐全 | `--config <路径>` | 0 通过 / 2 有 `[PROBLEM]` |
 | `<PY> run.py calibrate` | 打印三工况标定报告：任务数、勘查间隔、提供负载、重传放大、有效负载、容量、负载率、目标、结论 | `--seed <int>`（默认取 `simulation.random_seed=20261031`） | 0 三工况均达标 / 1 有工况偏离目标 >25% |
 | `<PY> run.py one` | 跑**单组**「工况 × 策略」，打印 12 个关键指标 | `--scenario {LIGHT,NORMAL,PEAK}`（必填）<br>`--scheduler {fcfs,rr,priority,mlfq,dynamic}`（必填）<br>`--seed <int>`<br>`--no-db` | 0 成功 / 1 该组失败 |
-| `<PY> run.py all` | 跑**全量 15 组**，导出 summary.csv + metric_dictionary.csv + raw/*.json + task_records/*.csv，并自动出 7 张图 | `--no-db`（不写库）<br>`--seed <int>`<br>`--scenarios LIGHT NORMAL`（只跑指定工况）<br>`--schedulers dynamic mlfq`（只跑指定策略） | 0 全部成功 / 1 有组失败 |
+| `<PY> run.py all` | 跑**全量 15 组**，导出 summary.csv + metric_dictionary.csv + raw/*.json + task_records/*.csv，并自动出 7 张图；**默认追加 3 组「站级/MEC 伴生探针」→ `charts/09`**（独立目录 `results/station_probe/`，不进 summary.csv） | `--no-db`（不写库）<br>`--seed <int>`<br>`--scenarios LIGHT NORMAL`（只跑指定工况）<br>`--schedulers dynamic mlfq`（只跑指定策略）<br>`--no-station-probe`（跳过伴生探针） | 0 全部成功 / 1 有组失败 |
 | `<PY> run.py charts` | 只从 `results/raw/*.json` 重新出图（不重跑实验，改图样式时用） | 无 | 0 / 1（无 JSON 可读） |
 | `<PY> run.py demo-limiter` | 演示资源限流：1200 MB 大任务被 `REJECT_LARGE` 并切成 3 片、并发打满返回 `THROTTLE`、释放后可再进 | 无（演示用 `max_task_memory_mb=500`，故意设小以触发拒绝/分片） | 0 断言全过 / 1 断言失败 |
 | `<PY> run.py weather` | **天气对照实验**：固定 PEAK 工况，4 种天气（晴/雨/雪/沙尘）× 5 种策略 = 20 组，产出 `results/weather_matrix.csv` + `charts/08-天气-链路健康度与指标联动.png` + 中文结论（链路列是确定性结论，业务列为单次实跑口径） | 无 | 0 |
 | `<PY> run.py mec` | **MEC 对照实验**（纯中心 vs 多站-无MEC vs 端-边-云）：PEAK × 3 模式 × {dynamic, cross_node} = **12 组**，产出 `results/mec/mec_matrix.csv`（+ `results/mec/raw/`）、日志 `results/mec_run.log`；**不写数据库、不覆盖既有 15 组产物**（口径：单次实跑，详见 §4.10.5） | 无 | 0 |
+| `<PY> run.py stations` | **多站 × 多策略完整矩阵**（§4.11.4）：triple 拓扑 × **6 策略**（含 `cross_node`）× 3 工况 = **18 组**，MEC 关闭以隔离"拓扑×策略"；产出 `results/stations/stations_matrix.csv` + `raw/` + `charts/`（4 张），总览另存 `charts/10-多站×多策略矩阵.png`；**不写库、不碰 summary.csv** | `--seed`<br>`--scenarios`<br>`--schedulers`<br>`--no-chart` | 0 / 1 |
 | `<PY> run.py sensitivity` | 参数敏感性实验（固定 PEAK 工况，三组对照）：A. MLFQ aging 1500/6000 ms；B. RR 时间片 120/500/3000 ms；C. 弱网加剧 `retry_gain` 0.5→0.9（rr/mlfq/dynamic）。结果写 `results/sensitivity/`，**不入库** | 无 | 0 |
 | `<PY> run.py ui` | **启动实时可视化面板**（本地网页，纯标准库零依赖）：左侧无人机链路健康度色块、中间两级就绪队列 + 8 个工作线程槽位、右侧实时指标、底部队列深度曲线；可切工况/策略/速度 | `--port 8765`<br>`--host 127.0.0.1`<br>`--scenario PEAK`<br>`--scheduler dynamic`<br>`--speed 1`<br>`--autostart`<br>`--no-browser` | 0 / 正常 Ctrl+C 退出 |
-| `<PY> run.py replicate` | **重复实验**：每个「工况×策略」跑 N 次（**同一组种子 = CRN**），给出 均值±95% 置信半宽 与配对显著性；产出 `results/replications/*.csv`。补上了 `simulation.repetitions` 这个长期"预留未实现"的开关 | `--reps N`（默认取 config）<br>`--seed <int>`<br>`--scenarios`、`--schedulers`<br>`--no-db` | 0 |
-| `<PY> run.py gpu` | **GPU 大规模重复实验**（CUDA）：一个线程 = 一次仿真，秒级跑上万次；自动构建内核 → 运行 → 统计 → 出 3 份 CSV。无显卡时自动回退纯 Python 模型。详见 [`gpu/README.md`](gpu/README.md) | `--reps N`（默认 2000）<br>`--rebuild`<br>`--out-dir` | 0 成功 / 2 找不到 GPU 模块 |
+| `<PY> run.py replicate` | **重复实验**：每个「工况×策略」跑 N 次（**同一组种子 = CRN**），给出 均值±95% 置信半宽 与配对显著性；产出 `results/replications/*.csv`。补上了 `simulation.repetitions` 这个长期"预留未实现"的开关。**支持 `--variants single,triple,triple_mec`** 覆盖多站/MEC 面（配对**不跨变体**混算） | `--reps N`（默认取 config）<br>`--seed <int>`<br>`--scenarios`、`--schedulers`<br>`--variants`<br>`--no-db` | 0 |
+| `<PY> run.py gpu` | **GPU 大规模重复实验**（CUDA）：一个线程 = 一次仿真，秒级跑上万次；自动构建内核 → 运行 → 统计 → 出 3 份 CSV。无显卡时自动回退纯 Python 模型。**多站/MEC 档**用 `--stations N --mec`。详见 [`gpu/README.md`](gpu/README.md) | `--reps N`（默认 2000）<br>`--rebuild`<br>`--out-dir`<br>`--stations N`<br>`--mec` | 0 成功 / 2 找不到 GPU 模块 |
 | `<PY> run.py bench-weather` | **多运行场景测评**：晴/雨/雪/沙尘各跑 12s，按**帧间隔**采集 FPS / P95 / P99 / 最坏帧 / 掉帧率 / JS 堆，再做一次 9 倍像素压力测试；产出 `results/weather_eval/report.{json,csv,png}` | `--port 8791`<br>`--no-chart` | 0 通过 / 1 未通过 |
 
 **辅助脚本**
@@ -166,6 +167,10 @@ D:\study\uav_sched_sim\
 & ".\venv\Scripts\python.exe" app.py
 & ".\venv\Scripts\python.exe" app.py --port 8791
 & ".\venv\Scripts\python.exe" app.py --browser     # 强制用浏览器打开（降级模式）
+
+# 方式三：直接开多基站演示（3 站端-边-云 + MEC，见 §4.11.1）
+& ".\venv\Scripts\python.exe" app.py --stations triple --mec
+& "dist\无人机集群调度仿真系统.exe" --stations triple --mec --browser --port 8795
 ```
 
 **窗口里看到的是三维仿真场景**（Three.js + WebGL，约 3.3 万顶点地形 + 30 架无人机）：
@@ -181,7 +186,8 @@ D:\study\uav_sched_sim\
 | 底部曲线 + 右侧面板 | 队列深度时序、吞吐、重传、上下文切换、饥饿率 | 性能计数器（≈ top/vmstat） |
 
 操作：**左键拖拽旋转、滚轮缩放、右键平移**；左下角可切换「立体视角 / 俯视 / 地面站 / 环绕巡航」；
-顶部可切工况（3 种）、策略（6 种：原 5 种 + `cross_node`）、速度（0.5×~4×），点「▶ 开始仿真」即实时演算。
+顶部可切工况（3 种）、策略（6 种：原 5 种 + `cross_node`）、速度（0.5×~4×）、**拓扑（单站 / 3 站·端-边-云，
+"重启仿真后生效"）**，点「▶ 开始仿真」即实时演算。URL 还支持 `?cam=iso|top|station|pit` 直接落到指定机位（截图/演示用）。
 
 > ⚠️ 面板为了"看得清"把 `runtime.time_scale` 调大了（PEAK 90 仿真秒 ≈ 22.5 真实秒），
 > **只影响观看速度，不影响任何指标口径**。正式实验数据仍以 `run.py all` 为准。
@@ -321,6 +327,8 @@ http://127.0.0.1:<端口>/static/_dev_weather.html     # 天气：?preset=dust&i
   ```
 * **`--paths src` 不能少**：`uav_sim` 源码在 `src/` 下，不加这条会漏打整个包，
   表现为"双击闪退"（本项目实测踩过，报 `ModuleNotFoundError: uav_sim.config`）。
+* **exe 也支持多基站参数**：`& "dist\无人机集群调度仿真系统.exe" --stations triple --mec`
+  （与 `app.py` 同一套 argparse，见 §4.11.1）。不传参数 = 单站默认，行为与以前完全一致。
 * exe 运行时的可写目录是 **exe 所在目录**：`logs/app.log`（崩溃日志）、`logs/ui.port`、
   `results/`、`charts/` 都落在 exe 旁边；`config.yaml` 优先读 exe 旁边（可现场改参数），
   没有则用打包内置的一份。
@@ -583,7 +591,7 @@ curl -o trace.csv "http://127.0.0.1:8765/api/trace?format=csv"
 | 拓扑 | `stations.nodes` = 1×CENTER，`workers=8` | 多站路径**退化为单站**，`stations[]` 长度恒为 1 |
 | MEC | `mec.enable=false` | 纯中心，**不改调度行为** |
 | 策略矩阵 | 3 工况 × 5 经典策略 = 15 组 | `cross_node` **不入矩阵** |
-| 指标 | 既有 24 个口径不变；新增 18 个站级/MEC 键恒为 0/等价值 | 结构与口径不变 |
+| 指标 | 既有 24 个口径不变；站级/MEC 18 个键恒为 0/等价值；quorum 4 个键中 `quorum_commits` 单站下**等于完成数**、其余 3 个恒 0（键总数 **24 → 46**） | 结构与行数口径不变（`summary.csv` 仍 15 行；新增键按 `METRIC_SPEC` 自动多出列） |
 
 > 对拍产物在**仓库外**：`D:\study\uav_sched_sim-archive\regress\`（`summary_before/run1/run2.csv` + `compare_jitter.py`）。
 > **不引入抖动基线就宣称"没改坏"，是口号；有了它才是可复现的对照证据。**
@@ -660,6 +668,101 @@ curl "http://127.0.0.1:8765/api/chaos?kind=recover"                           # 
 ![多基站 3D 场景](docs/images/19-多基站-3D场景.png)
 ![OS 透视多基站页签](docs/images/20-多基站-OS透视页签.png)
 ![节点宕机混沌](docs/images/21-多基站-节点宕机.png)
+![网络分区](docs/images/22-多基站-网络分区.png)
+![脑裂与最小 quorum](docs/images/23-多基站-脑裂与quorum.png)
+
+---
+
+## 4.11 多基站能力补完（2026-11 第二轮：把 `docs/11` §8 诚实清单做掉）
+
+> 上一轮（4.10）把系统从"单机内核"演进到"分布式系统"；这一轮把当时如实列出的
+> **7 条待办**逐条推进，并明确标注哪些是"部分完成"。完整说明与实测数字见
+> [`docs/11-多基站与MEC边缘计算.md`](docs/11-多基站与MEC边缘计算.md) §4.6~§5.4、§8。
+
+### 4.11.1 桌面版 / exe 能直接开多站（体验缺口）
+
+```powershell
+& ".\.venv\Scripts\python.exe" app.py --stations triple --mec
+& "dist\无人机集群调度仿真系统.exe" --stations triple --mec --browser --port 8795
+```
+
+3D 页顶栏还新增了**「拓扑」下拉**（单站 / 3 站·端-边-云）：选完调
+`GET /api/topology?stations=...&mec=...`，界面明确提示「**重启仿真后生效**」。
+右键"下次生效"而不是立刻热切换：运行中换拓扑会让正在跑的仿真状态错乱，重跑又会丢进度。
+
+### 4.11.2 一致性哈希**再平衡**（增删站只迁约 1/N 的键）
+
+| 场景 | 重映射比例（实测） | 理论 | 单调性 |
+|---|---|---|---|
+| 加站 3 → 4 | **28.82 %**（1153/4000 key） | 1/(N+1) = 25 % | 变化的 key **全部迁往新站** |
+| 删站 3 → 2 | **30.30 %**（1212/4000 key） | 1/N = 33.3 % | 变化的 key **全部来自被删站** |
+| 仿真器接入归属（30 架机）加站 | 7/30 | — | 全部落到新站 |
+
+比例写"约 1/N"而不是精确值：64 个虚拟节点在 N=3 时单站占环比例本身有 ±8 pp 固有波动。
+**零容差断言只给单调性**（纯逻辑），比例容差取区间（覆盖 >3σ，同时否决"退化成朴素取模的 100 % 重映射"）。
+
+### 4.11.3 分区期间的**最小 quorum 共识**（教学用，不是 Raft）
+
+`term` + 每站投票 + `majority = floor(N/2)+1`（按**总站数**，不随在线数下降）+
+写入确认（无多数派侧**回滚**、恢复后**重放**）。N=3 脑裂 `{1} | {2,3}` 实测：
+
+| 步骤 | term | commits | rejects | uncommitted | done |
+|---|---|---|---|---|---|
+| 1 号站（少数派侧）完成 1 个 | 1 | 0 | **1** | **1** | **0**（回滚） |
+| 2/3 号站完成 2 个 | 1 | **2** | 1 | 1 | **2** |
+| 恢复后重放并跑完 | 2 | 3 | 1 | 0 | **3**（一个不丢） |
+
+**明确不含** Raft 全量语义：无日志复制、无选举超时/拉票 RPC、无成员变更；`term` 只在
+分区注入与恢复时 +1，投票是"新任期全站赞成"的简化。指标新增
+`quorum_commits / quorum_rejects / uncommitted_tasks / quorum_term`（`METRIC_SPEC` **24 → 46**）。
+
+> **口径例外**：`quorum_commits` 在**单站/未分区多站**下**等于完成数（不是 0）** ——
+> 单站 `majority=1`，每次完成都是一次成功确认。
+
+### 4.11.4 多站 × 多策略完整矩阵 + 站级指标进常规流程
+
+```powershell
+& ".\.venv\Scripts\python.exe" run.py stations      # triple × 6 策略 × 3 工况 = 18 组
+& ".\.venv\Scripts\python.exe" run.py all --no-db   # 15 组不变 + 3 组伴生探针 + charts/09
+```
+
+| 工况 | `dynamic` 不均衡度 | `cross_node` 不均衡度 | 迁移次数 |
+|---|---|---|---|
+| NORMAL | 0.555 | **0.289** | 240 |
+| PEAK | 0.551 | **0.107**（−81 %） | **1261**（平均 551 ms/次） |
+
+**15 组口径没动**：`results/summary.csv` 仍是表头 + 15 行，`charts/01~08` 生成逻辑未改，
+站级/MEC 走**独立目录 + 独立图**（`results/stations/`、`results/station_probe/`、`charts/09`、`charts/10`）。
+
+### 4.11.5 重复实验覆盖多站/MEC（给"抖动"一个置信区间）
+
+```powershell
+& ".\.venv\Scripts\python.exe" run.py replicate --reps 10 --scenarios PEAK `
+    --schedulers dynamic cross_node --variants single,triple,triple_mec --no-db
+```
+
+reps=3 实测（18 次仿真）：唯一显著且方向合理的是 **triple 档 cross_node − dynamic 的
+站间不均衡度差 −0.407 ± 0.115**；`triple_mec` 档不显著（−0.000 ± 0.002）。
+**reps=3 只演示方法可用**（df=2 → t=4.303，个别指标相对半宽 >70 %），下结论请 `--reps ≥ 10`。
+
+### 4.11.6 GPU 分析模型的多站 / MEC 版本
+
+```powershell
+.\gpu\build.ps1 -Rebuild
+& ".\.venv\Scripts\python.exe" gpu\run_gpu.py --backend cuda --stations 3 --mec --reps 300 --out-dir results\gpu\multi_cuda
+& ".\.venv\Scripts\python.exe" gpu\run_gpu.py --backend python --stations 3 --mec --reps 300 --out-dir results\gpu\multi_py
+```
+
+Python 参考模型 ↔ CUDA 内核对拍（各 300 reps）：多站/MEC 档偏差 **≤ ±0.5 %**，
+`cross_node` 迁移次数 **0.00 %**；默认 `--stations 1` 仍走原内核，与改前 CSV
+**100 行 × 13 列 0 处不一致**。分析模型是"同规则不同实现"，**不逐位复刻**参考仿真器。
+
+### 4.11.7 一致性哈希再平衡、分区/脑裂截图与验收
+
+截图 6 张（`docs/images/19~23` + `19-…-分区与多数派`），全部由当前代码产出、
+脚本内联断言全 `[OK]`。新增测试 5 个文件共 **32** 条用例；三件套门禁
+`ruff` / `pytest`（**83 → 115 passed / 0 failed**）/ `run.py check` 全过。
+exe 已重新打包并实跑验证（`--stations triple --mec` → `/api/state` 3 站 + 脑裂拒写可见）。
 
 ---
 
@@ -759,7 +862,7 @@ mysql --host=127.0.0.1 --port=3306 --user=root -p --database=uav_sched_sim -e "s
 
 ### 12. 测试怎么跑？
 
-三种方式，任选其一（`tests/` 下共 8 个测试文件、58 个用例，全部通过）：
+三种方式，任选其一（`tests/` 下共 **15** 个测试文件、**115** 个用例，全部通过）：
 
 ```powershell
 # ① 推荐：pytest（pyproject.toml 里已配好 testpaths/pythonpath，无需设 PYTHONPATH）
@@ -783,6 +886,17 @@ $env:PYTHONIOENCODING = 'utf-8'
 CRN 种子清单）；`tests/test_des_model.py` 覆盖 GPU 分析模型的确定性、指标区间
 与两条教学结论（含那条对本方案不利的「权重形同虚设」）；`tests/test_end_to_end.py`
 校验「同 `(scenario, seed)` 两次 `generate_trace()` 逐元素相同」这条可复现性红线。
+
+多基站相关的测试（本轮为 5 个文件 + 既有 1 个）：
+
+| 文件 | 用例 | 守什么 |
+|---|---|---|
+| `test_distributed.py` | 21 | 多基站/MEC/跨节点/迁移/混沌/接口契约 + **单站链路 SHA-256 基线** |
+| `test_rebalance.py` | 7 | 一致性哈希再平衡的**单调性**（零容差）+ 比例区间 + 热加站不崩 |
+| `test_quorum.py` | 6 | 脑裂少数派回滚 / 多数派提交 / 恢复后重放不丢 / 多数派按总站数 / 单站退化 |
+| `test_station_matrix.py` | 6 | `run.py stations` 18 组口径 + **summary.csv 仍 15 行** + 默认策略集仍 5 个经典 |
+| `test_replication_variants.py` | 4 | 变体重复实验的 cell key / CSV 列 / **配对不跨变体混算** |
+| `test_des_multistation.py` | 9 | GPU 模型多站/MEC：单站基线逐位、单站退化、不均衡下降、MEC 分流、口径校准 |
 
 ---
 

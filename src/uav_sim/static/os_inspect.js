@@ -97,6 +97,7 @@
     ".osStBadge.on{border-color:#3ddc97;color:#b8ffe2;background:#0e2a20}",
     ".osStBadge.part{border-color:#9aa7b2;color:#d5dde4;background:#1a2028}",
     ".osStBadge.dead{border-color:#8a2222;color:#ffb3b3;background:#2a1414}",
+    ".osStBadge.nomaj{border-color:#a83a3a;color:#ffb3b3;background:#2a1414}",
     ".osStLine{display:flex;gap:14px;flex-wrap:wrap;margin-top:4px;color:#bcd6ee}",
     ".osStLine span b{color:#eaf6ff}",
     ".osLoadWrap{margin-top:5px;height:7px;background:#10202f;border-radius:4px;overflow:hidden}",
@@ -105,6 +106,12 @@
     ".osMecBar{display:flex;height:16px;border-radius:4px;overflow:hidden;margin:6px 0}",
     ".osMecBar span{display:flex;align-items:center;justify-content:center;font-size:9px;color:#04121f}",
     ".osMecE2E{display:flex;gap:14px;margin-top:4px;flex-wrap:wrap;font-size:11px;color:#bcd6ee}",
+    /* ---- 最小 quorum 共识卡片（P4） ---- */
+    ".osQ{border-top:1px dashed #1e3a55;margin-top:10px;padding-top:8px}",
+    ".osQGroups{display:flex;gap:8px;flex-wrap:wrap;margin:5px 0}",
+    ".osQGroup{font-size:10px;padding:2px 8px;border-radius:10px;border:1px solid #2f6fa8;color:#9dc4e6}",
+    ".osQGroup.ok{border-color:#3ddc97;color:#b8ffe2;background:#0e2a20}",
+    ".osQGroup.bad{border-color:#a83a3a;color:#ffb3b3;background:#2a1414}",
   ].join("\n");
 
   function h(tag, cls, txt) {
@@ -183,6 +190,7 @@
       '  <section id="os-station">',
       '    <div class="osStGrid" id="osStation"></div>',
       '    <div class="osMec" id="osMec"></div>',
+      '    <div class="osQ" id="osQuorum"></div>',
       '  </section>',
       '</div>',
     ].join("");
@@ -200,6 +208,7 @@
     els.replayText = panel.querySelector("#osReplayText");
     els.station = panel.querySelector("#osStation");
     els.mec = panel.querySelector("#osMec");
+    els.quorum = panel.querySelector("#osQuorum");
 
     btn.addEventListener("click", function () {
       state.open = !state.open;
@@ -545,11 +554,21 @@
           ? '<span class="osStBadge dead">离线</span>'
           : (part ? '<span class="osStBadge part">分区 / 脑裂</span>'
                   : '<span class="osStBadge on">在线</span>');
+        /* 分区读数（P4）：脑裂截图要"一屏同时看到两侧" ——
+           1 号站显示「分区组 1 · 无多数派」，2/3 号站显示「分区组 2 · 多数派」。
+           多数派口径 = floor(总站数/2)+1（不看在线站数，Raft 口径）。 */
+        var pg = Number(s.partition_group != null ? s.partition_group
+                                                  : (s.partitioned ? 1 : 0));
+        var majOk = (s.is_majority === undefined) ? true : !!s.is_majority;
+        var partBadge = (pg > 0)
+          ? '<span class="osStBadge ' + (majOk ? "on" : "nomaj") + '">分区组 ' + pg +
+            ' · ' + (majOk ? "多数派" : "无多数派") + '</span>'
+          : '';
         html += '<div class="osStCard' + (off ? " off" : "") + '" style="border-left-color:' + color + '">' +
           '<div class="osStTop">' +
           '<b>' + (s.name || ("站点 " + s.id)) + '</b>' +
           '<span class="osStBadge ' + (String(s.role).toUpperCase() === "EDGE" ? "edge" : "center") + '">' +
-          roleName(s.role) + '</span>' + badgeState +
+          roleName(s.role) + '</span>' + badgeState + partBadge +
           '</div>' +
           '<div class="osStLine">' +
           '<span>线程 <b>' + (s.active || 0) + '</b>忙 / <b>' + (s.idle || 0) + '</b>闲 · 共 ' +
@@ -572,6 +591,48 @@
     }
     grid.innerHTML = html;
     renderMec(live);
+    renderQuorum(live);
+  }
+
+  /* ------------------------------------------------------------ 最小 quorum 共识 */
+  /* 后端 live.quorum（键名冻结，见 docs/11 §5）：
+     { term, majority, has_majority, groups:[{ids,size,has_quorum}],
+       commits, rejects, uncommitted, votes, replayed }
+     单站退化：majority=1、groups=[{ids:[1],has_quorum:true}]、has_majority=true。 */
+  function renderQuorum(live) {
+    if (!els.quorum) return;
+    var q = live && live.quorum;
+    if (!q) {
+      els.quorum.innerHTML = '<div class="osNote">共识（quorum）：后端未下发 live.quorum 数据。</div>';
+      return;
+    }
+    var groups = q.groups || [];
+    var chips = [];
+    for (var i = 0; i < groups.length; i++) {
+      var g = groups[i] || {};
+      var ids = (g.ids || []).join(", ");
+      chips.push('<span class="osQGroup ' + (g.has_quorum ? "ok" : "bad") + '">{' + ids + '} ' +
+        (g.has_quorum ? "多数派 ✓" : "无多数派 ✗") + '</span>');
+    }
+    var maj = Number(q.majority) || 1;
+    var hasMaj = q.has_majority !== false;   // 缺省视为"有"（旧快照兼容）
+    els.quorum.innerHTML =
+      '<div class="osKv"><span>共识任期 term</span><b>' + (Number(q.term) || 0) +
+      ' · 多数派门槛 ' + maj + ' / 共 ' + groups.length + ' 组</b></div>' +
+      '<div class="osKv"><span>是否有多数派</span><b style="color:' +
+      (hasMaj ? "#3ddc97" : "#ff6b6b") + '">' + (hasMaj ? "有 ✓" : "无 ✗") + '</b></div>' +
+      '<div class="osQGroups">' + chips.join("") + '</div>' +
+      '<div class="osStLine"><span>提交（确认）<b style="color:#3ddc97">' +
+      (Number(q.commits) || 0) + '</b> 次</span>' +
+      '<span>拒绝（回滚）<b style="color:#ff8a8a">' + (Number(q.rejects) || 0) + '</b> 次</span>' +
+      '<span>未确认<b style="color:#ffd166">' + (Number(q.uncommitted) || 0) + '</b> 个</span>' +
+      (q.replayed ? '<span>已重放<b>' + Number(q.replayed) + '</b> 个</span>' : "") +
+      '</div>' +
+      '<div class="osNote" style="margin-top:4px">写入确认语义：任务跑完只是"本地完成"，' +
+      '还要看**所在分区组是否仍有多数派** —— 有则提交（计入完成），无则回滚' +
+      '（不计完成、进"未确认"表，不留在队列）；分区恢复后**重放**这些未确认任务' +
+      '（勘查数据是业务产出，丢了就等于白飞；task_id 幂等，所以选重放而不是丢弃）。' +
+      '教学用最小共识：不做选举超时 / 日志复制 / 成员变更。</div>';
   }
 
   function renderMec(live) {

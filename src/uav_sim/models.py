@@ -358,6 +358,13 @@ METRIC_SPEC: Dict[str, tuple] = {
     "mec_crossing_data_mb": ("边缘卸载分水岭数据量", "MB", True),
     "mec_light_tasks": ("轻量任务数", "个", True),
     "mec_heavy_tasks": ("重勘查任务数", "个", True),
+    # ---- 最小 quorum 共识（P4；教学用，不做完整 Raft） ----
+    # 口径注意：**单站时 majority=1，任何完成都算提交**，因此 quorum_commits
+    # 在单站/未分区多站下等于完成数（不是 0）—— 见 docs/11 §7 的口径修订。
+    "quorum_commits": ("写入确认（提交）次数", "次", True),
+    "quorum_rejects": ("写入被拒（回滚）次数", "次", False),
+    "uncommitted_tasks": ("未确认任务数", "个", False),
+    "quorum_term": ("共识任期号", "term", False),
 }
 
 

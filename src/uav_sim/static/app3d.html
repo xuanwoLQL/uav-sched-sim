@@ -97,6 +97,18 @@
 #gpuBadge.mid{border-color:rgba(255,209,102,.45);color:#ffdf9b}
 #gpuBadge.cpu{border-color:rgba(255,107,107,.45);color:#ffb0b0}
 #fpsBadge{color:#8fb6d8;min-width:64px;text-align:center}
+  /* 多基站拓扑下拉 + "重启仿真后生效"提示（docs/11 §1.7 / §6） */
+  #topoHint{font-size:10.5px;color:var(--cyan);opacity:0;transition:opacity .25s;
+    max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #topoHint.on{opacity:1}
+  /* quorum 徽章：绿=有多数派且未分区；琥珀=分区但某侧仍有多数派；红=无多数派（脑裂失一致） */
+  #quorumBadge{font:500 10px/1 ui-monospace,Consolas,monospace;letter-spacing:.2px;
+    padding:4px 8px;border-radius:7px;border:1px solid rgba(78,161,255,.30);
+    background:rgba(10,22,34,.66);color:#9fb6cc;white-space:nowrap;display:none;
+    overflow:hidden;text-overflow:ellipsis;max-width:260px}
+  #quorumBadge.ok{border-color:rgba(61,220,151,.45);color:#7ff0bf}
+  #quorumBadge.warn{border-color:rgba(255,209,102,.5);color:#ffdf9b}
+  #quorumBadge.bad{border-color:rgba(255,107,107,.55);color:#ffb0b0}
 /* 电影暗角：纯 CSS，零 GPU 成本 */
 .todrow{display:flex;gap:5px;margin-top:6px;flex-wrap:wrap}
 button.ghost.on{border-color:rgba(55,226,213,.75);color:#9ff7ee;
@@ -123,11 +135,22 @@ button.ghost.on{border-color:rgba(55,226,213,.75);color:#9ff7ee;
       <option value="2">2×</option><option value="4">4×</option>
     </select>
   </div>
+  <!-- 拓扑：只设"会话默认值"（/api/topology），下一次点「开始仿真」才生效。
+       为什么不直接改 /api/start 的参数：运行中换拓扑会让正在跑的仿真状态错乱。 -->
+  <div class="ctrl" style="margin-left:10px">
+    <label>拓扑</label>
+    <select id="topo" title="多基站拓扑（改动在重启仿真后生效）">
+      <option value="1">单站</option>
+      <option value="triple">3 站·端-边-云</option>
+    </select>
+    <span id="topoHint"></span>
+  </div>
   <button class="go" id="btnStart">▶ 开始仿真</button>
   <button class="stop" id="btnStop">■ 停止</button>
   <div id="stat">
     <div id="prog"><i></i></div>
     <span id="pillStatus">未开始</span>
+    <span id="quorumBadge" title="quorum 共识：任期 / 各分区组是否达到多数派">quorum -</span>
     <span id="gpuBadge" title="渲染后端">GPU 检测中…</span>
     <span id="fpsBadge">-- fps</span>
   </div>
@@ -169,6 +192,13 @@ button.ghost.on{border-color:rgba(55,226,213,.75);color:#9ff7ee;
   <div class="kv"><span>完成率</span><b id="rCompl">-</b></div>
   <div class="kv"><span>高/低优平均等待</span><b id="rWait">-</b></div>
   <div class="kv"><span>低优饥饿率</span><b id="rStarve">-</b></div>
+  <!-- 分布式共识（教学用最小 quorum，见 docs/11 §5）：单站时恒为 1/1 且不显示异常 -->
+  <div class="sep"></div>
+  <h3>分布式共识</h3>
+  <div class="kv"><span>任期 / 多数派</span><b id="qTerm">- / -</b></div>
+  <div class="kv"><span>分区视图</span><b id="qGroups">-</b></div>
+  <div class="kv"><span>已提交 / 被拒写</span><b id="qCommit">- / -</b></div>
+  <div class="kv"><span>未确认（待重放）</span><b id="qUncommitted">-</b></div>
 </div>
 
 <div class="panel" id="chartbox">
@@ -1541,11 +1571,19 @@ function stationAnchor(id, out) {
 function stationLabelText(r, load, off, part) {
   /* 名字里通常已经带了"中心站/边缘站"，标签再重复一遍角色会变成
      "边缘站 B · 边缘站 在线"。角色区分交给造型/配色与 os_inspect 面板，
-     这里只报状态与实时读数。 */
+     这里只报状态与实时读数。
+     分区时追加"G1""G1✗少数"这类短标记：脑裂演示里 3D 画面本身要能讲清
+     "两侧各自自认主，但只有多数派那侧能确认写入"（docs/11 §5.3）。
+     为什么用短标记：3D 标签是屏幕空间精灵，字一多就会互相重叠糊成一片
+     （实测长中文标签"组2✓多数派"直接糊成一团）—— 短标记才读得清。 */
   const st = off ? "离线" : (part ? "分区" : "在线");
+  let maj = "";
+  if (part) {
+    maj = " · G" + (r.partition_group != null ? r.partition_group : "?") +
+      (r.is_majority === true ? "✓多" : (r.is_majority === false ? "✗少" : ""));
+  }
   const n = r.uav_count != null ? r.uav_count : 0;
-  return (r.name || "地面站") + " · " + st +
-    " · 负载 " + loadText(load) + " · " + n + " 架";
+  return (r.name || "地面站") + " · " + st + maj + " · " + n + " 架";
 }
 
 /**
@@ -2010,10 +2048,18 @@ function initScene() {
   scene.fog = new THREE.FogExp2(0x0b1a26, 0.0016);
 
   camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.5, 5200);
-  camera.position.set(190, 130, 250);
+  /* `?cam=station`：起动时直接落到「地面站」机位 —— 给**多基站全景图**用。
+     需要它的原因（实测踩坑）：OrbitControls 的 update() 在 `follow` 或
+     autoRotate 模式下会每帧改写相机位姿，用 setTimeout 事后切机位会被下一帧
+     拉回默认视角（截图永远拍在"立体视角"）。放在构造期赋值就没有这个竞争。 */
+  const _camQ = new URLSearchParams(location.search).get("cam");
+  const _cam0 = (_camQ && CAMS[_camQ]) || null;
+  camera.position.set(_cam0 ? _cam0.pos[0] : 190, _cam0 ? _cam0.pos[1] : 130,
+    _cam0 ? _cam0.pos[2] : 250);
 
   controls = new THREE.OrbitControls(camera, renderer.domElement);
-  controls.target.set(-10, -12, -12);
+  controls.target.set(_cam0 ? _cam0.tgt[0] : -10, _cam0 ? _cam0.tgt[1] : -12,
+    _cam0 ? _cam0.tgt[2] : -12);
   controls.enableDamping = true;
   controls.dampingFactor = 0.075;
   controls.minDistance = 50;
@@ -2224,6 +2270,28 @@ function bindTodButtons() {
   });
 }
 function bindCamButtons() {
+  /* 供无头截图/自动化使用：`window.__uavCam("station")` 直接切机位。
+     为什么需要它：`--eval-file tools/shot_stations.js` 与 `--eval` 是同一个
+     Runtime.evaluate 表达式（shot.mjs 里 eval-file 会覆盖 --eval），所以截图脚本
+     没法再附带一段"点按钮"的 JS；而 OrbitControls 开了阻尼（update() 内部按
+     dampingFactor 平滑回位），裸改 camera.position 会被下一帧拉回去。这里把
+     "切机位"固化成页面上的一个函数，截图脚本直接调它即可（见 act=1 阶段）。 */
+  window.__uavCam = (k) => {
+    const c = CAMS[k];
+    if (!c) return false;
+    /* 关键一步：`state.camHold = true` 让 animate() 里的 `controls.update()` 停下来。
+       实测：只 `controls.enabled = false` 没用 —— update() 仍会把相机按 spherical
+       拉回拖动前的位姿，相机永远停在"立体视角"，截图拍到的是默认机位。 */
+    state.camHold = true;
+    state.follow = false;
+    controls.enabled = false;
+    controls.autoRotate = false; state.orbitMode = false;
+    camera.position.set(c.pos[0], c.pos[1], c.pos[2]);
+    controls.target.set(c.tgt[0], c.tgt[1], c.tgt[2]);
+    camera.lookAt(controls.target);
+    controls.update();      // 同步 spherical，供用户之后正常拖动时接着用
+    return true;
+  };
   document.querySelectorAll("[data-cam]").forEach(btn => {
     btn.onclick = () => {
       const k = btn.dataset.cam;
@@ -2322,6 +2390,71 @@ async function fetchState() {
 }
 function setText(id, v) { const e = document.getElementById(id); if (e) e.textContent = v; }
 
+/* ============================================================ 13.5 quorum（最小共识） */
+/* 后端 /api/state.live.quorum（docs/11 §5）：
+     { term, majority, has_majority, groups:[{ids,size,has_quorum}],
+       commits, rejects, uncommitted }
+   设计原则：字段缺失一律安全降级 —— 老后端 / 单站模式下这里不显示任何异常态。
+   语义提醒（教学用最小共识）：分区后两半都"自认在跑"，但只有达到 floor(N/2)+1 的
+   那一侧能确认写入；另一侧的完成会被回滚、等恢复后重放 —— 这就是脑裂失一致的可视化。 */
+function _qNum(o, keys, dft) {
+  for (let i = 0; i < keys.length; i++) {
+    const v = o ? o[keys[i]] : null;
+    if (v !== null && v !== undefined && isFinite(Number(v))) return Number(v);
+  }
+  return dft;
+}
+function _qGroupIds(g) {
+  if (Array.isArray(g)) return g.map(Number);
+  if (g && Array.isArray(g.ids)) return g.ids.map(Number);
+  return [];
+}
+function _qGroupHasQuorum(g, q) {
+  if (g && typeof g.has_quorum === "boolean") return g.has_quorum;
+  if (g && typeof g.hasQuorum === "boolean") return g.hasQuorum;
+  const size = (_qGroupIds(g).length) || _qNum(g, ["size"], 0);
+  return size >= _qNum(q, ["majority"], 1);
+}
+function updateQuorum(live) {
+  const q = live ? live.quorum : null;
+  const badge = document.getElementById("quorumBadge");
+  if (!q) {
+    if (badge) badge.style.display = "none";
+    setText("qTerm", "-"); setText("qGroups", "-");
+    setText("qCommit", "-"); setText("qUncommitted", "-");
+    return;
+  }
+  const term = _qNum(q, ["term"], 0);
+  const majority = _qNum(q, ["majority"], 1);
+  const groups = Array.isArray(q.groups) ? q.groups : [];
+  const commits = _qNum(q, ["commits", "quorum_commits"], 0);
+  const rejects = _qNum(q, ["rejects", "quorum_rejects"], 0);
+  const uncomm = _qNum(q, ["uncommitted", "uncommitted_tasks"], 0);
+  const anyQuorum = (typeof q.has_majority === "boolean") ? q.has_majority
+    : (groups.length ? groups.some(g => _qGroupHasQuorum(g, q)) : true);
+
+  let txt = "term " + term + " · 多数派 " + majority;
+  if (groups.length > 1) {
+    txt += " · " + groups.map(g => {
+      const ids = _qGroupIds(g);
+      return "{" + ids.join(",") + "}" + (_qGroupHasQuorum(g, q) ? "✓" : "✗");
+    }).join(" | ");
+  } else if (groups.length === 1) {
+    txt += " · {" + _qGroupIds(groups[0]).join(",") + "}";
+  }
+  if (badge) {
+    badge.style.display = "";
+    badge.textContent = txt;
+    badge.className = groups.length > 1 ? (anyQuorum ? "warn" : "bad")
+      : (anyQuorum ? "ok" : "bad");
+  }
+  setText("qTerm", term + " / " + majority);
+  setText("qGroups", groups.length ? groups.map(g => "{" + _qGroupIds(g).join(",") + "}").join(" | ")
+    : "未分区（全局多数派 " + majority + "）");
+  setText("qCommit", commits + " / " + rejects);
+  setText("qUncommitted", uncomm);
+}
+
 function applyState(st) {
   const live = st.live;
   const map = { idle: "未开始", running: "仿真中", finished: "已完成", stopped: "已停止", error: "出错" };
@@ -2336,6 +2469,8 @@ function applyState(st) {
 
   /* 多基站：与 /api/state.live 对齐（有 stations 画多站，没有退回单站；站点集合变了才重建几何） */
   try { syncStations(live); } catch (eSt) { console.warn("[Station] 同步失败：", eSt); }
+  /* quorum 共识状态（term / 各分区组是否达到多数派 / 提交与被拒写计数） */
+  try { updateQuorum(live); } catch (eQ) { console.warn("[Quorum] 同步失败：", eQ); }
 
   const runMap = {};
   if (live && live.running_tasks) live.running_tasks.forEach(t => { runMap[t.uav_id] = t; });
@@ -2707,18 +2842,24 @@ function animate() {
   }
 
   // ---- 跟随镜头：跟 1 号机，保持固定相对偏移 ----
-  if (state.follow && state.drones.length) {
-    const d = state.drones[0];
-    controls.target.lerp(d.pos, Math.min(1, dt * 2.4));
-    _followWant.set(d.pos.x + 26, d.pos.y + 15, d.pos.z + 26);
-    camera.position.lerp(_followWant, Math.min(1, dt * 1.7));
+  // 例外：state.camHold 为真时**完全不碰相机**（无头截图用）。
+  // 原因：OrbitControls 的 update() 会按保存的 spherical 把相机"拉回"未拖拽的位姿，
+  // 直接改 camera.position 会被下一帧覆盖；原来只有 `跟随` 模式会每帧强制写机位。
+  if (!state.camHold) {
+    if (state.follow && state.drones.length) {
+      const d = state.drones[0];
+      controls.target.lerp(d.pos, Math.min(1, dt * 2.4));
+      _followWant.set(d.pos.x + 26, d.pos.y + 15, d.pos.z + 26);
+      camera.position.lerp(_followWant, Math.min(1, dt * 1.7));
+    }
+    controls.update();
   }
 
   // ---- 文字 sprite 距离自适应 + 新 sprite 收集（frameCount 每帧自增，这里约每 1.5 秒扫一遍）----
   fitSprites();
   if (frameCount % 90 === 0) collectSprites();
 
-  controls.update();
+  if (!state.camHold) controls.update();
   if (composer) composer.render(); else renderer.render(scene, camera);
 
   // ---- 帧率 ----
@@ -2794,6 +2935,44 @@ async function initControls() {
   });
   scn.value = "PEAK"; sch.value = "dynamic";
 }
+
+/* 拓扑（多基站）× MEC：只在"下一次启动"生效（docs/11 §1.7 的 set_topology_default）。
+   为什么不让 /api/start 直接带参数：运行中换拓扑会让正在跑的仿真状态错乱；
+   而「开始仿真」按钮是纯前端行为，让服务端记住默认值是最小改动。
+   GET /api/topology 不带参数 = 只读当前会话默认值（用于刷新下拉选中项）。 */
+async function initTopology() {
+  const sel = document.getElementById("topo");
+  if (!sel) return;
+  try {
+    const r = await fetch("/api/topology", { cache: "no-store" });
+    const j = await r.json();
+    const st = String(j && j.stations ? j.stations : "1").toLowerCase();
+    const single = (st === "" || st === "1" || st === "single" || st === "none");
+    sel.value = single ? "1" : st;
+  } catch (e) { sel.value = "1"; }
+  if (!sel.querySelector('option[value="' + sel.value.replace(/"/g, "") + '"]')) sel.value = "1";
+  sel.onchange = async () => {
+    const v = sel.value;
+    // 单站 = stations 重置为 1 且关 MEC；多站 = triple + 打开 MEC（端-边-云）
+    const q = (v === "1") ? "?stations=1&mec=0"
+      : ("?stations=" + encodeURIComponent(v) + "&mec=1");
+    let msg = "已记录，重启仿真后生效";
+    try {
+      const r = await fetch("/api/topology" + q, { cache: "no-store" });
+      const j = await r.json();
+      msg = (j && j.ok)
+        ? ("已记录：" + (j.stations || "单站") + (j.mec ? " + MEC" : "") + " —— 重启仿真后生效")
+        : ((j && j.msg) || "设定失败");
+    } catch (e) { msg = "设定失败：本地服务未响应"; }
+    const hint = document.getElementById("topoHint");
+    if (hint) {
+      hint.textContent = msg;
+      hint.classList.add("on");
+      clearTimeout(hint._t);
+      hint._t = setTimeout(() => hint.classList.remove("on"), 5200);
+    }
+  };
+}
 document.getElementById("btnStart").onclick = async () => {
   const q = "?scenario=" + document.getElementById("scn").value
           + "&scheduler=" + document.getElementById("sch").value
@@ -2840,6 +3019,7 @@ async function bootWithDEM() {
       bindUpgradeButtons();
       applyTOD("dusk");
       initControls();
+      initTopology();
       fetchState();
       setInterval(fetchState, 120);
       animate();

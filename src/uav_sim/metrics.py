@@ -219,6 +219,8 @@ def compute_metrics(tasks: List[Task],
     # ---- 多基站 / MEC 扩展指标（改造建议第五章）----
     # 单站 + MEC 关闭时 station_metrics 全为 0，因此这些键恒为 0.0，
     # 与"改造前不存在这些指标"在数值上等价（既有结论不受影响）。
+    # 注意例外（P4）：``quorum_commits`` 在单站下 = 完成数而**不是** 0
+    # （majority=1，每次完成都算一次提交确认）—— 这是刻意口径，见 models.METRIC_SPEC。
     if station_metrics:
         for _k, _v in station_metrics.items():
             if _k in METRIC_SPEC:

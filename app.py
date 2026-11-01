@@ -27,6 +27,14 @@ app.py —— UavSchedulerSim 桌面版启动器
     pythonw app.py                # 同上，但不开控制台窗口（推荐给最终用户）
     python app.py --port 8791     # 指定端口（调试用）
     python app.py --browser       # 强制用浏览器打开（不建窗口）
+    python app.py --stations triple --mec
+                                  # 多基站演示：3 站（1×CENTER + 2×EDGE）+ MEC 边缘分流
+
+多基站（改造建议第五章 / docs/11）：
+    ``--stations`` / ``--mec`` 只是**会话默认拓扑** —— 与 ``run.py ui --stations ...``
+    走同一条服务端通道 ``Dashboard.set_topology_default()``。设完之后，3D 页面顶栏
+    点「开始仿真」就是多站演示，页面本身不需要带参数（按钮只发 /api/start）。
+    打包成 exe 后同样生效：exe 的参数会原样传给 main()。
 """
 
 from __future__ import annotations
@@ -83,11 +91,20 @@ def _prepare_console() -> None:
         pass
 
 
-def _start_server(cfg: dict, port: int):
-    """在后台线程启动本地 HTTP 服务，返回 (port, httpd)。"""
+def _start_server(cfg: dict, port: int, stations: str | None = None,
+                  mec: bool | None = None):
+    """在后台线程启动本地 HTTP 服务，返回 (port, httpd)。
+
+    ``stations`` / ``mec``：**会话默认拓扑**（None = 不改，保持单站 / 取 config）。
+    走的是 ``Dashboard.set_topology_default()`` —— 与 ``run.py ui --stations ...``
+    完全同一条通道（见 docs/11 §1.7 与 docs/10 §7）。
+    """
     from uav_sim.dashboard import make_server
 
-    httpd, _dash, real_port = make_server(cfg, host="127.0.0.1", port=port)
+    httpd, dash, real_port = make_server(cfg, host="127.0.0.1", port=port)
+    if stations is not None or mec is not None:
+        info = dash.set_topology_default(stations=stations, mec=mec)
+        _log(f"会话默认拓扑已设定：stations={info.get('stations')} mec={info.get('mec')}")
     t = threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.2},
                          name="DashHTTP", daemon=True)
     t.start()
@@ -159,6 +176,13 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="UavSchedulerSim 桌面版")
     ap.add_argument("--port", type=int, default=0, help="本地服务端口（0=自动分配空闲端口）")
     ap.add_argument("--browser", action="store_true", help="强制用浏览器打开（不建桌面窗口）")
+    # ---- 多基站 / MEC（docs/11）：只设"会话默认拓扑"，页面点「开始仿真」时生效 ----
+    ap.add_argument("--stations", default=None, metavar="TOPOLOGY",
+                    help="多基站拓扑名（如 triple = 1×CENTER + 2×EDGE；不填=单站默认）")
+    ap.add_argument("--mec", dest="mec", action="store_true", default=None,
+                    help="启用 MEC 边缘计算（轻量任务下沉 EDGE）")
+    ap.add_argument("--no-mec", dest="mec", action="store_false",
+                    help="显式关闭 MEC（覆盖 config.yaml 的 mec.enable）")
     args = ap.parse_args(argv)
 
     from uav_sim.config import load_config
@@ -170,8 +194,9 @@ def main(argv: list[str] | None = None) -> int:
     except Exception:  # noqa: BLE001
         _log("配置加载失败：\n" + traceback.format_exc())
         raise
+    stations = str(args.stations).strip().lower() if args.stations else None
     try:
-        port, httpd = _start_server(cfg, args.port)
+        port, httpd = _start_server(cfg, args.port, stations=stations, mec=args.mec)
         _log(f"本地服务已启动，端口 {port}")
     except Exception:  # noqa: BLE001
         _log("本地服务启动失败：\n" + traceback.format_exc())

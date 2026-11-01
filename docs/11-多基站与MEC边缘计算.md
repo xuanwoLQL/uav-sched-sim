@@ -28,6 +28,16 @@
 
 沿用 [`04-四层映射对照表.md`](04-四层映射对照表.md) 的写法：任选一行，从左讲到右就是一段完整叙述。
 
+### 0.2 本章两轮的演进（读之前先知道"每一节是哪一轮做的"）
+
+| 轮次 | 做了什么 | 对应章节 |
+|---|---|---|
+| **第一轮**（提交 `a028232`） | 多基站数据模型与门面、每 (uav, station) 链路、第 6 种策略 `cross_node`、MEC 端-边-云、分布式混沌注入、3D/OS 透视呈现 | §0~§3、§4.1~§4.5、§5.1~§5.2、§7 |
+| **第二轮**（本轮） | ① 桌面版/exe 可直接开多站 + 顶栏「拓扑」下拉（P0）<br>② 多站 × 多策略 18 组矩阵（P1）<br>③ 一致性哈希**再平衡**（P2，§5.4）<br>④ 分区期间**最小 quorum 共识**（P4，§5.3）<br>⑤ GPU 分析模型的多站/MEC 版本（P5，§4.8）<br>⑥ 站级指标进常规流程 + 重复实验覆盖多站/MEC（P6，§4.7）<br>⑦ 分区/脑裂截图（P3，§2.1） | §4.6、§4.7、§4.8、§5.3、§5.4、§2.1、§8 |
+
+> §8 是**诚实清单**：8 条里 **5 条 ✅ 已完成**、**2 条 🟡 部分完成**（quorum 只做教学用最小共识、
+> GPU 只做趋势对拍，边界都写在各自小节与 §8 里）、**1 条 ⛔ 明确不做**（§8 第 8 条「负载感知的接入切换」）。
+
 | # | 企业业务层：业务现象 / 痛点 | OS / 分布式原理层：本质 | 算法设计层：对策 | 代码实现层：文件 : 类 . 方法 | 可观测证据（指标 / 字段） |
 |---|---|---|---|---|---|
 | 1 | 一个矿区只架一座地面站，30 架机全往它上传，站一忙全网都卡 | **单节点瓶颈**：一台机器的 CPU 核数与网卡带宽是硬上限 | 把"一个站"拆成 N 个**基站节点**，每站独立线程池 + 独立两级队列 + 独立限流器 | `station.py : StationNode` / `StationCluster`；`simulator.py` 按站持有 queue/limiter/workers | `stations[].workers / active / idle / queue_depth / load / throughput` |
@@ -188,12 +198,12 @@ Task.migrate_count     # 迁移次数（0 = 从未迁移）
 | 默认拓扑 | 不配置 `station_spec` / `?stations=` 时用 `stations.nodes`：**1 个 CENTER 站**（`workers=8`），`snapshot()["stations"]` 长度恒为 `1` |
 | 默认 `station_of_uav` | 全部指向站 1 |
 | **确定性输入层（可证"逐位一致"）** | 任务到达轨迹、链路健康度曲线、服务时长标定**完全不受本次改造影响** —— 由 `tests/test_distributed.py::test_single_station_link_series_matches_pre_t1_baseline` 以 **SHA-256 + 1e-9 精度**守护（181 点 × 5 机，另含弱网三档均值与 `health_at(1, 0.0)`） |
-| 默认指标口径 | 既有 **24** 个指标的**键名 / 单位 / 方向 / 计算方式不变**；改造前后**结论级指标**（吞吐 / 完整率）差异落在**实跑抖动范围内**（PEAK ≤ 0.71 %，小于同代码两次运行的抖动基线 ≤ 1.12 %），**无系统性变化** —— 证据与对拍方法见 §7 |
+| 默认指标口径 | 既有 **24** 个指标的**键名 / 单位 / 方向 / 计算方式不变**；本轮又追加 22 个站级/MEC/quorum 指标（键总数 **24 → 46**，见 §7 表）；改造前后**结论级指标**（吞吐 / 完整率）差异落在**实跑抖动范围内**（PEAK ≤ 0.71 %，小于同代码两次运行的抖动基线 ≤ 1.12 %），**无系统性变化** —— 证据与对拍方法见 §7 |
 | 新策略的退化 | `cross_node` 在**没有 `stations` 属性的 MockSim** 下必须优雅退化为单站行为，不抛异常、不丢任务（否则 `tests/test_schedulers.py` 的通用循环会挂） |
 
 ### 1.7 `/api/state` 新增字段**全量清单**（契约，非示例）
 
-`live.stations[]` —— 每站一个对象，**共 25 个键**（`station.py : StationNode.to_dict()`）：
+`live.stations[]` —— 每站一个对象，**共 26 个键**（`station.py : StationNode.to_dict()`）：
 
 | 键 | 类型 | 含义 |
 |---|---|---|
@@ -202,6 +212,7 @@ Task.migrate_count     # 迁移次数（0 = 从未迁移）
 | `online` | bool | 是否在线（宕机注入后为 `false`） |
 | `partitioned` | bool | 是否处于分区中（= `partition_group > 0`） |
 | `partition_group` | int | 分区组号，`0` = 未分区；同组内可达 |
+| `is_majority` | bool | **本站所在（在线）分区组是否达到多数派**（`size >= floor(N/2)+1`，N = 总站数）。单站恒 `true`；离线站 `false`。最小 quorum 的 per-station 视图，见 §5.3 |
 | `workers` | int | 本站工作线程数（= 本站核数） |
 | `active` / `idle` | int | 在制任务数 / 空闲线程数 |
 | `queue_depth` / `queue_high` / `queue_low` | int | 本站队列总深 / 高优 / 低优 |
@@ -233,13 +244,26 @@ Task.migrate_count     # 迁移次数（0 = 从未迁移）
 
 `live.chaos` 新增 3 键：`nodes_down`（int[]，如 `[2]`）、`partitions`（int[][], 如 `[[1],[2,3]]`，`[]`=无分区）、`split_brain`（bool）。
 
+`live.quorum` —— **最小共识状态对象，9 个键**（`station.py : StationCluster.quorum_view()` + `Simulator.snapshot()`，见 §5.3）：
+
+| 键 | 类型 | 含义 |
+|---|---|---|
+| `term` | int | 当前**任期**。只在分区/脑裂注入与恢复时 +1（教学用最小共识的简化：没有选举超时） |
+| `majority` | int | 多数派门槛 `floor(N/2)+1`，**N = 总站数**（不随在线数下降，这是 Raft 口径） |
+| `has_majority` | bool | **是否存在任一分区组达到多数派**。分区后两半都"自认在跑"，但只有 `true` 的那侧能确认写入 |
+| `groups` | array | `[{ids:[1], size:1, has_quorum:false}, {ids:[2,3], size:2, has_quorum:true}]`；未分区时是全体在线站一组 |
+| `commits` | int | 已确认（提交）的完成数 = `quorum_commits` |
+| `rejects` | int | 无多数派侧被**回滚拒绝**的完成数 = `quorum_rejects` |
+| `uncommitted` | int | 当前挂在"未确认待重放"表里的任务数 = `uncommitted_tasks` |
+| `replayed` | int | 恢复后已重放的任务数（只增键，便于证明"回滚不等于丢数据"） |
+| `votes` | object | 每站投票状态 `{站号: {voted_term, vote_granted}}`（简化：新任期全站赞成） |
+
 ---
 
 ## 2. 3D 场景：多地面站、接入连线与切换动画
 
 改造前：场景里只有**一座**地面站，30 架机的上传光束全部指向它。
 改造后（`static/app3d.html` + `static/os_inspect.js`）：
-
 | # | 元素 | 表现 | 数据来源 |
 |---|---|---|---|
 | 1 | **多个地面站** | CENTER 与 EDGE **造型/颜色区分**，颜色取 `stations[].color` | `stations[]` |
@@ -247,7 +271,10 @@ Task.migrate_count     # 迁移次数（0 = 从未迁移）
 | 3 | **接入连线** | 每架无人机与其**接入站** `station_of_uav` 之间一条连线，颜色按 `link_matrix[uid][station]` 健康度着色。**画的是接入站**（无线电连到的基站），不是算力站 | `station_of_uav` / `link_matrix` |
 | 4 | **切换站点过渡动画** | 接入站**因宕机改派**时**不瞬间改线**：约 0.6 s 的位置/透明度/颜色插值（数据源是 `_station_of_uav()` 的改派，事件 `uav_rehome`）。**注意：任务迁移不会触发它**（迁移是服务器侧行为，无人机接入点不变，见 §1.4.1） | `station_of_uav` 的变化 |
 | 5 | **故障态** | `online=false` → 熄灭/暗红；`partitioned=true` → 灰色或虚线描边 | `stations[].online / partitioned` |
-| 6 | **OS 透视新增「多基站」页签** | 每站一行卡片（名称/角色/在线/分区、队列深度高/低、`load` 进度条、接入机数、迁移次数、吞吐）+ MEC 端-边-云分流比例与端到端时延对比 | `/api/state` |
+| 6 | **OS 透视新增「多基站」页签** | 每站一行卡片（名称/角色/在线/分区、队列深度高/低、`load` 进度条、接入机数、迁移次数、吞吐）+ MEC 端-边-云分流比例与端到端时延对比 + **quorum 共识卡片**（term / 多数派门槛 / 各组 ✓✗ / 提交-拒绝-未确认-已重放） | `/api/state` |
+| 7 | **顶栏「拓扑」下拉**（本轮新增） | 单站 / 3 站·端-边-云 二选一，改完调 `GET /api/topology?stations=...&mec=...`，界面提示「**重启仿真后生效**」。为什么是"下次生效"：运行中换拓扑会让正在跑的仿真状态错乱，而重跑又会丢掉当前进度 | `/api/topology` |
+| 8 | **顶栏 quorum 徽章**（本轮新增） | `term N · 多数派 M · {1}✗ \| {2,3}✓`，绿 / 琥珀 / 红三态；单站时不显示异常态。右侧面板新增「分布式共识」四行：任期/多数派、分区视图、已提交/被拒写、未确认（待重放） | `live.quorum` |
+| 9 | **站标签的分区短标记**（本轮新增） | 分区时站名后追加 `G1✗少` / `G2✓多`（短标记而非长中文：3D 标签是屏幕空间精灵，字多了会互相重叠糊成一片 —— 实测踩坑）。配合 `?cam=station` 机位，一屏能看到两侧各自在跑、只有多数派那侧能确认写入 | `stations[].partition_group / is_majority` |
 
 **优雅降级**（硬性要求）：后端未就绪或旧快照没有 `stations` 键时，前端**回退成"单站 = 原点"**表现，
 页面不得报错白屏。
@@ -255,12 +282,25 @@ Task.migrate_count     # 迁移次数（0 = 从未迁移）
 ### 2.1 实测截图
 
 ![多基站 3D 场景：中心站 + 边缘站、负载圈层与接入连线](images/19-多基站-3D场景.png)
-![OS 透视「多基站」页签：站级负载、迁移次数与 MEC 分流](images/20-多基站-OS透视页签.png)
+![OS 透视「多基站」页签：站级负载、迁移次数、MEC 分流与 quorum 共识卡片](images/20-多基站-OS透视页签.png)
 ![节点宕机混沌：某站熄灭 + 任务重调度到存活站](images/21-多基站-节点宕机.png)
+![网络分区：三站灰色虚线描边 + 每站「分区组 G · 多数派/无多数派」](images/22-多基站-网络分区.png)
+![脑裂与最小 quorum：{1} 无多数派侧写入被拒、{2,3} 多数派侧照常提交](images/23-多基站-脑裂与quorum.png)
+![3D 近景（地面站机位）：一屏同时看到 G1✗少 与 G2✓多 两侧各自在跑](images/19-多基站-3D场景-分区与多数派.png)
 
-> **截图状态：已生成**（QA 用无头浏览器产出，已归档到 `docs/images/`）：
-> `19-多基站-3D场景.png`、`20-多基站-OS透视页签.png`、`21-多基站-节点宕机.png`。
-> 若后续重拍导致文件名变化，以 QA 产物为准并同步修改本处引用。
+> **截图状态：已用当前代码全部重拍**（`tools/shot.mjs` + `tools/shot_stations.js` 无头 GPU 渲染，
+> 与实施代码同一次构建，脚本内联断言全 `[OK]`，逐张人工复核过）。六张图分别对应：
+> scene（全景）→ tab（OS 透视页签）→ down（节点宕机）→ **partition（网络分区）** →
+> **split_brain（脑裂 + 拒写证据）** → **act=1 + `?cam=station`（3D 近景）**。
+>
+> 为什么要重拍 19~21 三张旧图：上一轮那三张由旧代码产出，站卡片上还没有 quorum 字段；
+> 用新代码重拍后，画面与 `docs/11` 的字段表（`is_majority` / `live.quorum`）才是**同一份证据**。
+>
+> 另外还修了一个**真实的渲染 bug**（不是截图脚本的问题）：`OrbitControls` 开启阻尼后，
+> 每帧 `controls.update()` 会按内部 spherical 把相机拉回拖动前的位姿 —— 于是
+> "用 JS 改相机位姿再截图"永远拍在默认的「立体视角」。现在 `app3d.html` 支持
+> `?cam=<iso|top|station|pit>` URL 参数（构造期就落到指定机位），并暴露
+> `window.__uavCam(name)` 供自动化使用；截图脚本用 `&act=1&cam=station` 组合即可拍到近景。
 
 ---
 
@@ -317,7 +357,8 @@ consistent_hash(k)   = ring[ hash(k) ]  # 每站在环上占 hash_virtual_nodes=
 | `stations.migration_batch` | 单轮最大迁移数 | `8` |
 | `stations.hash_virtual_nodes` | 一致性哈希虚拟节点数 | `64` |
 
-**站级 / MEC 指标键**（`models.METRIC_SPEC` 新增 **18** 个，指标总数 **24 → 42**）：
+**站级 / MEC / quorum 指标键**（`models.METRIC_SPEC` 累计新增 **22** 个，指标总数 **24 → 46**；
+本轮在上一轮 18 个的基础上追加了最后 4 个 quorum 键）：
 
 | 指标键 | 中文名 | 单位 |
 |---|---|---|
@@ -339,6 +380,15 @@ consistent_hash(k)   = ring[ hash(k) ]  # 每站在环上占 hash_virtual_nodes=
 | `mec_crossing_data_mb` | 边缘卸载分水岭数据量 | MB |
 | `mec_light_tasks` | 轻量任务数 | 个 |
 | `mec_heavy_tasks` | 重勘查任务数 | 个 |
+| `quorum_commits` | 共识确认（提交）次数 | 次 |
+| `quorum_rejects` | 无多数派侧被拒写次数 | 次 |
+| `uncommitted_tasks` | 未确认（待重放）任务数 | 个 |
+| `quorum_term` | 共识任期 term | — |
+
+> **口径例外（本轮新增，必须写进报告）**：`quorum_commits` 在**单站 / 未分区多站**下
+> **等于完成数（不是 0）** —— 单站时 `majority=1`，每次正常完成都是一次成功确认；
+> `quorum_rejects` / `uncommitted_tasks` / `quorum_term` 在单站下**恒为 0**。
+> 这是刻意口径，见 §5.3。
 
 > 后 9 个（`e2e_if_*` / `e2e_light_if_*` / `e2e_heavy_if_*` / `mec_crossing_data_mb`）是**反事实对照**：
 > 同一批任务分别按"全下沉边缘""全回中心"重算时延，用来回答"这一份数据到底该不该卸载"（§4.3.1）。
@@ -636,6 +686,195 @@ d* = (center_access_ms − edge_access_ms)
 
 ---
 
+### 4.6 多站 × 多策略完整矩阵（`run.py stations`）
+
+§4.4 的 `run.py mec` 只跑「PEAK × 3 拓扑档 × 2 策略」= 12 组；要回答
+**"换拓扑之后 6 个策略谁好谁坏、结论会不会翻"**，需要铺满矩阵。新增子命令：
+
+```
+triple 拓扑（1×CENTER + 2×EDGE，MEC **关闭**）× 6 策略 × 3 工况 = 18 组
+```
+
+**为什么 MEC 关闭**：这一档要看的是「拓扑 × 策略」两维，把 MEC 角色硬约束混进来会
+把"站间均衡"和"角色分流"纠缠在一起（§4.4.2 已证明 MEC 分层会压制站间均衡）。
+
+产出：`results/stations/stations_matrix.csv`（20 行 = 2 行表头 + 18 组）、
+`results/stations/raw/*.json`、`results/stations/charts/*.png`（4 张），
+并把总览另存为 `charts/10-多站×多策略矩阵.png`。**不写数据库、不覆盖 `results/summary.csv`。**
+
+实测（`seed=20261031`，单次实跑，实耗 120.0 s）：
+
+| 工况 | 策略 | 完整率 % | 平均等待 ms | 站间不均衡度 | 迁移次数 | 迁移平均代价 ms |
+|---|---|---|---|---|---|---|
+| LIGHT | fcfs | 96.7 | 14 | 1.414 | 0 | 0 |
+| LIGHT | rr | 95.0 | 31 | 1.376 | 0 | 0 |
+| LIGHT | priority | 98.3 | 11 | 0.000 | 0 | 0 |
+| LIGHT | mlfq | 95.0 | 64 | 1.348 | 0 | 0 |
+| LIGHT | dynamic | 98.3 | 16 | 0.000 | 0 | 0 |
+| LIGHT | cross_node | 96.7 | 9 | 0.000 | 44 | 477.9 |
+| NORMAL | fcfs | 72.8 | 7336 | 0.434 | 0 | 0 |
+| NORMAL | rr | 91.1 | 1624 | 0.639 | 0 | 0 |
+| NORMAL | priority | 29.3 | 16391 | 0.326 | 0 | 0 |
+| NORMAL | mlfq | 92.9 | 1945 | 0.620 | 0 | 0 |
+| NORMAL | dynamic | 93.8 | 2184 | 0.555 | 0 | 0 |
+| NORMAL | **cross_node** | **95.1** | **1124** | **0.289** | 240 | 593.1 |
+| PEAK | fcfs | 33.6 | 20715 | 0.526 | 0 | 0 |
+| PEAK | rr | 89.3 | 4391 | 0.596 | 0 | 0 |
+| PEAK | priority | 31.3 | 21681 | 0.551 | 0 | 0 |
+| PEAK | mlfq | **95.9** | 1996 | 0.608 | 0 | 0 |
+| PEAK | dynamic | 95.2 | 2102 | 0.551 | 0 | 0 |
+| PEAK | **cross_node** | **95.3** | **1991** | **0.107** | **1261** | 551.4 |
+
+三条可直接引用的判读：
+
+1. **跨节点均衡在多站下确实有效，且不是免费的**：NORMAL 档不均衡度 0.555 → **0.289**
+   （240 次迁移）、PEAK 档 0.551 → **0.107（约 −81 %，1261 次迁移）**；
+   代价是平均代价 **551~593 ms** 的迁移开销，PEAK 档完整率只从 95.2 % 到 95.3 %（持平）。
+2. **多站矩阵没有推翻既有 15 组结论**：静态优先级 `priority` 在 NORMAL/PEAK 仍垫底
+   （29.3 % / 31.3 %），`{mlfq, dynamic}` 仍居第一档 —— 与单站 15 组方向一致；
+   多站只是把「站间不均衡」这一维暴露出来。
+3. **LIGHT 档的 `0.000` 不能读成"完美均衡"**：轻载时队列常空，变异系数分母趋 0 后退化，
+   该工况的站间均衡**不具备可判读性**（诚实边界见 §8 第 3 条）。
+
+---
+
+### 4.7 站级 / MEC 指标进入常规流程（不再只是独立子命令）
+
+### 4.7.1 `run.py all` 的**伴生探针**与独立图 `charts/09`
+
+`run.py all` 跑完 15 组、出完 01~08 张图之后，会**追加**一组独立的伴生探针：
+
+```
+PEAK × dynamic × {纯中心(单站) / 多站-无MEC(triple) / 端-边-云(triple+MEC)} = 3 组
+```
+
+结果写 **独立目录** `results/station_probe/`（独立 `results_dir` + 独立 CSV），
+产出新增独立图 `charts/09-站级与MEC指标.png`；`--no-station-probe` 可跳过；
+探针异常只打 `[警告]`，**不影响 15 组的成败判定与返回码**。
+
+> **口径红线**：15 组矩阵仍是「3 工况 × 5 个经典策略 = 15 行」，`results/summary.csv`
+> 的**行数不变**；站级/MEC 指标**刻意不进**这张表（理由见 §8 第 2 条与 §7.2 第 2 条）。
+> 这是"新增独立图表而非改既有 7 张图"的实现方式。
+
+伴生探针实测（单次实跑）：
+
+| 模式 | 站数 | MEC | 完整率 % | 平均等待 ms | 端到端 ms | 边缘分流 % | 不均衡度 |
+|---|---|---|---|---|---|---|---|
+| 纯中心(单站) | 1 | 关 | 95.8 | 2137 | 129.1 | 0.0 | 0.000 |
+| 多站-无MEC | 3 | 关 | 95.2 | 2093 | **96.9** | 59.4 | 0.572 |
+| 端-边-云 | 3 | 开 | 95.8 | **1892** | 106.4 | 98.8 | 1.401 |
+
+* 端到端：129.1 → 106.4 ms（**−17.6 %**）；**同一条命令另一次运行得到 −22.1 %**
+  —— 这正是"单次点估计不可当强结论"的现成证据；
+* 端-边-云不均衡度 1.401 高于多站-无MEC 的 0.572，是 MEC 角色硬约束的**设计使然**（§4.4.2）。
+
+### 4.7.2 `run.py replicate --variants`：多站/MEC 面的**均值 ± 95 % 置信区间**
+
+`run.py replicate` 原先只覆盖单站 5 策略；现在支持拓扑变体：
+
+```powershell
+& ".\.venv\Scripts\python.exe" run.py replicate --reps 3 --scenarios PEAK `
+    --schedulers dynamic cross_node --variants single,triple,triple_mec --no-db
+```
+
+变体语义：`single` = 单站；`triple` = 多站 + MEC 关；`triple_mec` = 多站 + MEC 开。
+cell key 升级为 `(variant, scenario, scheduler)`，`replication_summary.csv` 增 `variant` 列，
+**配对比较只在同一变体内进行**（不跨变体混算）。
+
+实测（reps=3，CRN 种子 20261031..33，6 单元 × 3 次 = 18 次仿真，实耗 164.9 s）：
+
+| 指标 | 变体 | dynamic | cross_node | 配对差 ± 95 % | 显著 |
+|---|---|---|---|---|---|
+| `station_load_imbalance` | single | 0.000 ± 0.000 | 0.000 ± 0.000 | 0.000 ± 0.000 | 否 |
+| | triple | 0.541 ± 0.050 | **0.134 ± 0.151** | **−0.407 ± 0.115** | **是** |
+| | triple_mec | 1.400 ± 0.010 | 1.400 ± 0.012 | −0.000 ± 0.002 | 否 |
+| `avg_e2e_ms` | single | 129.9 ± 10.5 | 128.5 ± 7.4 | — | — |
+| | triple | 120.5 ± 63.0 | 126.6 ± 29.3 | — | — |
+| | triple_mec | **113.6 ± 2.4** | **111.2 ± 3.4** | — | — |
+| `migration_count` | triple | 0 | **1140 ± 632** | 1140 ± 632 | **是** |
+| | triple_mec | 0 | **293 ± 86** | 293 ± 86 | **是** |
+
+**唯一在 reps=3 就显著、且方向合理的是「triple 变体内 cross_node 把站间不均衡度降 0.407
+（95 % CI 不含 0）」**；`triple_mec` 档的差异不显著（−0.000 ± 0.002），与 §4.4.2
+"MEC 分层压制站间均衡"的机制一致。
+
+> **诚实边界**：reps=3 时 df=2 → t=4.303，区间极宽（个别指标相对半宽 > 70 %），
+> 这只用来**演示统计方法可用**，下结论请 `--reps ≥ 10`。
+
+---
+
+### 4.8 GPU 分析模型的多站 / MEC 版本（`gpu/`，对应 §8 第 6 条）
+
+`gpu/` 目录原先是「单站 × 5 策略」的**独立分析模型**（一个 CUDA 线程跑一次完整仿真，
+RTX 3050 上约 12000 次/秒，用来补统计严谨性）。本轮把它扩到多站 + 第 6 策略 + MEC：
+
+```powershell
+.\gpu\build.ps1 -Rebuild                     # nvcc 13.3 + MSVC；脚本已处理 -Xcompiler=/utf-8 等三个坑
+& ".\.venv\Scripts\python.exe" gpu\run_gpu.py --backend cuda   --stations 3 --mec --reps 300 --out-dir results\gpu\multi_cuda
+& ".\.venv\Scripts\python.exe" gpu\run_gpu.py --backend python --stations 3 --mec --reps 300 --out-dir results\gpu\multi_py
+```
+
+**实现要点**：
+
+| 面 | 做法 |
+|---|---|
+| 参数与指标向后兼容 | `PARAM_ORDER` / `DEFAULT_PARAMS` / `METRIC_KEYS` **只在尾部追加**（Python 与 `.cu` 严格同序）；默认 `--stations 1` 走**原内核与原随机流**，`--reps/--out/--coeffs/--sweep/--starve-ms` 行为不变 |
+| 站维度 | 每站独立 workers/队列；任务按 `uav_id` 一致性哈希**接入**，`cross_node` 模式再按**最少连接**改判 + 迁移记账（在途 120 ms 不占槽位、剩余服务 ×1.15） |
+| MEC | 轻量任务 → EDGE、重勘查 → CENTER；端到端 = 接入 + 计算(按站算力) + 回传(仅回中心) |
+| 单站回归 | 新内核输出与改前 `gpu_per_replication.csv` 逐行比对：**100 行 × 13 列，0 处不一致** |
+
+**Python ↔ CUDA 对拍（各 300 reps，同 rep 相同随机流）**：
+
+| 档位 / 指标 | 纯 Python 参考 | CUDA 内核 | 偏差 |
+|---|---|---|---|
+| 3 站 + MEC / `dynamic` 吞吐 | 30.157 | 30.170 | **+0.04 %** |
+| 3 站 + MEC / `dynamic` 完整率 | 96.340 | 96.328 | −0.01 % |
+| 3 站 + MEC / `dynamic` 端到端 ms | 52.495 | 52.473 | −0.04 % |
+| 3 站 + MEC / 边缘分流 % | 99.068 | 99.069 | +0.00 % |
+| 3 站 + MEC / 不均衡度 | 1.324 | 1.325 | +0.08 % |
+| 3 站 + MEC / `cross_node` 迁移次数 | 71.440 | 71.440 | **0.00 %** |
+| 3 站 + MEC / `cross_node` 迁移均代价 ms | 121.527 | 121.527 | **0.00 %** |
+| 3 站无 MEC / `cross_node` 不均衡度 | 0.174 | 0.172 | −1.0 % |
+| 3 站无 MEC / `cross_node` 迁移次数 | 649.747 | 646.490 | −0.50 % |
+| 单站 5 策略 / 吞吐 | — | — | −0.45 % ~ +0.05 % |
+
+**三档趋势**（CUDA 内核，300 次重复 —— 可直接引用）：
+
+| 档位 | 策略 | 端到端 ms | 边缘分流 % | 站间不均衡 | 完整率 % | 吞吐 /s | 迁移次数 |
+|---|---|---|---|---|---|---|---|
+| 纯中心（1 站 + 记账） | `dynamic` | **120.3** | 0.00 | 0.000 | 89.96 | 28.13 | 0 |
+| 多站无 MEC（3 站） | `dynamic` | 223.9 | 63.50 | 0.217 | 83.51 | 26.12 | 0 |
+| **端-边-云（3 站 + MEC）** | `dynamic` | **52.5（−56.3 %）** | 99.07 | 1.325 | 96.33 | 30.17 | 0 |
+| 多站无 MEC（3 站） | `cross_node` | 225.5 | 65.97 | **0.172** | 82.29 | 25.75 | 646.5 |
+| 端-边-云（3 站 + MEC） | `cross_node` | 52.1 | 99.05 | 1.324 | 96.34 | 30.19 | 71.4 |
+
+四条结论（**每条都带代价，别只报好消息**）：
+
+1. **端到端时延**：纯中心 120.3 ms → 端-边-云 52.5 ms（−56.3 %），方向与 §4.4.1（参考实现
+   −13.3 %）一致；**本模型算出的"纯中心" 120.3 ms 与参考实现的 122.71 ms 几乎重合**，
+   说明「接入 + 计算 + 回传」这套记账口径同源；
+2. **加站 + 跨节点均衡确实压低站间不均衡**：3 站关 MEC 时 0.217 → **0.172（约 −21 %）**，
+   代价是 646.5 次迁移/次仿真（平均 145 ms）、完整率 83.51 % → 82.29 %（−1.2 pp）、
+   低优等待 +2.3 %；**"均衡度改善"与"等待变长"必须同时写**；
+3. **MEC 分层会压制站间均衡**：端-边-云档 1.325 —— 角色硬约束把重勘查全钉在 CENTER，
+   结构性不均来自设计（与 §4.4.2「1.401 → 1.399 未降」同一条结论）；
+4. **`edge_offload_pct ≈ 99 %` 不是成绩**：PEAK 工况轻量任务本来占 ~98.8 %，MEC 又把轻量
+   全部下沉，接近 100 % 是**任务配比的算术后果**（同 §4.3.1 口径）；关 MEC 时的 63.5 % 是
+   **接入亲和**（哈希落点本来 2/3 在边缘站），不是 MEC 卸载。
+
+> **诚实边界**：分析模型是"同规则、不同实现"，**不逐位复刻**参考仿真器；未移植
+> `WorkloadTrace`、任务分片、单机配额、天气与混沌注入；MEC 用**任务类别**近似数据量
+> （标定常量使边缘算力 120 Mbps 时分水岭正好落在 3.36 MB，与参考实现同量级）；
+> 端到端**不含排队**（与 `mec.py` 同口径）；均衡收益（−21 %）比参考实现的
+> "一个数量级"小，原因是本模型用总容量守恒的均匀槽位、迁出水位也更保守；
+> **单站路径（`--stations 1` 且不带 `--mec`）的 `e2e_ms` 恒为 0**（走原模型，无站维度），
+> 要测时延必须带 `--mec`；偏差集中在二次噪声型指标（`station_imb`、低优等待）——
+> 两条实现的浮点累加顺序不同（float vs double、站点遍历顺序）。
+> 因此**只用来看趋势与做统计推断，不要拿绝对值和参考实现逐项对号**。
+> 复现与更多细节见 `gpu/README.md` §9、测试 `tests/test_des_multistation.py`。
+
+---
+
 ## 5. 混沌扩展：节点宕机 / 网络分区 / 脑裂
 
 第 1~4 章已有 3 种注入（弱网风暴 / 并发洪峰 / 死锁，见 [`10-OS微观透视与混沌工程.md`](10-OS微观透视与混沌工程.md) §3）。
@@ -693,6 +932,112 @@ curl "http://127.0.0.1:8765/api/state"    # 看 stations / station_of_uav / link
 | 恢复之后 | 站点重新接单，`migrations_in/out` 恢复增长，仿真时间继续推进（无死锁、无丢任务） |
 | 不重复占槽 | 迁移窗口内 `running_count` 仍 ≤ 该站并发上限（见 §1.5） |
 | 单站保护 | 单站模式下四个 kind 都**拒绝执行**并返回 `{"ok": false, "msg": "…请用 stations=triple"}`（不会静默无效） |
+| **分区期间的写入** | 无多数派的一侧**不能确认写入**：`live.quorum.rejects` ↑、`uncommitted` ↑、**`done` 不增**；多数派一侧照常确认（§5.3） |
+
+### 5.3 分区期间的一致性与**最小 quorum 共识**
+
+原状态（上一轮）：分区只做「检测 + 标记 + 停止跨区迁移」，**不做任何共识** ——
+于是"两侧各自自认主、各自继续把任务标成完成"这件事在指标上**看不出来**。
+本轮补上**教学用的最小共识**，目标只有一个：**让"分区期间写入"这个语义可演示、可测量**。
+
+> **减法声明（先看这条）**：这**不是**一个可用的一致性协议，**不含** Raft 全量语义 ——
+> 没有日志复制（no log replication）、没有选举超时/拉票/任期比较、没有 `RequestVote`/
+> `AppendEntries` RPC、没有成员变更（joint consensus）。`term` 只在**分区/脑裂注入与恢复**时 +1，
+> 每站投票状态是"新任期全站赞成"的简化模型。详见本节末尾的边界表。
+
+**三步语义**：
+
+| 步骤 | 规则 | 代码落点 |
+|---|---|---|
+| ① 任期与多数派 | `majority = floor(N/2) + 1`（**N = 总站数**，不随在线数下降）；分区注入 / 解除各推进一个 `term` | `StationCluster.majority / bump_term() / _refresh_votes()` |
+| ② 写入确认 | 任务完成时看**它所在站的分区组**是否 ≥ `majority`：够 → **提交**（`quorum_commits` ↑，正常计 `done`）；不够 → **回滚**（`quorum_rejects` ↑，`served_s=0`、`finish_ts=None`、**不计 `done`**、**不入队**，进未确认表） | `Simulator._run_task()` 完成路径 → `_rollback_uncommitted()` |
+| ③ 恢复重放 | 分区解除 / 一键恢复 / 宕机到点自动上线 → 只重放"所在站已重新具备多数派"的未确认任务（`quorum_replay`，`replayed` ↑） | `Simulator._reconcile_uncommitted()` |
+
+**为什么回滚后选「重放」而不是「丢弃」**：① 勘查数据是**业务产出**，丢了等于这趟飞行白飞；
+② 任务 `task_id` 幂等，重放不会重复产出；③ 重放代价只是重跑一段服务时长；
+④ 它让"分区 → 写被拒 → 恢复 → 数据仍在"在指标上**可见**
+（`quorum_rejects` ↗ / `uncommitted_tasks` ↗ 再 ↘ / `done` 最终不少）。
+
+**实测（N=3，`majority=2`，分区 `{1} | {2,3}`，确定性构造）**：
+
+| 步骤 | term | commits | rejects | uncommitted | done（用户可见） |
+|---|---|---|---|---|---|
+| 分区生效 | 1 | 0 | 0 | 0 | 0 |
+| **1 号站（少数派侧）完成 1 个** | 1 | 0 | **1** | **1** | **0**（被回滚） |
+| 2 号站完成 1 个 | 1 | 1 | 1 | 1 | 1 |
+| 3 号站完成 1 个 | 1 | **2** | 1 | 1 | **2** |
+| `recover_nodes()` | **2** | 2 | 1 | **0** | 2 |
+| 重放任务再跑完 | 2 | **3** | 1 | 0 | **3**（一个没丢） |
+
+* 真实多线程整跑（triple、**未分区**）：`triple/LIGHT` → submitted 10 / done 9 / commits **9** / rejects 0；
+  `triple/PEAK 30s` → submitted 850 / done 804 / commits **804** / rejects **0**
+  （要证的是 `commits == done` 且 `rejects ≡ 0`，数值本身的波动是既有 wall-clock 抖动）；
+* 把 3 站里的 2 站宕掉（剩 1 站在线）：`majority` **仍为 2**、`has_majority=false` → 完成被拒，
+  站恢复后自动重放并补交 —— **多数派按成员数算，不随存活数下降**，否则共识语义当场失效。
+
+**新增指标（`models.METRIC_SPEC` 42 → 46）**：`quorum_commits`（次，越高越好）、
+`quorum_rejects`（次，越低越好）、`uncommitted_tasks`（个，越低越好）、`quorum_term`。
+**口径例外要记住**：`quorum_commits` 在**单站 / 未分区多站**下等于完成数（**不是 0**）——
+单站时 `majority=1`，每次完成都是一次成功确认，这是刻意的口径。
+
+**UI**：3D 顶栏新增 quorum 徽章（`term N · 多数派 M · {1}✗ | {2,3}✓`，绿/琥珀/红三态）；
+右侧「分布式共识」面板给出 `任期 / 多数派 / 分区视图 / 已提交-被拒写 / 未确认`；
+OS 透视「多基站」页签新增 quorum 卡片与每站卡片的 **`分区组 G · 多数派/无多数派`** 标注
+—— 脑裂截图里 **1 号站显示「分区组 1 · 无多数派」、2/3 号站显示「分区组 2 · 多数派」**，
+一屏同时看到"两侧各自自认主"。
+
+**验收测试**：`tests/test_rebalance.py`（7 条 + P2 再平衡）与 `tests/test_quorum.py`（6 条），
+其中 `test_split_brain_minority_rolls_back_majority_commits`、`test_recover_replays_uncommitted_and_no_data_loss`、
+`test_majority_uses_total_node_count_not_alive_count`、`test_single_station_quorum_always_commits`
+是本节四步语义的逐条守护。
+
+**诚实边界（必须写进报告，不要含糊）**：
+
+| # | 边界 |
+|---|---|
+| 1 | **不做完整 Raft**：无日志复制、无选举超时/拉票/RPC、无成员变更；`term` 只在分区注入/恢复时 +1；投票是"新任期全站赞成"的简化 |
+| 2 | **写入确认只覆盖正常完成路径**：`dispatch()` 中 `exec_s<=EPS` 直接标 DONE 的分支与死锁看门狗 `_reap_deadlocks()` 的强制回收**不走确认**（叠加"脑裂 + 死锁"演示时要交代） |
+| 3 | **运行期热插拔只到 API 层**：`Simulator.add_station()/remove_station()/rebalance_access()` 有实现与测试（含运行中热加站按需补线程池），但**未接 `/api/chaos` 与 UI 入口**；删站仍要求该站无排队/无在跑任务 |
+| 4 | **新站的链路模型是退化的**：`LinkMonitor` 按构造时的站列表预生成曲线，运行期新加的站复用默认站曲线（该文件本轮未改） |
+| 5 | **`Simulator._free_slots`（OS 透视的全局核号表）未扩**：新站任务用**站内槽位**（正确），但 `uav_states[].core` 的全局编号不含新站核号 |
+| 6 | **接入再平衡需显式调用**（`add_station()` 顺带调一次），**不是**负载感知的周期性切换 —— §8 第 8 条依然成立 |
+| 7 | **重映射比例不是精确 1/N**：64 个虚拟节点在 N=3 时有 ±8 pp 固有波动（见 §5.4），只能写"约 1/(N+1) / 约 1/N" |
+| 8 | **quorum 状态不落库**：新指标走既有 `exp_metric` 通路自动入库，无需改表；少数派侧拒绝**不**对外抛 HTTP 错误码（写入是仿真内部事件） |
+| 9 | 回滚时**已消耗的服务量也不进 `resource_utilization`**（`served_s` 归零）—— "这次写入当作没发生"的一致口径 |
+
+### 5.4 一致性哈希的**再平衡**（节点增减只迁约 1/N 的 key）
+
+上一轮：一致性哈希（64 虚拟节点/站）只用于**选站与接入归属**，哈希环在
+`StationCluster.__init__` 里**只建一次** —— 增/删站时环不会更新，新站永远收不到 key
+（此时测出的"0 % 重映射"是**假的**）。本轮补上运行期再平衡：
+
+| API | 语义 |
+|---|---|
+| `StationCluster.rebuild_ring()` | 按**当前**节点集合重建环（幂等），返回虚拟节点数 |
+| `StationCluster.add_node(spec)` | 运行期加站：既有节点的队列/限流器/在线状态**原地保留**；重复 id 抛 `ValueError` |
+| `StationCluster.remove_node(sid, now, evacuate=False)` | 返回 `(bool, 原因)`。未知站 / 只剩 1 站 / 仍有排队任务（除非 `evacuate=True`）/ 仍有在跑任务 → **拒绝，且零状态改动** |
+| `Simulator.rebalance_access()` | 按新环重算全部无人机**接入归属**（只对在线站），逐机记 `uav_rehome(why=rebalance)`，返回 `{total, changed, ratio, to_new}` |
+| `Simulator.add_station()/remove_station()` | 组合上面三步 + **按需补/关线程池** + 重算 `self.workers`；事件 `station_added` / `station_removed` |
+
+实测（`hash_virtual_nodes=64`；key = 2000 个 `uav:{id}` + 2000 个定种随机串 = 4000）：
+
+| 场景 | 环规模 | 重映射比例（实测） | 理论 | 单调性（零容差断言） |
+|---|---|---|---|---|
+| 3 站基线 | 192 虚拟节点 | — | — | 各站占环 37.7 % / 32.0 % / 30.3 % |
+| **加站 3 → 4** | 192 → 256 | **1153/4000 = 28.82 %** | 1/(N+1) = 25 % | 变化的 key **全部迁往新站**；1/2/3 之间零搬迁 |
+| **删站 3 → 2**（删 3 号站） | 192 → 128 | **1212/4000 = 30.30 %** | 1/N = 33.33 % | 变化的 key **全部来自被删站**；无关 key 原地不动 |
+| 仿真器接入归属（PEAK 30 架机）加站 | — | **7/30 = 23.33 %** | — | 全部落到 4 号站；删站后 7 架全回 1/2/3 |
+
+**为什么实测不是正好 25 % / 33.3 %**：某站占环的比例 = 它 64 个虚拟节点覆盖的弧长之和，
+是 64 个随机间隔的和；N 小时这个比例本身有 ±8 pp 量级的固有波动
+（实测新站占环 28.0~28.8 %，理论 25 %）。所以：
+
+* **硬断言只给单调性**（纯逻辑、零容差）：变化的 key 必须全部来自/去往被增删的那个站；
+* 比例只守"量级对了、没有退化成朴素取模的 100 % 全量重映射"，容差取 15~38 %（加站）/
+  18~50 %（删站），覆盖 >3σ；
+* 把容差写死成 ±1 % 会得到一个"改 `hash_virtual_nodes` 或换一批 key 就红"的假测试。
+
+测试：`tests/test_rebalance.py` 7 条（含"运行中热加第 4 站、仿真不崩不死锁"）。
 
 ---
 
@@ -704,6 +1049,15 @@ cd D:\study\uav_sched_sim
 # ① 可视化演示：打开 3D 场景 + OS 透视「多基站」页签
 & ".\.venv\Scripts\python.exe" run.py ui
 # 浏览器打开后：顶栏切策略为 cross_node → 点「开始仿真」→ 顶栏「🔬 OS 透视」→ 切到「多基站」页签
+
+# ①' **顶栏「拓扑」下拉**：单站 / 3 站·端-边-云（下一轮点「开始仿真」生效）
+#     这是本轮补的体验缺口 —— 页面里就能切拓扑，不必改命令行
+#     GET /api/topology?stations=triple&mec=1   （只设"会话默认值"，运行中改也不影响当前这轮）
+#     GET /api/topology                        （不带参数 = 读当前会话默认值）
+
+# ①'' 桌面版 / exe 也能直接开多站（app.py 新增 --stations / --mec，与 run.py ui 同一条通道）
+& ".\.venv\Scripts\python.exe" app.py --stations triple --mec
+& "dist\无人机集群调度仿真系统.exe" --stations triple --mec --browser --port 8795
 
 # ② 纯接口：多站 + MEC + 第 6 种策略（拓扑名 triple = 1×CENTER + 2×EDGE）
 curl "http://127.0.0.1:8765/api/start?scheduler=cross_node&scenario=PEAK&stations=triple&mec=1"
@@ -718,6 +1072,25 @@ curl "http://127.0.0.1:8765/api/state"
 curl "http://127.0.0.1:8765/api/chaos?kind=node_down&station=2&duration=20"
 curl "http://127.0.0.1:8765/api/chaos?kind=partition&a=1&b=2,3&duration=20"
 curl "http://127.0.0.1:8765/api/chaos?kind=recover"
+
+# ④' 最小 quorum 的观察点（分区期间写入被拒的现场证据）
+curl "http://127.0.0.1:8765/api/chaos?kind=split_brain&duration=200"
+curl "http://127.0.0.1:8765/api/state"     # live.quorum.rejects > 0 / uncommitted > 0 / groups 两组
+#    注意 duration 是**仿真秒**；speed=2 时 200 仿真秒 ≈ 100 秒真实时间，够截图窗口
+
+# ④'' 一致性哈希再平衡（Python API，运行期增删站）
+#    python -c "from uav_sim.simulator import Simulator; ... sim.add_station(StationSpec(...)); sim.rebalance_access()"
+
+# ⑤' 多站 × 多策略 18 组矩阵 + 出图（独立目录，不碰 summary.csv）
+& ".\.venv\Scripts\python.exe" run.py stations
+
+# ⑥' 重复实验覆盖多站/MEC 面（均值 ± 95 % 置信区间，配对不跨变体混算）
+& ".\.venv\Scripts\python.exe" run.py replicate --reps 10 --scenarios PEAK `
+    --schedulers dynamic cross_node --variants single,triple,triple_mec --no-db
+
+# ⑦' GPU 分析模型多站/MEC（先编内核，再跑两后端对拍）
+.\gpu\build.ps1 -Rebuild
+& ".\.venv\Scripts\python.exe" gpu\run_gpu.py --backend cuda --stations 3 --mec --reps 300 --out-dir results\gpu\multi_cuda
 
 # ⑤ 单站回归（默认配置）：确定性输入由 SHA-256 基线守护；结论指标须落在实跑抖动范围内（§7）
 & ".\.venv\Scripts\python.exe" run.py all --scenarios PEAK --schedulers dynamic --no-db
@@ -745,8 +1118,9 @@ curl "http://127.0.0.1:8765/api/chaos?kind=recover"
 | 默认 `workers` | `8`，与 `runtime.worker_threads` 一致 |
 | 默认 `mec.enable` | `false` → 纯中心，所有任务仍在中心站处理，无分流，**不改变任何调度行为** |
 | 默认 `cross_node` | **不参与** 15 组矩阵：`models.CLASSIC_SCHEDULER_NAMES` 仍是 5 个策略（`fcfs/rr/priority/mlfq/dynamic`），矩阵仍是 3 工况 × 5 策略 = 15 组；`SCHEDULER_NAMES` 扩到 **6** 个只是**能力清单**变长 |
-| 指标口径 | 既有 **24** 个指标的键名、单位、方向、计算方式不变；新增 **18** 个站级/MEC 指标**恒为 0 或等价值**（总数 **24 → 42**） |
-| 既有产物 | `results/summary.csv`（15 行）、`results/raw/*.json`、`results/task_records/*.csv`、MySQL 中的 15 组记录：**结构与口径不变**；数值的差异落在实跑抖动范围内（见下） |
+| 指标口径 | 既有 **24** 个指标的键名、单位、方向、计算方式不变；累计新增 **22** 个站级/MEC/quorum 指标（总数 **24 → 46**）。其中 18 个站级/MEC 键在单站下**恒为 0 或等价值**；4 个 quorum 键的口径例外见 §1.7/§5.3：`quorum_commits` 单站下**等于完成数**，其余 3 个恒 0 |
+| 默认 quorum | 单站时 `majority = floor(1/2)+1 = 1`，任何分区组都达标 → **永远确认写入**，`quorum_rejects ≡ 0`，单站行为零变化（由 `tests/test_quorum.py::test_single_station_quorum_always_commits` 守护） |
+| 既有产物 | `results/summary.csv`（15 行）、`results/raw/*.json`、`results/task_records/*.csv`、MySQL 中的 15 组记录：**结构与行数口径不变**（新增指标键按 `METRIC_SPEC` 自动多出列，列数 48 → 54，前 48 列顺序逐一相同）；数值的差异落在实跑抖动范围内（见下） |
 | 新链路字段 | `links` 语义不变（仍 = 该机到当前接入站的健康度），旧前端/旧脚本零改动 |
 
 ### 7.1 如何证明"多站改造没有污染既有结论"（方法论，可复现）
@@ -806,6 +1180,8 @@ PEAK 逐策略绝对值（改造前 → 改造后，仅列结论级）：
    若要严格复述，措辞用"**结论指标无系统性变化（差异落在实跑抖动范围内）**"，
    而**不要**写"逐位不变"；
 2. 多基站/MEC 是**新增的独立实验面**，要单独跑、单独出表，**不与 15 组混在一张表里比绝对值**；
+   本轮新增的 `run.py stations`（18 组）、`run.py all` 伴生探针（3 组 + `charts/09`）、
+   `run.py replicate --variants` 都遵守这条：**独立 `results_dir` + 独立 CSV + 独立图**；
 3. "第 6 种策略"的说法只在**能力清单**里出现（README §1/§4），15 组矩阵的"3×5"描述的
    是**既有实验规模**，二者不矛盾 —— 表述时要说清"矩阵 15 组不变，能力新增 1 种策略"。
 
@@ -813,16 +1189,58 @@ PEAK 逐策略绝对值（改造前 → 改造后，仅列结论级）：
 
 ## 8. 尚未做（诚实清单）
 
+> **本轮改动**：8 条里 7 条待办全部推进。状态分三档，**"部分完成"不写成"已完成"**：
+> ✅ 已完成 / 🟡 部分完成（边界见本行说明）/ ⛔ 未做。
+
 | # | 项 | 状态 |
 |---|---|---|
-| 1 | 3D 多基站截图 `images/19-*.png`、`20-*.png`、`21-*.png` | **已完成**：QA 无头截图已归档（§2.1） |
-| 2 | 站级/MEC 指标进入 `run.py all` 的常规矩阵与出图 | **部分**：16 个键已在 `models.METRIC_SPEC` 定义、透出到 `/api/state`，并由 `run.py mec` 落盘 `results/mec/mec_matrix.csv`；**尚未**纳入 `run.py all` 的 15 组矩阵与 7 张图（刻意不混口径） |
-| 3 | 多站 × 多策略的完整矩阵（如 triple × 6 策略） | **未做**：本轮只跑 `run.py mec` 的 12 组（PEAK × 3 模式 × 2 策略），不做规模化矩阵 |
-| 4 | 跨节点一致性哈希的**再平衡**（节点增减时只迁约 1/N 的键） | **部分**：一致性哈希（64 虚拟节点）已用于选站与接入归属；"节点增减触发环上再平衡"的完整实现与验证**未做** |
-| 5 | 分区期间的**共识/多数派**机制（真正的 quorum 写入） | **未做**：本轮只做"检测 + 标记 + 停止跨区迁移"，不做共识算法 |
-| 6 | GPU 分析模型（`gpu/`）的多站/MEC 版本 | **未做**：CUDA 内核仍只有单站 5 策略 |
-| 7 | 结果的可复现性 vs wall-clock 抖动 | **部分**：单次实跑有抖动（完整率 0.2~0.5 pp、端到端 3~8 ms）；`run.py replicate` 的重复实验**尚未**覆盖多站/MEC 面 |
-| 8 | **负载感知的接入切换**（拥塞时让无人机主动改接到更空闲的站） | **未做**：当前**接入站只在归属站宕机时改派**，分区与负载高低都**不会**触发改派；**任务级的跨节点均衡由"迁移"实现**（服务器侧搬任务，接入点不变）。因此**不要期待"切站动画"会随负载一直触发** —— §2 的过渡动画只在宕机改派时出现 |
+| 1 | 3D 多基站截图 `images/19-*.png`、`20-*.png`、`21-*.png` | ✅ **已完成（并扩充到 6 张）**：19 全景 / 20 OS 透视页签 / 21 节点宕机 → 新增 **22 网络分区** / **23 脑裂与 quorum** / **19b 3D 近景（地面站机位）**。全部用**当前代码**重拍（`tools/shot_stations.js` 新增 `partition`、`split_brain` 两阶段 + `&act=1`），脚本内联断言全 `[OK]`。证据：§2.1 |
+| 2 | 站级/MEC 指标进入 `run.py all` 的常规矩阵与出图 | ✅ **已完成（用"独立伴生图表"实现，15 组口径未动）**：`run.py all` 默认追加 PEAK×dynamic×{纯中心/多站-无MEC/端-边-云} 3 组**伴生探针** → `results/station_probe/` + 独立图 `charts/09-站级与MEC指标.png`；`--no-station-probe` 可跳过；探针失败只告警、不影响 15 组判定。**刻意不把站级指标并进 `summary.csv`**（理由见 §7.2 第 2 条）。证据：§4.7.1、`tests/test_station_matrix.py`（含"summary.csv 仍 15 行""默认策略集仍是 5 个经典"两条口径守护） |
+| 3 | 多站 × 多策略的完整矩阵（如 triple × 6 策略） | ✅ **已完成**：新增 `run.py stations` = triple × **6 策略** × 3 工况 = **18 组**（MEC 关闭以隔离拓扑×策略），产物独立（`results/stations/`，不写库、不覆盖 `summary.csv`）+ 总览图 `charts/10-多站×多策略矩阵.png`。结论：`cross_node` 把 PEAK 档站间不均衡度 0.551 → **0.107**（−81 %，代价 1261 次迁移、平均 551 ms）；`priority` 仍垫底，既有结论方向不变。证据：§4.6 |
+| 4 | 跨节点一致性哈希的**再平衡**（节点增减时只迁约 1/N 的键） | ✅ **已完成（比例是"约 1/N"，不是精确 1/N）**：`rebuild_ring()/add_node()/remove_node()` + `Simulator.rebalance_access()/add_station()/remove_station()`；实测加站 3→4 重映射 **28.82 %**（理论 25 %）、删站 3→2 **30.30 %**（理论 33.3 %），且**单调性零容差成立**（变化的 key 全部迁往新站 / 全部来自被删站）。边界：运行期热插拔只到 **API 层**，未接 `/api/chaos` 与 UI；新站链路曲线退化为默认站。证据：§5.4、`tests/test_rebalance.py`（7 条） |
+| 5 | 分区期间的**共识/多数派**机制（真正的 quorum 写入） | 🟡 **部分完成 —— 教学用"最小共识"**：`term` + 每站投票 + `majority = floor(N/2)+1`（按总站数）+ 写入确认（提交 / 无多数派侧**回滚** / 恢复后**重放**）+ 指标 `quorum_commits/quorum_rejects/uncommitted_tasks/quorum_term`（METRIC_SPEC **42 → 46**）+ 3D 顶栏 quorum 徽章 + OS 透视 quorum 卡片。N=3 脑裂 `{1}\|{2,3}` 实测：少数派侧 1 次拒写（`done` 不增）、多数派侧 2 次提交、恢复后重放 1 个且**最终 done 一个不丢**。**明确不含** Raft 全量语义（日志复制 / 选举超时 / 拉票 RPC / 成员变更），`term` 只在分区注入与恢复时 +1，投票是"新任期全站赞成"的简化；写入确认只覆盖正常完成路径（`exec_s<=EPS` 直标 DONE 与死锁看门狗回收不走确认）。证据：§5.3、`tests/test_quorum.py`（6 条） |
+| 6 | GPU 分析模型（`gpu/`）的多站/MEC 版本 | 🟡 **部分完成 —— 双后端 + 趋势对拍，不是逐位复刻**：`gpu/des_model.py` 新增 `simulate_one_multi`（站维度 + 第 6 模式 `cross_node` + MEC 分流），`gpu/replication_kernel.cu` 新增 `multi_kernel` 并保持 `--reps/--out/--coeffs/--sweep/--starve-ms` 向后兼容（默认 `--stations 1` 仍走原内核，与改前 CSV **100 行 × 13 列 0 处不一致**）。对拍（各 300 reps）：多站/MEC 档偏差 ≤±0.5 %，`cross_node` 迁移次数 71.440 / 71.440（**0.00 %**）。边界：分析模型是"同规则不同实现"，未移植 `WorkloadTrace`/分片/配额/天气/混沌，MEC 时延用任务类别近似；单站路径的 `e2e_ms` 恒为 0（要测时延须带 `--mec`）。证据：§4.8、`tests/test_des_multistation.py` |
+| 7 | 结果的可复现性 vs wall-clock 抖动 | ✅ **已完成（方法覆盖多站/MEC 面；样本量如实标注）**：`run.py replicate` 支持 `--variants single,triple,triple_mec`，cell key 升级为 `(variant, scenario, scheduler)`，**配对比较不跨变体混算**。实测 reps=3（18 次仿真）：唯一显著且方向合理的是 **triple 档 cross_node − dynamic 的站间不均衡度差 −0.407 ± 0.115**；`triple_mec` 档差异不显著（−0.000 ± 0.002）。**边界**：reps=3 的 CI 只演示方法可用（df=2 → t=4.303，个别指标相对半宽 >70 %），下结论请 `--reps ≥ 10`。证据：§4.7.2、`tests/test_replication_variants.py` |
+| 8 | **负载感知的接入切换**（拥塞时让无人机主动改接到更空闲的站） | ⛔ **未做（本轮明确不做）**：接入站仍**只在归属站宕机时改派**（加上本轮新增的"手动 `rebalance_access()`"）；**分区和负载高低都不会触发改派**。任务级的跨节点均衡由**迁移**实现（服务器侧搬任务，接入点不变）。因此 §2 的 0.6 s 切站过渡动画**只在宕机改派时出现**，不要期待它随负载一直触发 |
+
+### 8.1 本轮验收证据汇总（可复现）
+
+```powershell
+cd D:\study\uav_sched_sim
+
+# ① 三件套门禁（基线 83 → 现在 115 passed）
+& ".\.venv\Scripts\python.exe" -m ruff check src tests run.py gpu tools/bench_weather.py   # All checks passed!
+& ".\.venv\Scripts\python.exe" -m pytest -q                                               # 115 passed / 0 failed
+& ".\.venv\Scripts\python.exe" run.py check                                               # 环境就绪
+
+# ② 实验面（P1 / P6）
+& ".\.venv\Scripts\python.exe" run.py stations        # 18 组 -> results/stations/ + charts/10
+& ".\.venv\Scripts\python.exe" run.py all --no-db     # 15 组 + 伴生探针 3 组 -> charts/09
+& ".\.venv\Scripts\python.exe" run.py replicate --reps 3 --scenarios PEAK `
+    --schedulers dynamic cross_node --variants single,triple,triple_mec --no-db
+
+# ③ GPU（P5）
+.\gpu\build.ps1 -Rebuild
+& ".\.venv\Scripts\python.exe" gpu\run_gpu.py --backend cuda --stations 3 --mec --reps 300 --out-dir results\gpu\multi_cuda
+& ".\.venv\Scripts\python.exe" gpu\run_gpu.py --backend python --stations 3 --mec --reps 300 --out-dir results\gpu\multi_py
+
+# ④ 截图（P3）：先起服务，再逐阶段拍
+& ".\.venv\Scripts\python.exe" tools\serve.py --port 8791
+node tools\shot.mjs --gpu --url "http://127.0.0.1:8791/static/app3d.html?quality=high&shot=partition" `
+  --out docs\images\22-多基站-网络分区.png --wait 9000 --eval-file tools\shot_stations.js --eval-delay 5000
+node tools\shot.mjs --gpu --url "http://127.0.0.1:8791/static/app3d.html?quality=high&shot=split_brain" `
+  --out docs\images\23-多基站-脑裂与quorum.png --wait 9000 --eval-file tools\shot_stations.js --eval-delay 5000
+node tools\shot.mjs --gpu --url "http://127.0.0.1:8791/static/app3d.html?quality=high&shot=scene&act=1&cam=station" `
+  --out docs\images\19-多基站-3D场景-分区与多数派.png --wait 9000 --eval-file tools\shot_stations.js --eval-delay 5000
+```
+
+| 验收项 | 结果 |
+|---|---|
+| ruff / pytest / `run.py check` | 全过；**pytest 从 83 → 115 passed / 0 failed**（新增 **32** 条：`test_rebalance` 7 + `test_quorum` 6 + `test_station_matrix` 6 + `test_replication_variants` 4 + `test_des_multistation` 9；`test_distributed` 的 21 条一条未改） |
+| 15 组口径 | `results/summary.csv` 仍是**表头 + 15 行**；`charts/01~08` 原样；默认策略集仍是 5 个经典（由 `tests/test_station_matrix.py` 守护） |
+| 确定性输入层 | `tests/test_distributed.py::test_single_station_link_series_matches_pre_t1_baseline` **SHA-256 基线一条未改、全绿** |
+| 截图 | 6 张，全部由当前代码产出，脚本内联断言全 `[OK]`，逐张人工复核（§2.1） |
+| exe | 重新打包（14.5 MB）并**实跑验证**：`dist\无人机集群调度仿真系统.exe --browser --port 8795 --stations triple --mec` → `logs/ui.port` 读端口 → `/api/topology` 返回 `stations=triple, mec=true`、`/api/start` 起来后 `live.stations` 长度 **3**；再注入 `split_brain` → `live.quorum` 出现两组 `{1}✗ / {2,3}✓`、`rejects=11`、1 号站 `done=0`；页面 HTML 里 `id="topo"` / `quorumBadge` / `__uavCam` 均在（前端改动确实打进 exe） |
 
 ---
 
@@ -836,5 +1254,10 @@ PEAK 逐策略绝对值（改造前 → 改造后，仅列结论级）：
 | [`07-3D渲染升级接口契约.md`](07-3D渲染升级接口契约.md) | 3D 模块契约与编码约定的既有写法 |
 | `src/uav_sim/station.py` / `mec.py` / `scheduler/cross_node.py` | 本章的实现落点（`StationNode`/`StationCluster`、MEC 模型与分水岭、`CrossNodeScheduler`） |
 | `results/mec/mec_matrix.csv` | §4.4 全部实测数字的来源（12 组） |
+| `results/stations/stations_matrix.csv` | §4.6 多站 × 多策略 18 组的来源（+ `results/stations/charts/`、`charts/10-多站×多策略矩阵.png`） |
+| `results/station_probe/station_probe.csv` | §4.7.1 `run.py all` 伴生探针 3 组的来源（+ `charts/09-站级与MEC指标.png`） |
+| `results/replications/replication_summary.csv` | §4.7.2 变体重复实验的均值 ± 95 % CI（配对表 `paired_cross_node_vs_dynamic.csv`） |
+| `gpu/README.md` §9 | §4.8 GPU 多站/MEC 的构建、对拍表与诚实边界 |
+| `tests/test_rebalance.py` / `test_quorum.py` / `test_station_matrix.py` / `test_replication_variants.py` / `test_des_multistation.py` | 本轮新增的 5 个测试文件（共 32 条用例），逐条对应 §8 的验收点 |
 | `results/summary.csv` | 既有 15 组的实测数字（本章默认单站配置下与之**无系统性差异**，见 §7.1） |
 | `D:\study\uav_sched_sim-archive\regress\` | §7.1 的"抖动基线 vs 改造前后"对拍产物与 `compare_jitter.py`（**仓库外**） |

@@ -59,7 +59,7 @@ import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 _SRC_ROOT: Path = Path(__file__).resolve().parents[1]
 if str(_SRC_ROOT) not in sys.path:
@@ -86,6 +86,7 @@ from uav_sim.station import (
     ClusterLimiter,
     ClusterQueue,
     StationCluster,
+    StationSpec,
     resolve_station_specs,
 )
 from uav_sim.weather import WeatherModel, config_preset
@@ -321,6 +322,15 @@ class Simulator:
             "weaknet_until": 0.0, "weaknet_uavs": set(),
             "burst": 0, "deadlock_until": 0.0, "deadlock_task": None,
         }
+
+        # ---- 最小 quorum 共识（P4）：写入确认的运行期状态 ----
+        #: 未被多数派确认（已回滚）的任务：``task_id -> {task, station, ts}``。
+        #: **刻意不留在队列里** —— 回滚 = 这次写入当作没发生，任务静置在此等
+        #: 分区恢复后重放；若留在队列就会在下一次调度被立刻派发，等于分区无效。
+        self._uncommitted: Dict[str, Dict[str, Any]] = {}
+        self._quorum_commits: int = 0     # 多数派侧成功提交（计入 done）
+        self._quorum_rejects: int = 0     # 无多数派侧被拒（回滚，不计 done）
+        self._quorum_replayed: int = 0    # 恢复后重放成功的未确认任务数
 
         self._events_by_uav: Dict[int, List[TraceEvent]] = {
             uid: trace.events_of(uid) for uid in uav_ids}
@@ -619,24 +629,28 @@ class Simulator:
                 "until": round(now + dur, 2) if dur > 0 else None}
 
     def recover_nodes(self) -> dict:
-        """一键恢复：全部站点上线 + 解除分区 + 清除脑裂。"""
+        """一键恢复：全部站点上线 + 解除分区 + 清除脑裂 + 重放未确认任务。"""
         up = self.stations.nodes_down()
         self.stations.recover_all()
         self._chaos["node_down_until"] = {}
         self._chaos["partition_until"] = 0.0
         self._chaos["partition_groups"] = []
         self._log_event("chaos_recover", None, restored=up)
-        return {"ok": True, "kind": "recover", "restored": up}
+        # 恢复 = 新任期 + 多数派回来了 -> 把分区期间被回滚的写入重放（P4）
+        replayed = self._reconcile_uncommitted(self.now())
+        return {"ok": True, "kind": "recover", "restored": up, "replayed": int(replayed)}
 
     def _process_chaos_recovery(self, now: float) -> None:
         """到期自动恢复：节点宕机时长到点自动上线，分区/脑裂到点自动解除。"""
         until_map = self._chaos.get("node_down_until") or {}
+        restored_any = False
         if isinstance(until_map, dict) and until_map:
             left = {}
             for sid, ts in list(until_map.items()):
                 if float(ts) <= now:
                     self.stations.set_online(int(sid), True, now)
                     self._log_event("chaos_node_up", None, station=int(sid))
+                    restored_any = True
                 else:
                     left[int(sid)] = float(ts)
             self._chaos["node_down_until"] = left
@@ -646,6 +660,10 @@ class Simulator:
             self._chaos["partition_until"] = 0.0
             self._chaos["partition_groups"] = []
             self._log_event("chaos_partition_heal", None)
+            restored_any = True
+        if restored_any:
+            # 站回来了 / 分区合并了 -> 未确认写入可能又有多数派，尝试重放（P4）
+            self._reconcile_uncommitted(now)
 
     def submit_task(self, task: Task) -> bool:
         """生产者线程提交任务（线程安全）；队列满则丢弃并计数。"""
@@ -720,6 +738,21 @@ class Simulator:
         executor = node.executor if node is not None else self._executor
         if executor is None:
             executor = self._executor
+        if executor is None:
+            # 该站还没有线程池（例如运行期刚热加站、池尚未补建）：**不受理**，
+            # 让调用方释放限流许可、任务留在队列里等下一轮 —— 不能抛 AttributeError
+            # 把调度线程带崩（见 Simulator.add_station 的"按需补池"）。
+            with self._lock:
+                self._running.pop(task.task_id, None)
+                self._slot_of.pop(task.task_id, None)
+                if node is not None:
+                    # 上面已按"受理"记过一次派发：这里撤销，计数器不许虚报
+                    node.dispatched = max(0, int(node.dispatched) - 1)
+            if node is not None:
+                node.release_slot(task.task_id)
+            task.state = TaskState.READY
+            self._log_event("dispatch_retry", task, station=sid, reason="no_executor")
+            return False
         try:
             executor.submit(self._run_task, task, exec_s)  # type: ignore[union-attr]
         except RuntimeError:  # 线程池已关闭
@@ -854,16 +887,27 @@ class Simulator:
                 self._on_upload_failed(task, health, now)
                 return
 
+            # ---- P4 最小 quorum：写入确认（提交 / 回滚） ----
+            # 任务"跑完"只是**本地完成**；能不能算数要看**所在分区组是否还有多数派**。
+            # 无多数派 = 这份写入无法被确认（真实分布式里就是少数派侧的写丢失），
+            # 于是回滚：不计 done、不进队列，静置到 _uncommitted 里等恢复后重放。
+            commit_sid = int(getattr(task, "station_id", self.stations.default_id))
+            if not self.stations.group_has_quorum(commit_sid):
+                self._rollback_uncommitted(task, commit_sid, now)
+                return
+
             task.state = TaskState.DONE
             task.finish_ts = now
             with self._lock:
                 self._done_count += 1
+                self._quorum_commits += 1
             done_node = self.stations.node(int(getattr(task, "station_id",
                                                        self.stations.default_id)))
             if done_node is not None:
                 done_node.done += 1
             self._log_event("done", task, wait_ms=round(float(task.wait_ms_total), 1),
-                            retry=int(task.retry_count))
+                            retry=int(task.retry_count),
+                            term=int(self.stations.term))
             if self._scheduler is not None:
                 try:
                     self._scheduler.add_task_finished(task, task.service_s)
@@ -1029,16 +1073,10 @@ class Simulator:
         self._scheduler = scheduler
         self.stop_event.clear()
         # ---- 线程池：单站时 1 个（与改造前一致）；多站时每站一个独立线程池 ----
-        if self.stations.is_multi:
-            for node in self.stations.nodes:
-                node.executor = ThreadPoolExecutor(
-                    max_workers=max(1, int(node.spec.workers)),
-                    thread_name_prefix=f"Station-{node.spec.id}")
-            self._executor = None
-        else:
-            self.stations.nodes[0].executor = ThreadPoolExecutor(
-                max_workers=max(1, self.workers), thread_name_prefix="UAV-Worker")
-            self._executor = self.stations.nodes[0].executor
+        # 抽成 _ensure_station_executors()：运行期热加站（add_station）也复用它，
+        # 保证"新站一定有池"这条不变量只有一处实现；force=True 保持"每次 run
+        # 都重建池"的既有语义（同一个 Simulator 可以跑第二次）。
+        self._ensure_station_executors(force=True)
 
         workers: List[UAVWorker] = []
         t_start = time.perf_counter()
@@ -1192,6 +1230,221 @@ class Simulator:
             out[uid] = int(self._uav_station.get(uid, sid))
         return out
 
+    # ------------------------------------------------------------------
+    # P2：一致性哈希再平衡（运行期增/删站 -> 重分派接入归属）
+    # ------------------------------------------------------------------
+    def rebalance_access(self) -> Dict[str, Any]:
+        """按**当前哈希环**重算每架无人机的接入归属（P2 再平衡的仿真器侧入口）。
+
+        与 ``_station_of_uav()`` 的分工（刻意不合并）：
+
+        * ``_station_of_uav()`` 是**快照时**的惰性修补 —— 只在"归属站宕机"时把
+          该机顺时针改派到下一个可用站，保证面板读数自洽；
+        * ``rebalance_access()`` 是**环变化后**的主动对齐 —— 增/删站重建环之后调用
+          一次，把所有接入归属一次性搬到新环的结果上（变化的每架机记一条
+          ``uav_rehome`` 事件，供 3D 切站过渡动画消费）。
+
+        只在**在线站**里选（``pick_by_hash`` 自带"命中站不可用就顺时针找下一个"），
+        因此离线站不会被分到新接入。返回::
+
+            {"total": 无人机总数, "changed": 归属变化数, "ratio": 变化比例,
+             "to_new": {站号: 该站新接收的机数}}
+
+        ``ratio`` 就是"再平衡代价"的量化：一致性哈希的定义性质要求它 ≈ 1/(N+1)
+        （加站）/ ≈ 1/N（删站），而不是全量重映射（全量 = 100%，那才是朴素取模）。
+        """
+        ids = list(range(1, int(self.scenario.uav_count) + 1))
+        changed: List[Tuple[int, int, int]] = []
+        to_new: Dict[int, int] = {}
+        for uid in ids:
+            old_sid = int(self._uav_station.get(uid, self.stations.default_id))
+            new_sid = int(self.stations.pick_by_hash(f"uav:{int(uid)}"))
+            if new_sid == old_sid:
+                continue
+            new_node = self.stations.node(new_sid)
+            if new_node is None:
+                continue          # 兜底：只在真实存在的站之间搬
+            old_node = self.stations.node(old_sid)
+            if old_node is not None:
+                old_node.uavs.discard(int(uid))
+            new_node.uavs.add(int(uid))
+            self._uav_station[int(uid)] = new_sid
+            changed.append((int(uid), old_sid, new_sid))
+            to_new[new_sid] = to_new.get(new_sid, 0) + 1
+        for uid, old_sid, new_sid in changed:
+            self._log_event("uav_rehome", None, uav=int(uid),
+                            frm=int(old_sid), to=int(new_sid), why="rebalance")
+        total = max(1, len(ids))
+        return {
+            "total": len(ids),
+            "changed": len(changed),
+            "ratio": round(len(changed) / float(total), 4),
+            "to_new": {int(k): int(v) for k, v in sorted(to_new.items())},
+        }
+
+    def add_station(self, spec: StationSpec, rebalance: bool = True) -> Dict[str, Any]:
+        """运行期热加站（P2）：建节点 -> 重建哈希环 -> 重分派接入归属 -> 按需补线程池。
+
+        **不做的事（诚实边界）**：不接进 ``/api/chaos`` 热插拔按钮（UI 无入口），
+        也不改 ``link_monitor``（它对新站会优雅退化为默认站曲线）；新站的
+        ``executor`` 只有在本方法被调用时（或下一轮 ``_ensure_station_executors``）
+        才补建 —— 若补建前就有任务被派到新站，``dispatch`` 会 **拒绝受理并留队**
+        （不会崩），下一轮再派。
+        """
+        node = self.stations.add_node(spec)
+        self.workers = int(self.stations.total_workers)
+        self._ensure_station_executors()
+        info: Dict[str, Any] = {
+            "ok": True, "station": int(node.spec.id),
+            "workers": int(node.spec.workers),
+            "ring_vnodes": len(self.stations._ring),  # noqa: SLF001 - 内部环长度，仅作读数
+        }
+        if rebalance:
+            info["rebalance"] = self.rebalance_access()
+        self._log_event("station_added", None, station=int(node.spec.id),
+                        workers=int(node.spec.workers))
+        return info
+
+    def remove_station(self, station_id: int, evacuate: bool = False) -> Dict[str, Any]:
+        """运行期摘站（P2）：先按"无排队/无在跑"校验，再重建环 + 重分派接入归属。
+
+        拒绝时返回 ``{"ok": False, "msg": ...}`` 且不改动任何状态（原因见
+        ``StationCluster.remove_node``）；成功时顺带关掉该站线程池。
+        """
+        sid = int(station_id)
+        node = self.stations.node(sid)
+        ok, msg = self.stations.remove_node(sid, now=self.now(), evacuate=bool(evacuate))
+        if not ok:
+            return {"ok": False, "msg": msg, "station": sid}
+        if node is not None and node.executor is not None:
+            try:
+                node.executor.shutdown(wait=False)
+            except Exception:  # pragma: no cover - 池已在收尾，忽略
+                pass
+            node.executor = None
+        self.workers = int(self.stations.total_workers)
+        self._log_event("station_removed", None, station=sid)
+        return {"ok": True, "station": sid, "msg": msg,
+                "rebalance": self.rebalance_access()}
+
+    def _ensure_station_executors(self, force: bool = False) -> None:
+        """给"还没有线程池（或被 force 强制重建）"的站补建池。
+
+        为什么可以安全地中途建池：``ThreadPoolExecutor`` 是**惰性**的（提交任务
+        才起线程），建对象本身不产生线程。
+
+        ``run()`` 用 ``force=True``（重建全部池，与改造前的"每次 run 都新建池"
+        逐位一致，也支持同一个 Simulator 跑两次）；``add_station()`` 用默认的
+        ``force=False``（只补缺，不动正在跑的老池）。
+        """
+        single = not self.stations.is_multi
+        for node in self.stations.nodes:
+            if node.executor is not None and not force:
+                continue
+            if single and int(node.spec.id) == int(self.stations.default_id):
+                # 单站：与改造前完全一致（池大小 = runtime.worker_threads 等价的 self.workers）
+                node.executor = ThreadPoolExecutor(
+                    max_workers=max(1, int(self.workers)), thread_name_prefix="UAV-Worker")
+            else:
+                node.executor = ThreadPoolExecutor(
+                    max_workers=max(1, int(node.spec.workers)),
+                    thread_name_prefix=f"Station-{node.spec.id}")
+        # 单站模式下 self._executor 指向唯一那个池；多站模式沿用"无全局池"的约定
+        self._executor = (self.stations.nodes[0].executor if single else None)
+
+    # ------------------------------------------------------------------
+    # P4：最小 quorum 共识（写入确认 / 回滚 / 重放）
+    # ------------------------------------------------------------------
+    def _rollback_uncommitted(self, task: Task, station_id: int, now: float) -> None:
+        """写入未被多数派确认 -> **回滚**：不计 done、不留在队列，静置于待重放表。
+
+        为什么回滚（而不是"照旧计入 done 但打个标记"）：教材要讲的语义就是
+        "少数派侧的写**不算数**"；若既计 done 又标未确认，吞吐/完整率指标会与
+        "共识失败"的结论自相矛盾。
+        """
+        task.state = TaskState.BLOCKED
+        task.served_s = 0.0            # 回滚：这次服务量不计入执行/利用率
+        task.finish_ts = None
+        with self._lock:
+            self._quorum_rejects += 1
+            self._uncommitted[task.task_id] = {
+                "task": task, "station": int(station_id), "ts": float(now)}
+        self._log_event("quorum_reject", task, station=int(station_id),
+                        term=int(self.stations.term))
+
+    def _reconcile_uncommitted(self, now: float) -> int:
+        """把"所在站已重新具备多数派"的未确认任务**重放**回队列。
+
+        为什么选"重放"而不是"丢弃"：
+            ① 勘查数据是**业务产出** —— 丢掉就等于这趟飞行白飞（业务不可接受）；
+            ② 任务 id 幂等（同一 task_id 重放不会重复产出），重放代价只是重跑一段
+               服务时长，远小于丢数据的业务代价；
+            ③ 重放让"分区 -> 写入被拒 -> 恢复 -> 数据仍在"这条链在指标上可见
+               （``quorum_rejects`` 增、``uncommitted_tasks`` 增后再回落、``done`` 最终不少）。
+
+        只重放**确实恢复多数派**的任务，其余继续静置 —— 部分恢复（例如 3 站只回来
+        1 站）也安全。调用点：``recover_nodes`` 与 ``_process_chaos_recovery``。
+        """
+        with self._lock:
+            items = list(self._uncommitted.items())
+            self._uncommitted = {}
+        replayed = 0
+        for tid, rec in items:
+            task = rec.get("task")
+            sid = int(rec.get("station", self.stations.default_id))
+            if task is None or task.state is TaskState.DONE:
+                continue
+            node = self.stations.node(sid)
+            if node is None:
+                # 站已被运行期摘除：改派到当前能确认写入的站，保证任务不丢
+                sid = int(self.stations.pick_least_connections({}))
+                node = self.stations.node(sid)
+                if node is not None:
+                    task.station_id = sid
+                    rec = dict(rec, station=sid)
+            if node is None or not self.stations.group_has_quorum(sid):
+                with self._lock:
+                    self._uncommitted[tid] = rec
+                continue
+            task.state = TaskState.READY
+            task.served_s = 0.0
+            task.finish_ts = None
+            if node.queue.enqueue(task, now):
+                replayed += 1
+                self._log_event("quorum_replay", task, station=sid,
+                                term=int(self.stations.term))
+            else:
+                with self._lock:
+                    self._uncommitted[tid] = rec
+        with self._lock:
+            self._quorum_replayed += replayed
+        return replayed
+
+    def _quorum_snapshot(self) -> Dict[str, Any]:
+        """``/api/state.live.quorum``（键名冻结，见 task-1 与 docs/11 §5）。
+
+        ``{term, majority, has_majority, groups, commits, rejects, uncommitted}``
+        另附只增不改的两个细粒度字段：``votes``（各站任期投票状态）与
+        ``replayed``（恢复后已重放数）。
+        """
+        view = self.stations.quorum_view()
+        with self._lock:
+            uncommitted = len(self._uncommitted)
+        return {
+            "term": int(view.get("term", 0)),
+            "majority": int(view.get("majority", 1)),
+            "has_majority": bool(view.get("has_majority_anywhere", False)),
+            "groups": [dict(g) for g in (view.get("groups") or [])],
+            "commits": int(self._quorum_commits),
+            "rejects": int(self._quorum_rejects),
+            "uncommitted": int(uncommitted),
+            # ---- 只增不改：更细的读数 ----
+            "votes": {int(n.spec.id): {"voted_term": int(n.voted_term),
+                                       "granted": bool(n.vote_granted)}
+                      for n in self.stations.nodes},
+            "replayed": int(self._quorum_replayed),
+        }
+
     def _station_metrics(self, end_ts: float) -> Dict[str, float]:
         """站级 / 迁移 / MEC 汇总指标（供 metrics.compute_metrics 与报告使用）。"""
         rrs = self._running_remaining_by_station()
@@ -1223,6 +1476,14 @@ class Simulator:
             # 的可解释性，否则 98% 的边缘分流会被误读成"MEC 很成功"）。
             "mec_light_tasks": float(mec.get("light_tasks", 0)),
             "mec_heavy_tasks": float(mec.get("heavy_tasks", 0)),
+            # ---- P4 最小 quorum 共识（单站 = 全体在线站 1/1，永远确认） ----
+            # 口径：commits 数"被多数派确认的写入次数"，**单站时等于完成数**
+            # （不是 0）—— 这一点与 docs/11 §7 "新增指标恒为 0" 的旧表述不同，
+            # 需在文档里改口径说明（已写入 dist-core.md 素材）。
+            "quorum_commits": float(self._quorum_commits),
+            "quorum_rejects": float(self._quorum_rejects),
+            "uncommitted_tasks": float(len(self._uncommitted)),
+            "quorum_term": float(self.stations.term),
         }
 
     def _process_station_down(self, now: float) -> None:
@@ -1469,6 +1730,11 @@ class Simulator:
                                 range(1, int(self.scenario.uav_count) + 1),
                                 t=now).items()},
             "mec": self.mec.snapshot(),
+            # ---- 最小 quorum 共识（P4；契约键名 {term, majority, has_majority,
+            # groups:[{ids,size,has_quorum}], commits, rejects, uncommitted}）----
+            # 单站退化：majority=1、groups=[{ids:[1],has_quorum:true}]、has_majority=true，
+            # 且不改动上面任何既有字段。
+            "quorum": self._quorum_snapshot(),
             "trace_tail": list(self._event_log)[-60:],
             # ---- 天气快照（契约 §4.6.4：键名不可改，前端天气系统直接消费） ----
             # 运行中切换天气后这里立刻变化；未开始仿真时是 t=0 的曲线起点。

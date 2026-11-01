@@ -11,9 +11,12 @@ run.py —— UavSchedulerSim 统一命令行入口
     .venv\\Scripts\\python.exe run.py one --scenario LIGHT --scheduler dynamic
     .venv\\Scripts\\python.exe run.py all                   全量 3 工况 × 5 策略 = 15 组
     .venv\\Scripts\\python.exe run.py all --no-db           不写数据库（离线跑）
+    .venv\\Scripts\\python.exe run.py all --no-station-probe 跳过站级/MEC 伴生探针
+    .venv\\Scripts\\python.exe run.py stations              多站矩阵：triple × 6 策略 × 3 工况 = 18 组
     .venv\\Scripts\\python.exe run.py charts                仅从 results/ 重新出图
     .venv\\Scripts\\python.exe run.py demo-limiter          演示大任务拒绝与分片
     .venv\\Scripts\\python.exe run.py weather               天气 × 策略对照实验（20 组）
+    .venv\\Scripts\\python.exe run.py replicate --reps 3 --variants single triple triple_mec
 
 退出码：0 成功 / 1 有实验失败 / 2 环境不可用
 """
@@ -24,6 +27,7 @@ import argparse
 import copy
 import json
 import os
+import shutil
 import sys
 import time
 import traceback
@@ -420,6 +424,19 @@ def cmd_all(args: argparse.Namespace) -> int:
         print("\n  看数据库：")
         print("    mysql --host=127.0.0.1 -uroot -p ^")
         print("      -e \"use uav_sched_sim; select * from v_exp_summary;\"")
+
+    # ---- P6a 站级 / MEC 伴生探针（独立 results_dir，不进 15 组口径） ----
+    # 放在 15 组之外：它与 15 组**没有数值耦合**，成败判定也完全解耦
+    # （这里任何异常都只打警告，不影响上面的返回码）。
+    if not getattr(args, "no_station_probe", False):
+        _banner("站级 / MEC 伴生探针（3 组，独立实验面，不属于 15 组矩阵）")
+        try:
+            _run_station_probe(cfg, seed=getattr(args, "seed", None))
+        except Exception as exc:  # noqa: BLE001 - 伴生实验失败绝不影响 15 组成败
+            print(f"  [警告] 站级/MEC 伴生实验失败（不影响 15 组结果与返回码）：{exc}")
+            print(f"         可单独重跑：{PY} run.py stations")
+    elif ok:
+        print("\n  （已用 --no-station-probe 跳过站级/MEC 伴生实验）")
 
     return 0 if not bad else 1
 
@@ -951,6 +968,448 @@ def _print_mec_conclusion(rows: list) -> None:
         print("  未能统计任务分级构成（MEC 未记录）")
 
 
+# ===========================================================================
+# 多站 × 多策略矩阵实验（run.py stations）—— 改造建议第五章 A 的规模化实验面
+# ===========================================================================
+#: 矩阵固定的拓扑（config.yaml 的 stations.topologies.triple = 1 中心 + 2 边缘）。
+STATION_MATRIX_TOPOLOGY: str = "triple"
+
+#: 矩阵的 3 个工况与 6 个策略（6 个 = 5 个经典 + 跨节点 cross_node）。
+STATION_MATRIX_SCENARIOS: tuple = ("LIGHT", "NORMAL", "PEAK")
+STATION_MATRIX_SCHEDULERS: tuple = (
+    "fcfs", "rr", "priority", "mlfq", "dynamic", "cross_node")
+
+#: 多站矩阵 CSV 的标识列（`mode` 固定为 multi = 多站且 MEC 关闭）。
+STATION_CSV_ID_COLUMNS: tuple = (
+    ("scenario", "工况"),
+    ("scenario_label", "工况中文名"),
+    ("scheduler", "策略"),
+    ("scheduler_label", "策略中文名"),
+    ("mode", "模式"),
+    ("topology", "拓扑"),
+    ("mec", "MEC开关"),
+)
+
+#: 多站矩阵/伴生探针 CSV 的指标列（键, 中文名）。
+#: 全部用 ``res.metrics.get(key, 0.0)`` 读取 —— 并行开发期不假设某个键一定存在。
+STATION_METRIC_COLUMNS: tuple = (
+    ("throughput", "吞吐量个/秒"),
+    ("completion_rate", "业务完整率%"),
+    ("avg_wait_all_ms", "整体平均等待ms"),
+    ("avg_wait_high_ms", "高优先级平均等待ms"),
+    ("avg_wait_low_ms", "低优先级平均等待ms"),
+    ("starvation_rate_low", "低优先级饥饿率%"),
+    ("resource_utilization", "资源利用率%"),
+    ("drop_rate", "任务丢弃率%"),
+    ("retry_rate", "弱网重传率%"),
+    ("context_switch", "上下文切换次数"),
+    ("peak_queue_depth", "队列峰值堆积"),
+    ("station_max_queue_depth", "单站最大队列深度"),
+    ("station_load_imbalance", "站间负载不均衡度σ/均值"),
+    ("migration_count", "任务迁移次数"),
+    ("migration_cost_ms", "迁移平均代价ms"),
+    ("cross_node_comm_ms", "跨节点通信开销ms"),
+    ("avg_e2e_ms", "端到端平均时延ms"),
+    ("edge_offload_ratio", "边缘分流比例%"),
+    ("runtime_wall_s", "仿真实耗秒"),
+)
+
+#: 单组结果里需要抄进 CSV 的指标键（= 上表的键序）。
+STATION_METRIC_KEYS: tuple = tuple(k for k, _ in STATION_METRIC_COLUMNS)
+
+#: 伴生探针：PEAK × dynamic × 3 档（纯中心 / 多站-无MEC / 端-边-云）。
+STATION_PROBE_SCENARIO: str = "PEAK"
+STATION_PROBE_SCHEDULER: str = "dynamic"
+STATION_PROBE_PLAN: tuple = (
+    ("center", "纯中心(单站)", None, False),
+    ("multi", "多站-无MEC(triple)", "triple", False),
+    ("edge", "端-边-云(triple+MEC)", "triple", True),
+)
+
+#: 伴生探针 CSV 的标识列。
+STATION_PROBE_ID_COLUMNS: tuple = (
+    ("mode", "模式"),
+    ("variant", "变体"),
+    ("station_spec", "拓扑"),
+    ("stations", "站数"),
+    ("mec", "MEC开关"),
+    ("scenario", "工况"),
+    ("scheduler", "策略"),
+)
+
+
+def build_station_plan(scenarios=None, schedulers=None) -> list:
+    """组装多站矩阵的运行计划（纯函数，便于单测）。
+
+    默认 = ``triple`` 拓扑 × 6 策略 × 3 工况 = **18 组**，每组一个字典：
+    ``{"scenario", "scheduler", "station_spec", "mec"}``。MEC 一律关闭 ——
+    这一实验面要隔离的是「拓扑 × 策略」效应，混入 MEC 会把角色硬约束带进来
+    （见 docs/11 §4.4.2：MEC 分层会让站间不均衡度结构性升高）。
+    """
+    codes = [str(s).upper() for s in (scenarios or STATION_MATRIX_SCENARIOS)]
+    scheds = [str(s).lower() for s in (schedulers or STATION_MATRIX_SCHEDULERS)]
+    return [
+        {"scenario": code, "scheduler": sched,
+         "station_spec": STATION_MATRIX_TOPOLOGY, "mec": False}
+        for code in codes for sched in scheds
+    ]
+
+
+def station_output_paths(cfg: dict) -> dict:
+    """多站矩阵的产物路径（独立 results_dir：绝不落在 results/summary.csv 上）。"""
+    from uav_sim.config import resolve_path
+
+    results_dir = resolve_path(cfg, "output.results_dir")
+    charts_dir = resolve_path(cfg, "output.charts_dir")
+    out_dir = results_dir / "stations"
+    return {
+        "results_dir": results_dir,
+        "out_dir": out_dir,
+        "csv": out_dir / "stations_matrix.csv",
+        "raw_dir": out_dir / "raw",
+        "charts_dir": out_dir / "charts",
+        "overview": charts_dir / "10-多站×多策略矩阵.png",
+    }
+
+
+def station_probe_output_paths(cfg: dict) -> dict:
+    """站级/MEC 伴生探针的产物路径（同样是独立 results_dir）。"""
+    from uav_sim.config import resolve_path
+
+    results_dir = resolve_path(cfg, "output.results_dir")
+    charts_dir = resolve_path(cfg, "output.charts_dir")
+    return {
+        "out_dir": results_dir / "station_probe",
+        "csv": results_dir / "station_probe" / "station_probe.csv",
+        "png": charts_dir / "09-站级与MEC指标.png",
+    }
+
+
+def _with_quorum_extras(columns: tuple, rows: list) -> list:
+    """把行里出现的 ``quorum_*`` 指标动态补进列（并行开发期不假设键一定存在）。
+
+    另一个开发面正在给 ``models.METRIC_SPEC`` 增加 quorum 相关键，本模块**不**依赖
+    它们的名字或数量：出现了就带上（中文名优先取 ``METRIC_SPEC``），没出现就不带。
+    """
+    cols = list(columns)
+    seen = {k for k, _ in cols}
+    extras = sorted({str(k) for r in rows for k in r
+                     if str(k).startswith("quorum_") and k not in seen})
+    if not extras:
+        return cols
+    labels = {k: k for k in extras}
+    try:
+        from uav_sim.models import METRIC_SPEC
+
+        labels = {k: METRIC_SPEC.get(k, (k, "", True))[0] for k in extras}
+    except Exception:  # noqa: BLE001 - 读不到就用英文键兜底
+        pass
+    return cols + [(k, labels.get(k, k)) for k in extras]
+
+
+def _write_keyed_csv(rows: list, path, id_columns: tuple, metric_columns: tuple):
+    """写「中文表头 + 英文键名 + 数据行」的 CSV（utf-8-sig，Excel 双击不乱码）。
+
+    第 2 行是英文键名 —— 报告/脚本引用列时不必猜中文表头，也不会因为改中文名而崩。
+    """
+    import csv as _csv
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cols = _with_quorum_extras(metric_columns, rows)
+    fields = [k for k, _ in id_columns] + [k for k, _ in cols]
+    with path.open("w", newline="", encoding="utf-8-sig") as fp:
+        writer = _csv.writer(fp)
+        writer.writerow([cn for _, cn in id_columns] + [cn for _, cn in cols])
+        writer.writerow(fields)
+        for row in rows:
+            out = []
+            for key in fields:
+                val = row.get(key, "")
+                out.append(f"{float(val):.6f}" if isinstance(val, float) else val)
+            writer.writerow(out)
+    return path
+
+
+def write_station_csv(rows: list, path):
+    """写 ``results/stations/stations_matrix.csv``（纯函数，便于单测）。"""
+    return _write_keyed_csv(rows, path, STATION_CSV_ID_COLUMNS, STATION_METRIC_COLUMNS)
+
+
+def write_station_probe_csv(rows: list, path):
+    """写 ``results/station_probe/station_probe.csv``（纯函数，便于单测）。"""
+    return _write_keyed_csv(rows, path, STATION_PROBE_ID_COLUMNS, STATION_METRIC_COLUMNS)
+
+
+def _station_metric_row(res) -> dict:
+    """从一次 RunResult 抽出 CSV 需要的指标（缺键一律 0.0 兜底）。"""
+    row = {key: float((res.metrics or {}).get(key, 0.0)) for key in STATION_METRIC_KEYS}
+    for key, val in (res.metrics or {}).items():
+        if str(key).startswith("quorum_") and key not in row:
+            try:
+                row[key] = float(val)
+            except (TypeError, ValueError):
+                row[key] = 0.0
+    return row
+
+
+def cmd_stations(args: argparse.Namespace) -> int:
+    """多站矩阵实验：``triple`` × 6 策略 × 3 工况 = 18 组（MEC 关闭）。
+
+    为什么要单独一个子命令（而不是塞进 ``run.py all``）：
+    ``all`` 的 15 组口径是"单站 + 5 经典策略"，**绝不能**被拓扑或第 6 个策略污染；
+    多站是**另一个实验面**，必须独立 results_dir、独立 CSV、独立图表
+    （见 docs/11 §7.2 第 2 条：新实验面要单独跑、单独出表）。
+    """
+    from uav_sim.experiment import ExperimentRunner
+    from uav_sim.models import SCENARIO_LABELS, SCHEDULER_LABELS
+    from uav_sim.visualize import plot_station_charts
+
+    cfg = _load_cfg(args.config)
+    if getattr(args, "seed", None) is not None:
+        cfg.setdefault("simulation", {})["random_seed"] = int(args.seed)
+    # 硬约束：不写数据库；所有产物走 results/stations/，不碰 results/summary.csv。
+    cfg.setdefault("database", {})["enable"] = False
+    paths = station_output_paths(cfg)
+
+    plan = build_station_plan(getattr(args, "scenarios", None),
+                              getattr(args, "schedulers", None))
+    total = len(plan)
+    n_codes = len({p["scenario"] for p in plan})
+    n_scheds = len({p["scheduler"] for p in plan})
+    _banner(f"多站矩阵实验：{STATION_MATRIX_TOPOLOGY} × {n_scheds} 策略 "
+            f"× {n_codes} 工况 = {total} 组（MEC 关闭）")
+    print(f"  拓扑 {STATION_MATRIX_TOPOLOGY} = 1 中心站（6 通道）+ 2 边缘站（各 3 通道）")
+    print("  控制变量：同一 seed、同一工况下 6 个策略回放**同一条**任务/链路轨迹；")
+    print("  隔离目标：只有「策略」与「工况」在变，MEC 关闭（否则角色硬约束会掺进来）。")
+    print(f"  产出：{paths['csv']}")
+    print(f"        {paths['out_dir'] / 'raw'}/*.json、{paths['charts_dir']}/*.png")
+    print(f"        {paths['overview']}（总览图另存）")
+    print("  口径：本子命令**不写数据库、不碰 results/summary.csv**。\n")
+
+    runner = ExperimentRunner(cfg, results_dir=paths["out_dir"],
+                              station_spec=STATION_MATRIX_TOPOLOGY, mec_enabled=False)
+    rows: list = []
+    failed = 0
+    t0 = time.perf_counter()
+    for k, item in enumerate(plan, 1):
+        code, sched = item["scenario"], item["scheduler"]
+        print(f"[{k:>2}/{total}] {code:<7} × {sched:<10} ... ", end="", flush=True)
+        res = runner.run_one(code, sched, persist=False, save_detail=True)
+        if res.error:
+            failed += 1
+            print(f"✗ {res.error}")
+            continue
+        row = {
+            "mode": "multi",
+            "scenario": code,
+            "scenario_label": SCENARIO_LABELS.get(code, code),
+            "scheduler": sched,
+            "scheduler_label": SCHEDULER_LABELS.get(sched, sched),
+            "topology": STATION_MATRIX_TOPOLOGY,
+            "mec": 0,
+        }
+        row.update(_station_metric_row(res))
+        rows.append(row)
+        print(f"完整率={row['completion_rate']:5.1f}% "
+              f"平均等待={row['avg_wait_all_ms']:7.0f}ms "
+              f"不均衡度={row['station_load_imbalance']:6.3f} "
+              f"迁移={int(row['migration_count']):>4d}次 "
+              f"({row['runtime_wall_s']:.1f}s)")
+
+    elapsed = time.perf_counter() - t0
+    _banner("多站矩阵实验完成")
+    print(f"  成功 {len(rows)} / {total} 组，总实耗 {elapsed:.1f}s")
+    if failed:
+        print(f"  ✗ 失败 {failed} 组")
+    if not rows:
+        return 1
+
+    write_station_csv(rows, paths["csv"])
+    print(f"  ✓ 汇总表 -> {paths['csv']}")
+
+    if not getattr(args, "no_chart", False):
+        try:
+            made = plot_station_charts(rows, paths["charts_dir"])
+            print(f"  ✓ 生成 {len(made)} 张图 -> {paths['charts_dir']}")
+            overview = made.get("总览")
+            if overview is not None:
+                paths["overview"].parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(overview, paths["overview"])
+                print(f"  ✓ 总览另存 -> {paths['overview']}")
+        except Exception as exc:  # noqa: BLE001 - 出图失败不应让实验判失败
+            print(f"  [警告] 出图失败：{exc}")
+    else:
+        print("  （已用 --no-chart 跳过出图）")
+
+    _print_station_conclusion(rows)
+    return 0 if not failed else 1
+
+
+def _print_station_conclusion(rows: list) -> None:
+    """打印可直接引用进报告的中文结论（数字全部来自本次实跑）。"""
+    from uav_sim.models import SCENARIO_LABELS, SCHEDULER_LABELS
+
+    def at(code: str, sched: str, key: str) -> float:
+        for r in rows:
+            if r["scenario"] == code and r["scheduler"] == sched:
+                return float(r.get(key, 0.0))
+        return 0.0
+
+    def label(sched: str) -> str:
+        return SCHEDULER_LABELS.get(sched, sched)
+
+    print()
+    print("=" * 78)
+    print("  中文结论（数字均来自本次实跑，可直接引用进课程报告）")
+    print("=" * 78)
+    print(f"  【口径】拓扑 {STATION_MATRIX_TOPOLOGY}（1 中心 + 2 边缘）× "
+          f"{len(STATION_MATRIX_SCHEDULERS)} 策略 × {len(STATION_MATRIX_SCENARIOS)} 工况 = "
+          f"{len(rows)} 组；MEC 关闭；不写库、不碰 results/summary.csv 的 15 组口径。")
+    print()
+    print("  ① 各工况下业务完整率的最优/最差策略：")
+    for code in STATION_MATRIX_SCENARIOS:
+        cell = [r for r in rows if r["scenario"] == code]
+        if not cell:
+            continue
+        best = max(cell, key=lambda r: float(r.get("completion_rate", 0.0)))
+        worst = min(cell, key=lambda r: float(r.get("completion_rate", 0.0)))
+        print(f"     {code:<6}{SCENARIO_LABELS.get(code, code):<12} "
+              f"最优 {label(best['scheduler']):<24}{float(best['completion_rate']):5.1f}%   "
+              f"最差 {label(worst['scheduler']):<24}{float(worst['completion_rate']):5.1f}%")
+    print()
+    print("  ② cross_node（跨节点负载均衡） vs dynamic（站内动态权重）——本矩阵的核心对照：")
+    print(f"  {'工况':<8}{'完整率 dy→cn':>22}{'不均衡度 dy→cn':>24}"
+          f"{'迁移次数':>10}{'平均等待 dy→cn(ms)':>24}")
+    for code in STATION_MATRIX_SCENARIOS:
+        if not any(r["scenario"] == code for r in rows):
+            continue
+        d_c = at(code, "dynamic", "completion_rate")
+        c_c = at(code, "cross_node", "completion_rate")
+        d_i = at(code, "dynamic", "station_load_imbalance")
+        c_i = at(code, "cross_node", "station_load_imbalance")
+        mig = at(code, "cross_node", "migration_count")
+        d_w = at(code, "dynamic", "avg_wait_all_ms")
+        c_w = at(code, "cross_node", "avg_wait_all_ms")
+        print(f"  {code:<8}{d_c:>10.1f}→{c_c:<10.1f}{d_i:>11.3f}→{c_i:<12.3f}"
+              f"{int(mig):>10d}{d_w:>11.0f}→{c_w:<12.0f}")
+    print()
+    print("  ③ 判读要点（写进报告时请一并保留）：")
+    print("     * 不均衡度 = 各站负载的变异系数（σ/均值，0 = 完全均衡）；")
+    print("     * dynamic 不做跨节点迁移（迁移次数恒 0），因此「不均衡度下降」必然")
+    print("       伴随「迁移次数 > 0」与「迁移代价」——两者要一起报，不能只挑不均衡度；")
+    print("     * 本仿真器用真实多线程 + sleep 模拟 IO，指标有 wall-clock 抖动")
+    print("       （完整率 0.2~0.5pp、端到端 3~8ms、不均衡度 0.02~0.10），")
+    print("       跨批次比较只看效应方向与量级，不要把小数位当精确值；")
+    print("     * 需要置信区间时用：run.py replicate --variants single,triple,triple_mec")
+    print("=" * 78)
+    print()
+
+
+def _run_station_probe(cfg: dict, seed: int | None = None) -> list:
+    """`run.py all` 追尾的**伴生探针**：PEAK × dynamic × 3 档（3 组）。
+
+    产物落在**独立** results_dir（``results/station_probe/``）与独立图
+    （``charts/09-站级与MEC指标.png``），**绝不进入** results/summary.csv 的 15 组口径。
+    任何异常由调用方捕获（只告警，不影响 15 组成败与返回码）。
+    """
+    from uav_sim.experiment import ExperimentRunner
+    from uav_sim.models import SCENARIO_LABELS, SCHEDULER_LABELS
+    from uav_sim.station import resolve_station_specs
+    from uav_sim.visualize import plot_station_probe
+
+    paths = station_probe_output_paths(cfg)
+    total = len(STATION_PROBE_PLAN)
+    print("  控制变量：同一 seed、同一工况（PEAK）、同一策略（dynamic）；只有拓扑/MEC 不同。")
+    print("  这 3 组是**伴生探针**（样本量 1 的点估计），只用于画图 9，不进 results/summary.csv。")
+    print(f"  产出：{paths['csv']}")
+    print(f"        {paths['png']}\n")
+
+    rows: list = []
+    failed = 0
+    for k, (mode, label, spec, mec_on) in enumerate(STATION_PROBE_PLAN, 1):
+        run_cfg = copy.deepcopy(cfg)
+        run_cfg.setdefault("database", {})["enable"] = False   # 探针绝不写库
+        if seed is not None:
+            run_cfg.setdefault("simulation", {})["random_seed"] = int(seed)
+        if mec_on:
+            run_cfg.setdefault("mec", {})["enable"] = True
+        print(f"  [{k}/{total}] {label:<24} ... ", end="", flush=True)
+        runner = ExperimentRunner(run_cfg, results_dir=paths["out_dir"],
+                                  station_spec=spec, mec_enabled=bool(mec_on))
+        res = runner.run_one(STATION_PROBE_SCENARIO, STATION_PROBE_SCHEDULER,
+                             seed=seed, persist=False, save_detail=True)
+        if res.error:
+            failed += 1
+            print(f"✗ {res.error}")
+            continue
+        row = {
+            "mode": mode,
+            "variant": label,
+            "station_spec": spec if spec else "single",
+            "stations": len(resolve_station_specs(run_cfg, spec)),
+            "mec": int(bool(mec_on)),
+            "scenario": STATION_PROBE_SCENARIO,
+            "scenario_label": SCENARIO_LABELS.get(STATION_PROBE_SCENARIO, ""),
+            "scheduler": STATION_PROBE_SCHEDULER,
+            "scheduler_label": SCHEDULER_LABELS.get(STATION_PROBE_SCHEDULER, ""),
+        }
+        row.update(_station_metric_row(res))
+        rows.append(row)
+        print(f"完整率={row['completion_rate']:5.1f}% "
+              f"端到端={row['avg_e2e_ms']:7.1f}ms "
+              f"边缘分流={row['edge_offload_ratio']:5.1f}% "
+              f"不均衡度={row['station_load_imbalance']:6.3f} "
+              f"迁移={int(row['migration_count']):>4d}次 "
+              f"({row['runtime_wall_s']:.1f}s)")
+
+    if not rows:
+        print(f"  [警告] {total} 组探针全部失败，跳过 CSV/出图（不影响 15 组结果）")
+        return rows
+    if failed:
+        print(f"  [警告] {failed}/{total} 组探针失败（不影响 15 组结果）")
+
+    write_station_probe_csv(rows, paths["csv"])
+    print(f"  ✓ 汇总表 -> {paths['csv']}")
+    try:
+        plot_station_probe(rows, paths["png"])
+        print(f"  ✓ 图表   -> {paths['png']}")
+    except Exception as exc:  # noqa: BLE001 - 出图失败不影响实验
+        print(f"  [警告] 出图失败：{exc}")
+
+    _print_station_probe_conclusion(rows)
+    return rows
+
+
+def _print_station_probe_conclusion(rows: list) -> None:
+    """打印伴生探针的中文结论（数字来自本次实跑；必须写明样本量边界）。"""
+    def at(mode: str, key: str) -> float:
+        for r in rows:
+            if r["mode"] == mode:
+                return float(r.get(key, 0.0))
+        return 0.0
+
+    print()
+    print("  中文结论（数字来自本次实跑；⚠ 3 组点估计，样本量 1）：")
+    for mode, label in (("center", "纯中心(单站)"), ("multi", "多站-无MEC"),
+                        ("edge", "端-边-云")):
+        if not any(r["mode"] == mode for r in rows):
+            continue
+        print(f"   [{label:<12}] 完整率={at(mode, 'completion_rate'):5.1f}%  "
+              f"平均等待={at(mode, 'avg_wait_all_ms'):7.0f}ms  "
+              f"端到端={at(mode, 'avg_e2e_ms'):7.1f}ms  "
+              f"边缘分流={at(mode, 'edge_offload_ratio'):5.1f}%  "
+              f"不均衡度={at(mode, 'station_load_imbalance'):6.3f}  "
+              f"迁移={int(at(mode, 'migration_count')):>4d}次")
+    c_e2e, e_e2e = at("center", "avg_e2e_ms"), at("edge", "avg_e2e_ms")
+    if c_e2e > 0:
+        print(f"   → 端到端平均时延：纯中心 {c_e2e:.1f} ms → 端-边-云 {e_e2e:.1f} ms"
+              f"（{(c_e2e - e_e2e) / c_e2e * 100:+.1f}%）")
+    print("   ⚠ 诚实边界：本仿真器有 wall-clock 抖动（完整率 0.2~0.5pp、端到端 3~8ms、")
+    print("     站间不均衡度 0.02~0.10），这 3 组是**单次点估计**，只看方向与量级；")
+    print("     要置信区间请用：run.py replicate --variants single,triple,triple_mec")
+
+
 def _print_weather_conclusion(rows: list, poor_threshold: float) -> None:
     """打印可直接引用进课程报告的中文结论（所有数字均来自本次实跑）。"""
     from uav_sim.weather import PRESET_ORDER, WEATHER_PRESETS
@@ -1234,35 +1693,92 @@ def cmd_sensitivity(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 # replicate —— 重复实验 + 置信区间（补上长期"预留未启用"的 repetitions）
 # ---------------------------------------------------------------------------
+#: `run.py replicate --variants` 支持的三档实验变体（tag -> (station_spec, mec_enabled)）。
+#: 三元组形式为 ``(tag, station_spec, mec_enabled)``，与 replication.ReplicationStudy 一致。
+VARIANT_PRESETS: dict = {
+    "single": (None, None),          # 单站（默认，= 改造前行为）
+    "triple": ("triple", False),     # 多站（1 中心 + 2 边缘），MEC 关闭
+    "triple_mec": ("triple", True),  # 端-边-云：多站 + MEC 开启
+}
+
+
+def parse_variant_specs(raw) -> list:
+    """把 ``--variants`` 参数解析成 ``[(tag, station_spec, mec_enabled), ...]``。
+
+    同时接受 ``--variants single triple triple_mec``（空格分隔）与
+    ``--variants single,triple,triple_mec``（逗号分隔）两种写法。
+    """
+    tags: list = []
+    for token in (raw if raw else ["single"]):
+        for part in str(token).split(","):
+            part = part.strip().lower()
+            if part:
+                tags.append(part)
+    if not tags:
+        tags = ["single"]
+    out: list = []
+    for tag in tags:
+        preset = VARIANT_PRESETS.get(tag)
+        if preset is None:
+            raise ValueError(f"未知变体 {tag!r}（可选：{', '.join(VARIANT_PRESETS)}）")
+        out.append((tag, preset[0], preset[1]))
+    return out
+
+
 def cmd_replicate(args: argparse.Namespace) -> int:
-    """对每个「工况 × 策略」重复 N 次，给出 均值 ± 95% 置信半宽 与配对比较。
+    """对每个「变体 × 工况 × 策略」重复 N 次，给出 均值 ± 95% 置信半宽 与配对比较。
 
     为什么需要它：单次运行的指标有 3~5% 的运行噪声，无法区分"算法差异"与"时序抖动"。
     重复实验用**同一组随机种子**跑所有策略（共同随机数 CRN），再做配对比较，
     产出的结论才站得住脚（可写进报告的"实验设计 / 统计显著性"章节）。
+
+    ``--variants`` 把**多站/MEC 面**也纳入重复实验：每个变体一个独立 ExperimentRunner，
+    聚合单元 key = ``(variant, scenario, scheduler)``，配对比较**只在变体内进行**
+    （跨变体相减 = 把拓扑差异当成策略差异，是本项目明确要避免的伪结论）。
     """
+    from uav_sim.models import CLASSIC_SCHEDULER_NAMES
     from uav_sim.replication import ReplicationStudy
 
     cfg = _load_cfg(args.config)
     if args.no_db:
         cfg.setdefault("database", {})["enable"] = False
 
-    study = ReplicationStudy(cfg, reps=args.reps, seed_base=args.seed)
-    _banner(f"重复实验：每单元 {study.reps} 次，种子 {study.seed_base}"
-            f"..{study.seed_base + study.reps - 1}（所有策略共用 = CRN）")
+    try:
+        variants = parse_variant_specs(getattr(args, "variants", None))
+    except ValueError as exc:
+        print(f"✗ {exc}")
+        return 2
+
+    study = ReplicationStudy(cfg, reps=args.reps, seed_base=args.seed,
+                             variants=variants)
+    _banner(f"重复实验：{len(variants)} 变体 × 工况 × 策略，每单元 {study.reps} 次，"
+            f"种子 {study.seed_base}..{study.seed_base + study.reps - 1}（所有策略/变体共用 = CRN）")
+    print("  变体：" + "；".join(
+        f"{tag}（拓扑={spec if spec else '单站默认'}，MEC="
+        f"{'跟随配置' if mec is None else ('开' if mec else '关')}）"
+        for tag, spec, mec in variants))
     study.run_matrix(scenarios=args.scenarios, schedulers=args.schedulers)
 
     study.print_matrix()
+    # 配对比较的基线/目标按本次实际跑的策略自适应选择：
+    # 默认 priority vs dynamic（15 组口径）；只跑多站策略时退化为 dynamic vs cross_node。
+    scheds = [str(s).lower() for s in (args.schedulers or list(CLASSIC_SCHEDULER_NAMES))]
+    baseline, target = "priority", "dynamic"
+    if baseline not in scheds or target not in scheds:
+        if "dynamic" in scheds and "cross_node" in scheds:
+            baseline, target = "dynamic", "cross_node"
+        elif len(scheds) >= 2:
+            baseline, target = scheds[0], scheds[1]
     if study.reps >= 2:
-        study.export_paired_csv()
-        study.print_paired()
+        study.export_paired_csv(baseline, target)
+        study.print_paired(baseline, target)
     else:
         print("\n（reps=1 时无法给出置信区间与显著性判断，"
               "建议 --reps ≥ 10；此处仅打印单次结果）")
 
     print(f"\n聚合结果：{study.out_dir / 'replication_summary.csv'}")
     if study.reps >= 2:
-        print(f"配对比较：{study.out_dir / 'paired_dynamic_vs_priority.csv'}")
+        print(f"配对比较：{study.out_dir / f'paired_{target}_vs_{baseline}.csv'}")
     return 0
 
 
@@ -1369,7 +1885,20 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--schedulers", nargs="*", default=None,
                     choices=["fcfs", "rr", "priority", "mlfq", "dynamic"],
                     help="只跑指定策略")
+    sp.add_argument("--no-station-probe", action="store_true",
+                    help="跳过站级/MEC 伴生探针（3 组独立实验 + charts/09 图）")
     sp.set_defaults(func=cmd_all)
+
+    sp = sub.add_parser(
+        "stations",
+        help="多站矩阵实验：triple 拓扑 × 6 策略 × 3 工况 = 18 组（MEC 关闭，独立产物）")
+    sp.add_argument("--seed", type=int, default=None, help="覆盖随机种子（默认取配置）")
+    sp.add_argument("--scenarios", nargs="*", default=None,
+                    choices=["LIGHT", "NORMAL", "PEAK"], help="只跑指定工况")
+    sp.add_argument("--schedulers", nargs="*", default=None,
+                    choices=list(STATION_MATRIX_SCHEDULERS), help="只跑指定策略")
+    sp.add_argument("--no-chart", action="store_true", help="不出图（只写 CSV/JSON）")
+    sp.set_defaults(func=cmd_stations)
 
     sp = sub.add_parser("charts", help="仅从 results/raw 重新出图")
     sp.set_defaults(func=cmd_charts)
@@ -1402,8 +1931,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--scenarios", nargs="*", default=None,
                     choices=["LIGHT", "NORMAL", "PEAK"], help="只跑指定工况")
     sp.add_argument("--schedulers", nargs="*", default=None,
-                    choices=["fcfs", "rr", "priority", "mlfq", "dynamic"],
-                    help="只跑指定策略")
+                    choices=["fcfs", "rr", "priority", "mlfq", "dynamic", "cross_node"],
+                    help="只跑指定策略（含多站策略 cross_node）")
+    sp.add_argument("--variants", nargs="*", default=None,
+                    help="实验变体，可选 single / triple / triple_mec；"
+                         "支持空格或逗号分隔（默认 single = 单站，向后兼容）")
     sp.add_argument("--no-db", action="store_true", help="不写数据库")
     sp.set_defaults(func=cmd_replicate)
 

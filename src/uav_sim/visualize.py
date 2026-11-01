@@ -16,6 +16,12 @@ visualize.py —— 实验数据可视化（matplotlib）
     04 资源利用率对比 / 05 业务完整率对比
     06 队列堆积时序（PEAK：dynamic vs priority）/ 07 链路健康度与弱网降权机理
 
+另有三组**独立实验面**的专属图表（不参与 `plot_all` 的 7 张 15 组口径图）：
+    * `plot_station_charts()`  -> `results/stations/charts/*.png`（多站 × 多策略 18 组矩阵）
+      总览图另存为 `charts/10-多站×多策略矩阵.png`（由 `run.py stations` 复制）；
+    * `plot_station_probe()`   -> `charts/09-站级与MEC指标.png`（3 组**伴生探针**点估计，
+      明确标注"不属于 15 组矩阵"，见 `run.py all --no-station-probe` 开关）。
+
 中文字体：Windows 下依次尝试 微软雅黑 / 黑体 / 宋体，并关闭 `axes.unicode_minus`，
 避免负号显示成方块（matplotlib 中文环境的经典坑）。
 """
@@ -32,13 +38,16 @@ if str(_SRC_ROOT) not in sys.path:
 
 from uav_sim.models import SCENARIO_CODES, SCENARIO_LABELS, SCHEDULER_LABELS, SCHEDULER_NAMES
 
-#: 五个策略的固定配色（所有图共用，保证读者"颜色即策略"的认知一致）
+#: 六个策略的固定配色（所有图共用，保证读者"颜色即策略"的认知一致）。
+#: 第 6 个 `cross_node` 只在多站矩阵（`run.py stations` / `run.py mec`）里出现，
+#: 既有 15 组矩阵没有它 —— 加这条键不会改变任何既有图表的颜色或内容。
 PALETTE: Dict[str, str] = {
     "fcfs": "#8C8C8C",       # 灰：最朴素基线
     "rr": "#5B8FF9",         # 蓝
     "priority": "#F6BD16",   # 黄
     "mlfq": "#5AD8A6",       # 绿
     "dynamic": "#E8684A",    # 橙红：本方案
+    "cross_node": "#722ED1",  # 紫：多基站跨节点负载均衡
 }
 
 _DPI = 150
@@ -362,6 +371,202 @@ def _plot_link_mechanism(results: List[Any], path: Path, plt) -> Path:
             transform=ax.transAxes, ha="center", fontsize=8.5, color="#555555")
 
     fig.suptitle("图7  链路状态感知与弱网降权机理", fontsize=14, fontweight="bold")
+    fig.savefig(path, dpi=_DPI, bbox_inches="tight")
+    plt.close(fig)
+    return path
+
+
+# ===========================================================================
+# 多站 × 多策略矩阵实验（run.py stations）专属图表
+# ===========================================================================
+class _RowView:
+    """把 `run.py` 的 CSV 行字典包装成 `_grouped_bar` 需要的对象形态。
+
+    为什么要这层包装：`run.py stations` 的每一组结果以**字典**（要直接写 CSV）形式
+    传递，而 `_grouped_bar` 是按属性（``.scenario`` / ``.scheduler`` / ``.metrics``）
+    消费的。包一层即可复用既有画法，不必复制一份柱状图代码。
+    """
+
+    __slots__ = ("scenario", "scheduler", "metrics")
+
+    def __init__(self, row: Dict[str, Any]) -> None:
+        self.scenario = str(row.get("scenario", ""))
+        self.scheduler = str(row.get("scheduler", ""))
+        self.metrics = row
+
+
+def _rows_to_views(rows: Iterable[Dict[str, Any]]) -> List[_RowView]:
+    return [_RowView(r) for r in (rows or []) if isinstance(r, dict)]
+
+
+#: 多站矩阵 4 个关键面板（总览图与分图共用，保证图与图之间口径一致）
+_STATION_PANELS: Sequence[tuple] = (
+    ("completion_rate", "业务完整率（%）", "{:.1f}"),
+    ("avg_wait_all_ms", "整体平均等待（ms）", "{:.0f}"),
+    ("station_load_imbalance", "站间负载不均衡度（σ/均值）", "{:.3f}"),
+    ("migration_count", "任务迁移次数（次）", "{:.0f}"),
+)
+
+
+def plot_station_charts(rows: List[Dict[str, Any]],
+                        out_dir: str | Path) -> Dict[str, Path]:
+    """画多站矩阵的 4 张图（1 张总览 + 3 张分图），返回 ``{图名: 路径}``。
+
+    数据来源：`run.py stations` 的 18 组（triple 拓扑 × 6 策略 × 3 工况，MEC 关闭）。
+    这里**只画这一份实验面**，不复用也不改写 15 组矩阵的 01~07 号图 ——
+    两类实验的口径不同（拓扑/MEC 是变量 vs 固定），混在一张图里比绝对值没有意义。
+    """
+    plt = _mpl()
+    setup_chinese_font()
+
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    views = _rows_to_views(rows)
+    made: Dict[str, Path] = {}
+    if not views:
+        print("[visualize] 多站矩阵无数据，跳过出图。")
+        return made
+
+    # ---------------- 00 总览：2×2（另存 charts/10-多站×多策略矩阵.png） ----------------
+    fig, axes = plt.subplots(2, 2, figsize=(15.5, 11.0))
+    for ax, (key, ylabel, fmt) in zip(axes.ravel(), _STATION_PANELS):
+        _grouped_bar(ax, views, key, ylabel.split("（")[0], ylabel, fmt)
+    fig.suptitle("图10  多站拓扑（triple = 1 中心 + 2 边缘）× 6 策略 × 3 工况 = 18 组矩阵总览"
+                 "（MEC 关闭，隔离「拓扑 × 策略」效应）",
+                 fontsize=14, fontweight="bold")
+    p = out / "00-总览-多站×多策略矩阵.png"
+    fig.savefig(p, dpi=_DPI, bbox_inches="tight")
+    plt.close(fig)
+    made["总览"] = p
+
+    # ---------------- 01 业务完整率 + 平均等待 ----------------
+    fig, axes = plt.subplots(1, 2, figsize=(16.0, 6.2))
+    for ax, (key, ylabel, fmt) in zip(axes, _STATION_PANELS[:2]):
+        _grouped_bar(ax, views, key, f"各工况下 6 策略的{ylabel.split('（')[0]}", ylabel, fmt)
+    fig.suptitle("图10a  多站矩阵：业务完整率与整体平均等待（18 组实跑，数字来自本次运行）",
+                 fontsize=14, fontweight="bold")
+    p = out / "01-多站策略-完整率与等待.png"
+    fig.savefig(p, dpi=_DPI, bbox_inches="tight")
+    plt.close(fig)
+    made["完整率与等待"] = p
+
+    # ---------------- 02 站间不均衡度 + 迁移次数 ----------------
+    fig, axes = plt.subplots(1, 2, figsize=(16.0, 6.2))
+    for ax, (key, ylabel, fmt) in zip(axes, _STATION_PANELS[2:]):
+        _grouped_bar(ax, views, key, f"各工况下 6 策略的{ylabel.split('（')[0]}", ylabel, fmt)
+    fig.suptitle("图10b  多站矩阵：站间负载不均衡度与任务迁移次数"
+                 "（不均衡度=各站负载变异系数；dynamic 不迁移，恒为 0）",
+                 fontsize=14, fontweight="bold")
+    p = out / "02-多站策略-站间不均衡与迁移.png"
+    fig.savefig(p, dpi=_DPI, bbox_inches="tight")
+    plt.close(fig)
+    made["不均衡与迁移"] = p
+
+    # ---------------- 03 cross_node vs dynamic 直接对比 ----------------
+    pair = [v for v in views if v.scheduler in ("dynamic", "cross_node")]
+    if pair:
+        fig, axes = plt.subplots(1, 2, figsize=(16.0, 6.2))
+        for ax, (key, ylabel, fmt) in zip(axes, (_STATION_PANELS[0], _STATION_PANELS[2])):
+            _grouped_bar(ax, pair, key, f"cross_node 与 dynamic 直接对比：{ylabel.split('（')[0]}",
+                         ylabel, fmt)
+        fig.suptitle("图10c  跨节点负载均衡（cross_node） vs 站内动态权重（dynamic）",
+                     fontsize=14, fontweight="bold")
+        p = out / "03-多站策略-跨节点对比动态权重.png"
+        fig.savefig(p, dpi=_DPI, bbox_inches="tight")
+        plt.close(fig)
+        made["跨节点对比"] = p
+    return made
+
+
+# ===========================================================================
+# 站级 / MEC 伴生探针图（run.py all 追加的 3 组独立实验，图 9）
+# ===========================================================================
+def plot_station_probe(rows: List[Dict[str, Any]], path: str | Path) -> Path:
+    """画 `charts/09-站级与MEC指标.png`（3 面板，数据 = 3 组伴生探针）。
+
+    面板：① 站间负载不均衡度；② 边缘分流比例（柱） + 端到端平均时延（线，右轴）；
+    ③ 单站最大队列深度（若存在 ``quorum_*`` 指标，则把它们作为文字标注一并展示）。
+
+    **标题必须写明"伴生实验、不属于 15 组矩阵"** —— 这 3 组是 PEAK × dynamic 上的
+    独立点估计，样本量为 1，不能与 15 组矩阵的绝对值混在一起比较。
+    """
+    plt = _mpl()
+    setup_chinese_font()
+    import numpy as np
+
+    path = Path(path)
+    rows = [r for r in (rows or []) if isinstance(r, dict)]
+    if not rows:
+        print("[visualize] 站级/MEC 探针无数据，跳过出图。")
+        return path
+
+    labels = [str(r.get("variant", r.get("mode", "?"))) for r in rows]
+    xs = np.arange(len(rows))
+    colors = ["#8C8C8C", "#5B8FF9", "#E8684A"][: len(rows)]
+    colors += ["#5AD8A6"] * max(0, len(rows) - len(colors))
+
+    fig, axes = plt.subplots(1, 3, figsize=(17.5, 5.8))
+
+    def _bar(ax, key: str, title: str, ylabel: str, fmt: str = "{:.3f}") -> None:
+        vals = [float(r.get(key, 0.0)) for r in rows]
+        bars = ax.bar(xs, vals, width=0.55, color=colors, edgecolor="white", linewidth=0.8)
+        for b, v in zip(bars, vals):
+            ax.annotate(fmt.format(v), (b.get_x() + b.get_width() / 2, v),
+                        textcoords="offset points", xytext=(0, 4),
+                        ha="center", fontsize=9, fontweight="bold")
+        ax.set_xticks(xs)
+        ax.set_xticklabels(labels, fontsize=9)
+        ax.set_title(title, fontsize=11, fontweight="bold")
+        ax.set_ylabel(ylabel, fontsize=10)
+        ax.grid(axis="y", linestyle=":", alpha=0.45)
+        ax.margins(y=0.18)
+
+    # ① 站间负载不均衡度
+    _bar(axes[0], "station_load_imbalance", "① 站间负载不均衡度", "变异系数 σ/均值（0=完全均衡）")
+
+    # ② 边缘分流比例（柱）+ 端到端平均时延（线，右轴）
+    offload = [float(r.get("edge_offload_ratio", 0.0)) for r in rows]
+    e2e = [float(r.get("avg_e2e_ms", 0.0)) for r in rows]
+    bars = axes[1].bar(xs, offload, width=0.55, color=colors, edgecolor="white", linewidth=0.8)
+    for b, v in zip(bars, offload):
+        axes[1].annotate(f"{v:.1f}%", (b.get_x() + b.get_width() / 2, v),
+                         textcoords="offset points", xytext=(0, 4),
+                         ha="center", fontsize=9, fontweight="bold")
+    axes[1].set_xticks(xs)
+    axes[1].set_xticklabels(labels, fontsize=9)
+    axes[1].set_ylim(0, 118)
+    axes[1].set_ylabel("边缘分流比例（%）", fontsize=10)
+    axes[1].set_title("② 边缘分流比例 与 端到端平均时延", fontsize=11, fontweight="bold")
+    axes[1].grid(axis="y", linestyle=":", alpha=0.45)
+    ax_b = axes[1].twinx()
+    ax_b.plot(xs, e2e, "o--", color="#722ED1", linewidth=1.8, markersize=7,
+              label="端到端平均时延（右轴）")
+    for x, v in zip(xs, e2e):
+        ax_b.annotate(f"{v:.1f}", (x, v), textcoords="offset points", xytext=(0, 8),
+                      ha="center", fontsize=9, color="#531DAB")
+    ax_b.set_ylabel("端到端平均时延（ms，越低越好）", fontsize=10)
+    axes[1].legend(ax_b.get_lines(), ["端到端平均时延（右轴）"], fontsize=8.5, loc="upper left")
+
+    # ③ 单站最大队列深度（+ 若存在 quorum_* 指标，作为文字标注补充）
+    _bar(axes[2], "station_max_queue_depth", "③ 单站最大队列深度",
+         "队列任务数（个）", "{:.0f}")
+    quorum_keys = sorted({k for r in rows for k in r if str(k).startswith("quorum_")})
+    if quorum_keys:
+        lines = ["quorum 指标（本次运行）:"]
+        for k in quorum_keys[:4]:
+            vals = " / ".join(f"{float(r.get(k, 0.0)):.0f}" for r in rows)
+            lines.append(f"{k} = {vals}")
+        axes[2].text(0.02, 0.02, "\n".join(lines), transform=axes[2].transAxes,
+                     fontsize=7.5, color="#555555", va="bottom")
+    else:
+        axes[2].text(0.02, 0.02, "（本次运行无 quorum_* 指标：单站/无共识模式）",
+                     transform=axes[2].transAxes, fontsize=8, color="#888888", va="bottom")
+
+    fig.suptitle("图9  站级与 MEC 指标：PEAK × dynamic 的 3 组**伴生探针**"
+                 "（不属于 15 组矩阵，单次点估计、样本量 1）",
+                 fontsize=13.5, fontweight="bold")
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=_DPI, bbox_inches="tight")
     plt.close(fig)
     return path

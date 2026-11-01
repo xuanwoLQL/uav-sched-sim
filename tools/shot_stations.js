@@ -8,12 +8,24 @@
        ② 点击真实 DOM 按钮（#osBtn、[data-tab="station"]）让页面自己表现。
      也**不使用 ?still=1**（那会冻结渲染，截不到粒子/迁移动画/故障态渐变）。
 
-   阶段选择（同一份脚本出三张图，靠 URL 上的 &shot= 区分，避免多开文件）：
+   阶段选择（同一份脚本出五张图，靠 URL 上的 &shot= 区分，避免多开文件）：
      &shot=scene （默认）起「3 站 + MEC + cross_node」仿真并等场景推进，
                           不打开 OS 面板 —— 出「3D 多基站场景」图
      &shot=tab           在场景基础上打开 OS 透视 →「多基站」页签 —— 出「OS 透视页签」图
      &shot=down          在 tab 基础上注入 node_down(station=2) 并等故障态稳定
                           —— 出「节点宕机」图
+     &shot=partition     在 tab 基础上注入网络分区 {1} | {2,3}（duration=200 仿真秒，
+                          保证截图窗口内不自动自愈）—— 出「网络分区」图：
+                          3D 站点灰色/虚线描边 + 每站卡片「分区/脑裂」徽章 +
+                          顶栏 quorum 徽章 {1}✗ | {2,3}✓
+     &shot=split_brain   在 tab 基础上注入脑裂（CENTER 一组 / EDGE 一组），并**等少数派
+                          一侧真的出现"拒写"**（quorum.rejects > 0）才返回 —— 出「脑裂」图：
+                          一屏同时看到两侧各自在调度（都自认主），但只有 {2,3} 一侧
+                          有多数派、1 号站的写入被拒（未确认任务数 > 0）
+
+    诚实说明：shot=split_brain 的"拒写"证据依赖后端最小 quorum 实现（docs/11 §5）。
+    若后端没落地 quorum，脚本会打 [WARN] 并仍然截图 —— 此时只能证明"分区"，
+    不能证明"写入被拒"，不要拿这种图当 quorum 的证据。
 
    用法（在项目根目录，服务已用 python tools\serve.py --port 8791 起好）：
      node tools/shot.mjs --gpu --url "http://127.0.0.1:8791/static/app3d.html?quality=high&shot=scene" \
@@ -26,9 +38,14 @@
 (async () => {
   const q = new URLSearchParams(location.search);
   const stage = (q.get("shot") || "scene").toLowerCase();
+  /* `&act=1`：scene 阶段在截图前额外注入一次脑裂、等少数派出现拒写，再切到
+     「地面站」机位 —— 让 3D 全景图本身能讲清"两侧各自自认主，但只有多数派那侧
+     能确认写入"（docs/11 §5.3）。默认关闭，避免影响原 19 号图的复现。 */
   const log = [];
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const ok = (cond, msg) => { log.push((cond ? "[OK] " : "[FAIL] ") + msg); return !!cond; };
+  // 软检查：条件不满足只标记 [WARN]（不把它伪装成通过，也不因此中断截图）
+  const warn = (cond, msg) => { if (!cond) log.push("[WARN] " + msg); return !!cond; };
 
   // 宽松版接口调用：HTTP 非 200 也把 JSON 拿回来（后端未就绪时要能如实报告，而不是抛异常）
   async function api(path) {
@@ -169,7 +186,14 @@
         st = down;
         const s2 = (Array.isArray(st.stations) ? st.stations : []).find((x) => x.id === 2) || {};
         ok(s2.online === false, "2 号站已置为 offline（online=False）");
-        ok(Number(s2.active || 0) === 0, `2 号站活动任务已清空（active=${s2.active}）`);
+        /* 口径提醒（docs/11 §5.2）：宕机只**疏散排队中**的任务；已经进到站内线程
+           在跑的任务会在仿真里继续跑完 —— 所以 `active` 短暂为上 1 是**设计如此**，
+           不是没清空。这里按"疏散后队列深度归零"判定更贴近真实语义。 */
+        ok(Number(s2.queue_depth || 0) === 0,
+          `2 号站排队任务已疏散（queue_depth=${s2.queue_depth}）`);
+        if (Number(s2.active || 0) > 0) {
+          log.push(`[INFO] 2 号站在跑任务数 active=${s2.active}：宕机不打断已进线程的任务（§5.2 口径）`);
+        }
       } else {
         ok(false, "注入 node_down 后 6s 内未观察到 2 号站 offline / chaos.nodes_down 含 2");
       }
@@ -178,8 +202,100 @@
       const panel = document.getElementById("osPanel");
       const sec = panel && panel.querySelector("#os-station");
       if (sec) panelText = (sec.textContent || "").replace(/\s+/g, " ").trim().slice(0, 500);
+    } else if (stage === "partition" || stage === "split_brain") {
+      /* 分区 / 脑裂：两个阶段共用「注入 → 等分区落到快照」的骨架，差别在 kind、
+         期望的快照字段，以及"要不要等少数派出现拒写"。
+         时长统一 duration=200（**仿真秒**）：speed=2 下 ≈100 秒真实时间，远大于
+         --eval-delay(6~8s)，因此从 eval 返回 → 真正截图的这段时间里分区稳定存在，
+         不会像 duration=20 那样在截图前一刻自动自愈。 */
+      const isSplit = (stage === "split_brain");
+      await openStationTab();
+      const q1 = isSplit ? "kind=split_brain&duration=200"
+                         : "kind=partition&a=1&b=2,3&duration=200";
+      const r = await api("/api/chaos?" + q1);
+      ok(r.status === 200 && r.body && r.body.ok !== false,
+        "/api/chaos?" + q1 + " -> " + r.status + " " + JSON.stringify(r.body).slice(0, 200));
+
+      // ① 等分区真的落到快照里：chaos.partitions 两组 + 至少 2 个站 partitioned
+      const got = await waitFor(async () => {
+        const s = await readState();
+        const parts = ((s.chaos || {}).partitions) || [];
+        const nPart = (Array.isArray(s.stations) ? s.stations : []).filter((x) => x.partitioned).length;
+        const sb = !!(s.chaos || {}).split_brain;
+        return (parts.length >= 2 && nPart >= 2 && (!isSplit || sb)) ? s : null;
+      }, 8000, 150);
+      if (got) {
+        st = got;
+        const groups = st.chaos.partitions;
+        const rep = (Array.isArray(st.stations) ? st.stations : [])
+          .map((x) => "#" + x.id + (x.partition_group != null ? "(组" + x.partition_group + ")" : "")
+            + (x.is_majority === false ? "✗无多数派" : "")).join(" ");
+        ok(true, "分区已生效：partitions=" + JSON.stringify(groups) + "；站分布 " + rep
+          + (isSplit ? ("；split_brain=" + st.chaos.split_brain) : ""));
+      } else {
+        st = await readState();
+        ok(false, "注入 " + (isSplit ? "split_brain" : "partition")
+          + " 后 8s 内未观察到 partitions>=2 / partitioned 站"
+          + (isSplit ? " / split_brain" : ""));
+      }
+
+      // ② 脑裂阶段：等少数派一侧出现"拒写"证据 —— 没有它，图只能证明"分区"，
+      //    证明不了"分区期间写入被拒"这个 quorum 语义（docs/11 §5 的验收点）。
+      if (isSplit) {
+        const rejected = await waitFor(async () => {
+          const s = await readState();
+          const qq = s.quorum || {};
+          const n = Number(qq.rejects != null ? qq.rejects : qq.quorum_rejects) || 0;
+          return n > 0 ? s : null;
+        }, 25000, 250);
+        if (rejected) {
+          st = rejected;
+          const qq = st.quorum || {};
+          const nRej = qq.rejects != null ? qq.rejects : qq.quorum_rejects;
+          const nUnc = qq.uncommitted != null ? qq.uncommitted : qq.uncommitted_tasks;
+          ok(true, "少数派分区已出现拒写：rejects=" + nRej + "，uncommitted=" + nUnc
+            + "，term=" + qq.term + "，majority=" + qq.majority);
+        } else {
+          st = await readState();
+          warn(false, "25s 内没等到 quorum.rejects>0：可能后端未实现最小 quorum，"
+            + "或少数派一侧还没跑完任务。此图只能作为「分区」证据，不能作为「拒写」证据。");
+        }
+      }
+      // 让 250ms 轮询把新状态渲染进页面（顶栏 quorum 徽章 + 每站卡片徽章），然后立即返回
+      await sleep(400);
+      const panel = document.getElementById("osPanel");
+      const sec = panel && panel.querySelector("#os-station");
+      if (sec) panelText = (sec.textContent || "").replace(/\s+/g, " ").trim().slice(0, 500);
     } else {
       log.push("[INFO] shot=scene：不打开 OS 面板，保持 3D 多基站场景");
+      if (q.get("act") === "1") {
+        // 脑裂 + 等拒写 + 切「地面站」机位（见文件头 &act=1 说明）
+        const r = await api("/api/chaos?kind=split_brain&duration=200");
+        ok(r.status === 200 && r.body && r.body.ok !== false,
+          `/api/chaos?kind=split_brain -> ${r.status}`);
+        const rejected = await waitFor(async () => {
+          const s = await readState();
+          const n = Number((s.quorum || {}).rejects) || 0;
+          return n > 0 ? s : null;
+        }, 25000, 400);
+        if (rejected) {
+          st = rejected;
+          ok(true, `少数派分区已出现拒写：rejects=${(st.quorum || {}).rejects}，`
+            + `uncommitted=${(st.quorum || {}).uncommitted}，term=${(st.quorum || {}).term}`);
+        } else {
+          st = await readState();
+          warn(false, "25s 内没等到 quorum.rejects>0（只当分区证据，不当拒写证据）");
+        }
+        const cam = document.querySelector('[data-cam="station"]');
+        /* 用页面暴露的 __uavCam()（存在才用）：OrbitControls 开了阻尼，点按钮后
+           下一帧的 update() 会把相机平滑拉回去，截图容易拍到"过渡中"的机位。 */
+        let camOk = false;
+        if (typeof window.__uavCam === "function") camOk = window.__uavCam("station");
+        if (!camOk && cam) { cam.click(); camOk = true; }
+        log.push(camOk ? "[OK] 已切到「地面站」机位（G1✗少 / G2✓多 标签在画面里）"
+          : "[WARN] 找不到切机位入口，保持默认机位");
+        await sleep(1500);   // 相机过渡 + 标签 1.2s 节流重建
+      }
     }
 
     // ---------- 5. 汇总 ----------
@@ -196,6 +312,9 @@
       link_sample: Object.fromEntries(Object.entries(st.link_matrix || {}).slice(0, 3)),
       mec: st.mec || null,
       chaos: st.chaos || null,
+      /* quorum（最小共识）快照：partition / split_brain 两张图的核心证据在这里。
+         后端未落地时是 null —— 脚本会明确标出，别把"缺证据"当成"通过"。 */
+      quorum: st.quorum || null,
       os_panel_open: !!(document.getElementById("osPanel")
         && !document.getElementById("osPanel").classList.contains("hidden")),
       os_active_tab: activeTab,
