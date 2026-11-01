@@ -247,6 +247,7 @@ button.ghost.on{border-color:rgba(55,226,213,.75);color:#9ff7ee;
 <script src="/static/uav_model.js"></script>
 <script src="/static/hud_overlay.js"></script>
 <script src="/static/weather_system.js"></script>
+<script src="/static/weather_grade.js"></script>
 <script>
 "use strict";
 /* =========================================================================
@@ -1462,7 +1463,9 @@ function emitPoint(pc, x, z, spread) {
 /* ============================================================ 10. 场景 */
 let renderer, scene, camera, controls, composer;let station, towers, pc, surveyGrid, water;
 /* 升级模块句柄（初始化失败时保持 null，主场景必须继续可跑） */
-let ssaoFX = null, terrainFX = null, hudFX = null, weatherFX = null;
+let ssaoFX = null, terrainFX = null, hudFX = null, weatherFX = null, gradeFX = null;
+/** 泛光 Pass 句柄：坏天气下要压暗泛光，否则亮雾会被 Bloom 糊成一片白 */
+let bloomPass = null;
 
 /**
  * 升级模块初始化（SSAO / 天气 / HUD）。全部 try/catch 包裹：
@@ -1493,6 +1496,19 @@ function initUpgradeModules() {
         log: function (m) { console.log("[Weather]", m); },
       });
     } catch (e) { console.warn("[Weather] 初始化失败：", e); weatherFX = null; }
+  }
+  // ②.5 天气色彩分级：必须排在 Bloom/SSAO 之后（最后一个 Pass 输出到屏幕）。
+  // 旧版只有"雾 + 粒子"，没有分级 → 雾色把动态范围压扁，雨/雪/沙尘都糊成单色。
+  if (composer && window.UAVWeatherGrade && typeof UAVWeatherGrade.create === "function") {
+    try {
+      gradeFX = UAVWeatherGrade.create({
+        THREE, composer, renderer, width: innerWidth, height: innerHeight,
+      });
+      if (gradeFX) {
+        composer.addPass(gradeFX.pass);
+        console.log("[WeatherGrade] 色彩分级 + 屏幕空间天气叠加已启用");
+      }
+    } catch (e) { console.warn("[WeatherGrade] 安装失败：", e); gradeFX = null; }
   }
   // ③ HUD：任务流向箭头 + 队列三维瀑布图
   if (window.UAVHUD && typeof UAVHUD.create === "function") {
@@ -1648,9 +1664,10 @@ function initScene() {
     if (RENDER.bloomStrength <= 0) throw new Error("CPU 档关闭泛光");
     composer = new THREE.EffectComposer(renderer);
     composer.addPass(new THREE.RenderPass(scene, camera));
-    composer.addPass(new THREE.UnrealBloomPass(
+    bloomPass = new THREE.UnrealBloomPass(
       new THREE.Vector2(innerWidth, innerHeight),
-      RENDER.bloomStrength, RENDER.bloomRadius, RENDER.bloomThreshold));
+      RENDER.bloomStrength, RENDER.bloomRadius, RENDER.bloomThreshold);
+    composer.addPass(bloomPass);
   } catch (e) {
     console.warn("泛光后处理不可用，退回直接渲染：", e);
     composer = null;
@@ -1669,6 +1686,7 @@ function initScene() {
     camera.updateProjectionMatrix();
     renderer.setSize(innerWidth, innerHeight);
     if (composer) composer.setSize(innerWidth, innerHeight);
+    if (gradeFX && gradeFX.setSize) { try { gradeFX.setSize(innerWidth, innerHeight); } catch (e) {} }
     if (ssaoFX && ssaoFX.setSize) { try { ssaoFX.setSize(innerWidth, innerHeight); } catch (e) {} }
   });
 
@@ -2176,6 +2194,23 @@ function animate() {
     } catch (e) { hudFX = null; console.warn("[HUD] update 异常，已停用：", e); }
   }
   if (weatherFX && weatherFX.update) { try { weatherFX.update(dt, camera); } catch (e) {} }
+  /* 天气色彩分级 + 泛光抑制。
+     为什么必须抑制 Bloom：坏天气下整屏接近雾色（高亮度、低对比），
+     UnrealBloom 会把这片亮雾再糊开一圈 —— 截图里"白成一片"有它一份。
+     这里按天气强度把泛光压到 22%，保留一点高光，但不再扩散。 */
+  if (gradeFX) {
+    try {
+      const wcur = (weatherFX && weatherFX.current) ? weatherFX.current : null;
+      const wPreset = wcur ? wcur.preset : "clear";
+      const wInt = wcur ? (wcur.intensity || 0) : 0;
+      gradeFX.setWeather(wPreset, wInt, wcur ? wcur.wind_dir_deg : 90);
+      gradeFX.update(dt);
+      if (bloomPass) {
+        const k = (wPreset === "clear") ? 0 : Math.min(1, wInt);
+        bloomPass.strength = RENDER.bloomStrength * (1 - 0.78 * k);
+      }
+    } catch (e) { /* 忽略：分级失败不影响主画面 */ }
+  }
   if (ssaoFX && ssaoFX.update) { try { ssaoFX.update(dt); } catch (e) {} }
 
   // ---- 扫描覆盖热力图：**只在仿真真正运行时**盖章 ----

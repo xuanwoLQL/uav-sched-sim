@@ -45,7 +45,7 @@ function parseArgs(argv) {
   const out = {
     url: "http://127.0.0.1:8791/app3d.html?quality=high",
     out: "shots/shot.png", wait: 8000, width: 1600, height: 1000,
-    eval: "", shot: true, debug: false, evalDelay: 2500, evalFile: "",
+  eval: "", shot: true, debug: false, evalDelay: 2500, evalFile: "", evalOut: "",
     gpu: false, headed: false,
   };
   for (let i = 2; i < argv.length; i++) {
@@ -57,6 +57,7 @@ function parseArgs(argv) {
     else if (a === "--height") out.height = parseInt(argv[++i], 10);
     else if (a === "--eval") out.eval = argv[++i];
     else if (a === "--eval-file") out.evalFile = argv[++i];
+    else if (a === "--eval-out") out.evalOut = argv[++i];
     else if (a === "--eval-delay") out.evalDelay = parseInt(argv[++i], 10);
     else if (a === "--no-shot") out.shot = false;
     else if (a === "--debug") out.debug = true;
@@ -231,6 +232,15 @@ async function main() {
       shotPath = resolve(args.out);
       mkdirSync(dirname(shotPath), { recursive: true });
       writeFileSync(shotPath, Buffer.from(cap.data, "base64"));
+    }
+
+    /* --eval-out：把 eval 的返回值单独写成一个文件（长跑基准测试用）。
+       不写进 summary 的 JSON 里，是因为基准结果可能很长，混在控制台输出里不好解析。 */
+    if (args.evalOut && evalResult !== null && evalResult !== undefined) {
+      const outPath = resolve(args.evalOut);
+      mkdirSync(dirname(outPath), { recursive: true });
+      writeFileSync(outPath, typeof evalResult === "string" ? evalResult : JSON.stringify(evalResult),
+        "utf8");
     }
 
     const summary = {

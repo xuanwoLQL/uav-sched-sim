@@ -123,10 +123,35 @@
     return Math.max(0.8, Math.abs(num(visKm, 0)) * 1000 / M_PER_UNIT);
   }
 
-  /** 能见度 → FogExp2.density。clear 走项目原值 0.0016，其余走契约公式 */
+  /* --------------------------------------------------------------------------
+     雾密度：**可读性优先**的双口径
+     --------------------------------------------------------------------------
+     物理口径：d = FOG_K / 能见度世界单位 —— 在"能见度距离"处遮蔽约 71%。
+
+     问题（2026-11 截图复盘）：本项目相机看地形是 300~700 世界单位远
+     （矿区宽 350 单位），而 0.6~3 km 的能见度换算成世界单位只有 15~73 单位。
+     物理密度会让画面在 100 单位外就 100% 变成雾色 —— 雨/雪/沙尘三张截图
+     都糊成"单色块"，地形轮廓完全消失，正是这个原因。
+
+     视觉口径：给每种天气设一个"远景遮蔽率上限"，反解密度：
+         cover(520 单位处) = 雨 72% / 雪 80% / 沙尘 88%
+         d = sqrt(-ln(1-cover)) / 520
+     近景清晰、中景可辨、远景淹没 —— 画面才有纵深，而不是一堵色墙。
+
+     取两者较小值：既保留"能见度越低越糊"的单调性，又不把画面糊死。
+     ⚠ 这只影响**画面**；链路健康度扣分仍由后端 weather.py 按真实能见度计算，
+       评测口径不受影响。
+  -------------------------------------------------------------------------- */
+  const FOG_LEGIBLE_DIST = 520;
+  const FOG_COVER = { rain: 0.72, snow: 0.80, dust: 0.88 };
+
+  /** 能见度 → FogExp2.density（物理口径与可读性上限取较小值） */
   function fogDensityFor(preset, visKm) {
     if (preset === "clear") return CLEAR_FOG_DENSITY;
-    return FOG_K / visibilityWorld(visKm);
+    const physical = FOG_K / visibilityWorld(visKm);
+    const cover = FOG_COVER[preset] || 0.75;
+    const legible = Math.sqrt(-Math.log(1 - cover)) / FOG_LEGIBLE_DIST;
+    return Math.min(physical, legible);
   }
 
   /** FogExp2 在给定距离处的雾权重：0=完全清晰，1=完全被雾吃掉（与 three 的 shader 同式） */
@@ -335,6 +360,75 @@
        - 越界用"环绕(wrap)"回到另一侧，永远只在相机附近这一盒子里，没有生成/销毁开销
        - geometry.frustumCulled = false：位置每帧在变，three 内置包围球会过期而误剔除 */
 
+  /* --------------------------------------------------------------------------
+     天气点粒子材质（雪 / 沙尘共用）
+     --------------------------------------------------------------------------
+     为什么不用 PointsMaterial：
+       1) PointsMaterial 只能给**全场景一个 size**，雪花看起来大小一模一样，
+          像"撒了一把白点"；真实雪片近大远小、有虚焦（bokeh）。
+       2) 它没有逐粒子的透明度/近距淡出，贴脸的粒子会糊满镜头。
+       3) 默认 addtive 混合叠在亮雾上会整片过曝（旧版截图就是这个毛病）。
+
+     这个 shader 做四件事：
+       * 逐粒子 aSize/aAlpha —— 大小、明暗都有差异；
+       * gl_PointSize = aSize * uScale / 距离 —— 标准透视衰减（uScale 每帧按视口算）；
+       * 近距淡出 + 远距淡出 —— 不会糊镜头，也不会在远景堆成一片白；
+       * 片元做软圆 + 平方衰减 —— 柔边雪花，不是方块/硬点。
+     -------------------------------------------------------------------------- */
+  function makePointMaterial(T, color, nearFade, farFade) {
+    return new T.ShaderMaterial({
+      uniforms: {
+        uColor: { value: new T.Color(color) },
+        uOpacity: { value: 0 },
+        uScale: { value: 900 },
+        uNear: { value: nearFade },
+        uFar: { value: farFade },
+      },
+      vertexShader: [
+        "attribute float aSize;",
+        "attribute float aAlpha;",
+        "uniform float uScale;",
+        "uniform float uNear;",
+        "uniform float uFar;",
+        "varying float vAlpha;",
+        "void main() {",
+        "  vec4 mv = modelViewMatrix * vec4(position, 1.0);",
+        "  float d = max(0.001, -mv.z);",
+        "  gl_PointSize = max(1.0, aSize * uScale / d);",
+        "  gl_Position = projectionMatrix * mv;",
+        "  float nearFade = smoothstep(uNear * 0.35, uNear, d);",
+        "  float farFade  = 1.0 - smoothstep(uFar * 0.55, uFar, d);",
+        "  vAlpha = aAlpha * nearFade * farFade;",
+        "}",
+      ].join("\n"),
+      fragmentShader: [
+        "uniform vec3 uColor;",
+        "uniform float uOpacity;",
+        "varying float vAlpha;",
+        "void main() {",
+        "  vec2 p = gl_PointCoord - 0.5;",
+        "  float r = length(p) * 2.0;",
+        "  float a = smoothstep(1.0, 0.12, r);",
+        "  a *= a;",
+        "  float alpha = a * vAlpha * uOpacity;",
+        "  if (alpha < 0.004) discard;",
+        "  gl_FragColor = vec4(uColor, alpha);",
+        "}",
+      ].join("\n"),
+      transparent: true,
+      depthWrite: false,
+      depthTest: true,
+      blending: T.NormalBlending,
+    });
+  }
+
+  /** 统一设置材质透明度：兼容 PointsMaterial(.opacity) 与 ShaderMaterial(.uniforms.uOpacity) */
+  function setMatOpacity(mat, v) {
+    if (!mat) return;
+    if (mat.uniforms && mat.uniforms.uOpacity) mat.uniforms.uOpacity.value = v;
+    else mat.opacity = v;
+  }
+
   function buildRain(T, count, hx, hy, hz, sizeScale) {
     const geo = new T.BufferGeometry();
     const arr = new Float32Array(count * 2 * 3);   // 每滴 2 顶点（头、尾）→ 雨丝
@@ -362,10 +456,11 @@
     if (T.DynamicDrawUsage !== undefined && geo.attributes.position.setUsage) {
       geo.attributes.position.setUsage(T.DynamicDrawUsage);
     }
-    // 加色混合：雨丝在深色天空/地形上"发亮"，比普通混合更像被车灯/天光打亮的雨线
+    /* 雨丝：加色混合保留"被天光打亮"的观感，但把亮度压下来（旧版 0.62 太亮，
+       在亮雾背景上糊成一片白条），并且打开 fog —— 远处的雨丝会自然融进雨雾。 */
     const mat = new T.LineBasicMaterial({
-      color: 0xaec8dd, transparent: true, opacity: 0, blending: T.AdditiveBlending,
-      depthWrite: false, fog: false,
+      color: 0xbfd6ea, transparent: true, opacity: 0, blending: T.AdditiveBlending,
+      depthWrite: false, fog: true,
     });
     const mesh = new T.LineSegments(geo, mat);
     mesh.frustumCulled = false;
@@ -386,6 +481,8 @@
     const amp = new Float32Array(count);         // 摆动幅度（单位）
     const windX = new Float32Array(count);
     const windZ = new Float32Array(count);
+    const sizes = new Float32Array(count);       // 逐粒子世界尺寸（近大远小的"大"）
+    const alphas = new Float32Array(count);      // 逐粒子透明度（远近/虚实差异）
     const rnd = makeRng(0x5EED2);
 
     for (let i = 0; i < count; i++) {
@@ -397,20 +494,21 @@
       phase[i] = rnd() * Math.PI * 2;
       freq[i] = 0.5 + rnd() * 1.3;
       amp[i] = 0.35 + rnd() * 0.95;              // 正弦横向摆动，模拟雪花受气流的飘忽
+      // 雪片尺寸 0.10~0.34 世界单位：近处成"虚焦光斑"，远处才是细碎小雪
+      sizes[i] = (0.10 + rnd() * 0.24) * sizeScale;
+      alphas[i] = 0.55 + rnd() * 0.45;
       windX[i] = 0; windZ[i] = 0;
       arr[i * 3] = x; arr[i * 3 + 1] = y; arr[i * 3 + 2] = z;
     }
     geo.setAttribute("position", new T.BufferAttribute(arr, 3));
+    geo.setAttribute("aSize", new T.BufferAttribute(sizes, 1));
+    geo.setAttribute("aAlpha", new T.BufferAttribute(alphas, 1));
     if (T.DynamicDrawUsage !== undefined && geo.attributes.position.setUsage) {
       geo.attributes.position.setUsage(T.DynamicDrawUsage);
     }
-    // 雪片用加色混合：雪雾背景下（雾色 #cfd8e2，本身很亮）普通混合的白点几乎看不见，
-    // 加色会让雪花中心"提亮到过曝"，在亮灰背景上反而读得出来 —— 这是游戏里让雪可见的常用做法。
-    const mat = new T.PointsMaterial({
-      color: 0xe8f2ff, size: 0.22 * sizeScale, sizeAttenuation: true,
-      map: tex, transparent: true, opacity: 0, depthWrite: false,
-      blending: T.AdditiveBlending, fog: false,
-    });
+    /* 雪：改成逐粒子 shader（见 makePointMaterial 的注释）。
+       旧版"统一尺寸 + 加色混合"在亮雾上就是一片白噪点，这是截图里最刺眼的问题。 */
+    const mat = makePointMaterial(T, 0xf2f8ff, 2.5, 150);
     const mesh = new T.Points(geo, mat);
     mesh.frustumCulled = false;
     mesh.visible = false;
@@ -428,6 +526,8 @@
     const turb = new Float32Array(count);        // 涡流强度（每颗粒子不同，避免整片同步平移）
     const windX = new Float32Array(count);
     const windZ = new Float32Array(count);
+    const sizes = new Float32Array(count);
+    const alphas = new Float32Array(count);
     const rnd = makeRng(0x5EED3);
 
     for (let i = 0; i < count; i++) {
@@ -437,20 +537,20 @@
       phase[i] = rnd() * Math.PI * 2;
       freq[i] = 0.4 + rnd() * 1.7;
       turb[i] = 1.2 + rnd() * 3.8;
+      // 沙尘颗粒比雪片大得多、也更透明（悬浮的细尘 + 被风卷起的大颗粒）
+      sizes[i] = (0.22 + rnd() * 0.72) * sizeScale;
+      alphas[i] = 0.18 + rnd() * 0.42;
       windX[i] = 0; windZ[i] = 0;
     }
     geo.setAttribute("position", new T.BufferAttribute(arr, 3));
+    geo.setAttribute("aSize", new T.BufferAttribute(sizes, 1));
+    geo.setAttribute("aAlpha", new T.BufferAttribute(alphas, 1));
     if (T.DynamicDrawUsage !== undefined && geo.attributes.position.setUsage) {
       geo.attributes.position.setUsage(T.DynamicDrawUsage);
     }
-    // 沙尘用加色混合：土黄颗粒叠在"土黄色的雾"上会显得比雾更亮/更暗的斑驳颗粒，
-    // 普通混合在同样色相下几乎看不出来。贴图是柔边圆点，避免默认方块点。
-    const dtex = makeDustTexture(T);
-    const mat = new T.PointsMaterial({
-      color: 0xc8a06a, size: 0.34 * sizeScale, sizeAttenuation: true,
-      map: dtex, transparent: true, opacity: 0, depthWrite: false, alphaTest: 0.01,
-      blending: T.AdditiveBlending, fog: false,
-    });
+    /* 沙尘：同样改成逐粒子 shader。旧版"加色 + 统一大小"叠在土黄雾上，
+       只会把画面进一步提亮成一片米色，看不出颗粒感。 */
+    const mat = makePointMaterial(T, 0xd8b483, 3.0, 190);
     const mesh = new T.Points(geo, mat);
     mesh.frustumCulled = false;
     mesh.visible = false;
@@ -510,24 +610,35 @@
     add("clear 雾密度=0.0016", Math.abs(fogDensityFor("clear", 12) - CLEAR_FOG_DENSITY) < 1e-12,
         String(fogDensityFor("clear", 12)));
 
-    // 5) 公式抽查：density = k / max(0.8, vis_km*1000/41)
+    // 5) 物理口径确实被"可读性上限"截断（否则画面会糊成一堵色墙）
     const dRain3 = fogDensityFor("rain", 3.0);
-    const expect = FOG_K / (3000 / M_PER_UNIT);
-    add("density=k/能见度世界单位", Math.abs(dRain3 - expect) < 1e-12,
-        "rain@3km=" + dRain3.toFixed(5) + " 期望 " + expect.toFixed(5));
+    const physRain3 = FOG_K / (3000 / M_PER_UNIT);
+    const legibleRain = Math.sqrt(-Math.log(1 - FOG_COVER.rain)) / FOG_LEGIBLE_DIST;
+    add("雾密度取物理/可读性较小值", Math.abs(dRain3 - Math.min(physRain3, legibleRain)) < 1e-12 &&
+        dRain3 < physRain3,
+        "rain@3km=" + dRain3.toFixed(5) + " 物理 " + physRain3.toFixed(5) +
+        " 可读性 " + legibleRain.toFixed(5));
 
     // 6) 单调性：能见度越低，雾越浓（dust > snow > rain > 0）
     const dSnow = fogDensityFor("snow", 1.2), dDust = fogDensityFor("dust", 0.6);
     add("能见度越低雾越浓", dDust > dSnow && dSnow > dRain3 && dRain3 > 0,
         "dust " + dDust.toFixed(4) + " > snow " + dSnow.toFixed(4) + " > rain " + dRain3.toFixed(4));
 
-    // 7) 视觉验收的定量等价位：
-    //    沙尘（默认预设能见度 0.6km）在 30 世界单位外雾权重 >99% → 远景山脊必然看不见；
-    //    雨（3km）在 60 世界单位的中景仍有 >15% 可见度 → "雨能看到中景"。
-    const dustHideFar = fogFactorAt(dDust, 30);
-    const rainMid = 1 - fogFactorAt(dRain3, 60);
-    add("沙尘 30 单位外遮蔽>99%", dustHideFar > 0.99, (dustHideFar * 100).toFixed(2) + "%");
-    add("雨中景(60 单位)可见>15%", rainMid > 0.15, (rainMid * 100).toFixed(1) + "%");
+    // 7) 视觉验收的定量等价位（改版后以"纵深感"为准，而不是"糊死"）：
+    //    * 近景（30 单位）必须清晰 —— 否则贴脸的无人机/地面站也会被雾吃掉；
+    //    * 远景（520 单位）按预设的 cover 遮蔽（沙尘最重 88%），山脊仍留轮廓；
+    //    * 三档遮蔽率必须单调：沙尘 > 雪 > 雨。
+    const dustNear = fogFactorAt(dDust, 30);
+    const dustFar = fogFactorAt(dDust, FOG_LEGIBLE_DIST);
+    const snowFar = fogFactorAt(dSnow, FOG_LEGIBLE_DIST);
+    const rainFar = fogFactorAt(dRain3, FOG_LEGIBLE_DIST);
+    add("近景(30 单位)清晰 <10%", dustNear < 0.10, (dustNear * 100).toFixed(2) + "%");
+    add("远景(520 单位)按 cover 遮蔽", Math.abs(dustFar - FOG_COVER.dust) < 0.02,
+        "沙尘 " + (dustFar * 100).toFixed(1) + "% / 雪 " + (snowFar * 100).toFixed(1) +
+        "% / 雨 " + (rainFar * 100).toFixed(1) + "%");
+    add("远景遮蔽率单调 沙尘>雪>雨", dustFar > snowFar && snowFar > rainFar,
+        "dust " + (dustFar * 100).toFixed(1) + " > snow " + (snowFar * 100).toFixed(1) +
+        " > rain " + (rainFar * 100).toFixed(1));
 
     // 8) 光照衰减系数（契约 §4.5）
     const lf0 = lightFactors(0), lf1 = lightFactors(1);
@@ -565,12 +676,13 @@
     add("空快照=clear", n2.preset === "clear" && n2.intensity === 0, n2.preset);
 
     // 12) 后端真实工况抽查：dust intensity=0.85、visibility≈2.3km →
-    //     density 落在"远景消失、近景还在"的合理区间（0.015~0.04）
+    //     density 落在"近景清晰、远景留轮廓"的合理区间
     const visB = 12 - (12 - PRESETS.dust.visibility_km) * 0.85;   // 后端按 intensity 线性插值
     const densB = fogDensityFor("dust", visB);
-    add("沙尘工况密度在合理区间", densB > 0.012 && densB < 0.045,
+    const coverB = fogFactorAt(densB, FOG_LEGIBLE_DIST);
+    add("沙尘工况密度在合理区间", densB > 0.0015 && densB < 0.0035 && coverB > 0.5 && coverB < 0.92,
         "vis=" + visB.toFixed(2) + "km density=" + densB.toFixed(4) +
-        " 176单位处遮蔽=" + (fogFactorAt(densB, 176) * 100).toFixed(1) + "%");
+        " 520单位处遮蔽=" + (coverB * 100).toFixed(1) + "%");
 
     const stats = {
       version: VERSION,
@@ -847,14 +959,15 @@
       /* ---------------------------------------------------- 粒子透明度（uniform 级） */
       function syncOpacity() {
         const e = cur.effect;
-        rain.mat.opacity = 0.62 * e;
-        snow.mat.opacity = 0.95 * e;
-        dust.mat.opacity = 0.55 * e;
+        // 亮度刻意压低：旧版 0.62/0.95/0.55 叠在亮雾上会整片过曝（截图里就是一片白）
+        setMatOpacity(rain.mat, 0.34 * e);
+        setMatOpacity(snow.mat, 0.86 * e);
+        setMatOpacity(dust.mat, 0.58 * e);
         for (let i = 0; i < dust.walls.length; i++) {
           const w = dust.walls[i];
           // 阵风：沙墙浓度轻微起伏，"沙尘在流动"的观感来自滚动 + 浓度呼吸
           const gust = 0.84 + 0.16 * Math.sin(clock.t * 0.8 + w.phase);
-          w.mat.opacity = w.cfg.opacity * e * gust;
+          setMatOpacity(w.mat, w.cfg.opacity * e * gust);
         }
       }
 
@@ -901,6 +1014,10 @@
             writeScene(false);
           }
           syncVisibility();
+          // 关键：apply 之后必须立刻写一次透明度。
+          // 之前只在 update() 里写，遇到 ?still=1（渲染循环被冻结）时，
+          // 切了天气却看不到粒子 —— 截图验收会直接判"天气没生效"。
+          syncOpacity();
           if (!enabled) group.visible = false;
           syncSky();
         } catch (e) {
@@ -1012,6 +1129,17 @@
         group.position.copy(camObj.position);
         camObj.getWorldDirection(tmpDir);
         group.position.addScaledVector(tmpDir, BOX_FORWARD);
+
+        // ---- 2.5) 点粒子透视缩放：gl_PointSize = aSize * uScale / 视距 ----
+        // uScale = 视口高度 / (2*tan(fov/2))，即"1 世界单位在 1 单位距离处占多少像素"。
+        // 每帧算一次（两次乘除），换来雪花/沙尘真正的近大远小。
+        {
+          const vh = (renderer && renderer.domElement && renderer.domElement.height) || 1000;
+          const fov = ((camObj && camObj.fov) || 50) * Math.PI / 180;
+          const uScale = vh / (2 * Math.tan(fov / 2));
+          if (snow.mat.uniforms && snow.mat.uniforms.uScale) snow.mat.uniforms.uScale.value = uScale;
+          if (dust.mat.uniforms && dust.mat.uniforms.uScale) dust.mat.uniforms.uScale.value = uScale;
+        }
 
         // ---- 3) 粒子推进（只写 Float32Array；越界环绕，不生成/销毁）----
         let particles = 0, verts = 0, drawCalls = 0;

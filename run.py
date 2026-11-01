@@ -1050,6 +1050,27 @@ def cmd_replicate(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# bench-weather —— 多运行场景（晴/雨/雪/沙尘）稳定性与效率测评
+# ---------------------------------------------------------------------------
+def cmd_bench_weather(args: argparse.Namespace) -> int:
+    """调用 tools/bench_weather.py：四场景各跑 12s，采样帧间隔，出报告与对比图。
+
+    这是"系统能够稳定高效运行"的取证入口：给出 FPS / P95 / P99 / 最坏帧 /
+    掉帧比例 / 仿真是否推进 / JS 堆是否增长，并做一次 3x 像素压力测试。
+    """
+    import subprocess
+
+    script = ROOT / "tools" / "bench_weather.py"
+    if not script.is_file():
+        print(f"找不到 {script}")
+        return 2
+    argv = [PY, str(script), "--port", str(args.port)]
+    if args.no_chart:
+        argv.append("--no-chart")
+    return subprocess.call(argv, cwd=str(ROOT))
+
+
+# ---------------------------------------------------------------------------
 # gpu —— GPU 大规模重复实验（analysis model）
 # ---------------------------------------------------------------------------
 def cmd_gpu(args: argparse.Namespace) -> int:
@@ -1166,6 +1187,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--rebuild", action="store_true", help="强制重新编译 CUDA 内核")
     sp.add_argument("--out-dir", default=None, help="输出目录（默认 results/gpu）")
     sp.set_defaults(func=cmd_gpu)
+
+    sp = sub.add_parser("bench-weather",
+                        help="多运行场景测评：晴/雨/雪/沙尘各跑 12s，出帧率与稳定性报告")
+    sp.add_argument("--port", type=int, default=8791, help="本地服务端口（默认 8791）")
+    sp.add_argument("--no-chart", action="store_true", help="不出对比图")
+    sp.set_defaults(func=cmd_bench_weather)
 
     sp = sub.add_parser("ui", help="启动实时可视化面板（浏览器看仿真动画，演示首选）")
     sp.add_argument("--host", default="127.0.0.1", help="监听地址（默认 127.0.0.1，仅本机可访问）")
