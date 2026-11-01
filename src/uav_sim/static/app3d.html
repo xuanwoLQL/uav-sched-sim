@@ -38,6 +38,11 @@
   button.go{background:linear-gradient(135deg,#1f6feb,#2ea8ff);border-color:#2ea8ff;font-weight:600}
   button.go:hover{filter:brightness(1.12)}
   button.stop{background:rgba(120,32,32,.9);border-color:#a33}
+  /* 「仿真结果」按钮：与"开始/停止"同一排，但视觉上属于"看数据"而不是"控制仿真"，
+     所以用青绿描边而不是实心蓝/红。 */
+  button.res{background:rgba(14,52,58,.92);border-color:rgba(55,226,213,.55);color:#9ff7ee}
+  button.res:hover{background:rgba(20,72,80,.95);border-color:#37e2d5}
+  button.res.on{background:rgba(55,226,213,.18);border-color:#37e2d5}
   button.ghost{padding:4px 8px;font-size:11px}
   #stat{margin-left:auto;display:flex;align-items:center;gap:8px;flex:none}
   #pillStatus{padding:3px 10px;border-radius:20px;border:1px solid var(--line);
@@ -47,6 +52,20 @@
   #prog>i{display:block;height:100%;width:0;
     background:linear-gradient(90deg,#2ea8ff,#37e2d5);transition:width .2s}
   @media (max-width:1600px){ #top .sub{display:none} #prog{width:80px} }
+  /* 窄窗口（笔记本 1366/1440 分辨率很常见）：先把"次要信息"收起，保证按钮不被挤出屏幕。
+     实测在 1600×900 的桌面窗口里，start/stop/结果 三个按钮 + 拓扑下拉会溢出到看不见。 */
+  @media (max-width:1480px){
+    #top{gap:7px}
+    #gpuBadge{display:none}
+    #topoHint{display:none}
+  }
+  @media (max-width:1280px){
+    #quorumBadge{display:none}
+    #fpsBadge{display:none}
+  }
+  /* 保证 #stat 可以被压缩、且永远不会盖住左侧按钮 */
+  #stat{min-width:0;overflow:hidden}
+  #pillStatus{min-width:0}
 
   .panel{position:fixed;background:var(--panel);border:1px solid var(--line);border-radius:12px;
     padding:10px 12px;backdrop-filter:blur(10px);box-shadow:0 8px 30px rgba(0,0,0,.5);z-index:15}
@@ -115,6 +134,91 @@ button.ghost.on{border-color:rgba(55,226,213,.75);color:#9ff7ee;
   background:rgba(55,226,213,.14);box-shadow:0 0 0 1px rgba(55,226,213,.25) inset}
 #vignette{position:fixed;inset:0;pointer-events:none;z-index:6;
   background:radial-gradient(ellipse at 50% 46%,rgba(0,0,0,0) 42%,rgba(0,0,0,.34) 100%)}
+
+  /* ==========================================================================
+     「仿真结果」浏览界面（全屏遮罩，不动 3D 场景）
+     --------------------------------------------------------------------------
+     为什么是遮罩而不是新页面：3D 场景停了就看不见"正在跑"，而演示时往往要
+     "跑着给它看结果"。遮罩 z-index 高于所有面板，按 Esc / 点右上角关闭即回到场景。
+     ========================================================================== */
+  #rx{position:fixed;inset:0;z-index:60;display:none;flex-direction:column;
+    background:linear-gradient(180deg,rgba(4,9,16,.985),rgba(6,13,22,.97));
+    backdrop-filter:blur(10px)}
+  #rx.show{display:flex}
+  #rx .rxbar{display:flex;align-items:center;gap:10px;padding:10px 16px;flex:none;
+    border-bottom:1px solid var(--line);flex-wrap:wrap}
+  #rx .rxbar h2{margin:0;font-size:15px;font-weight:700;letter-spacing:.4px;
+    background:linear-gradient(90deg,#7ef9e8,#4ea1ff);-webkit-background-clip:text;
+    background-clip:text;color:transparent;flex:none}
+  #rx .rxbar .src{font-size:11px;color:var(--dim);font-variant-numeric:tabular-nums}
+  #rx .rxbar .sp{flex:1}
+  #rx .tabs{display:flex;gap:4px;flex:none;flex-wrap:wrap}
+  #rx .tabs button{font-size:11.5px;padding:4px 10px;border-radius:14px}
+  #rx .tabs button.on{border-color:rgba(55,226,213,.75);color:#9ff7ee;
+    background:rgba(55,226,213,.14)}
+  #rx .body{flex:1;overflow:auto;padding:14px 16px 26px;min-height:0}
+  #rx .sec{margin-bottom:22px}
+  #rx .sec h3{margin:0 0 4px;font-size:12px;letter-spacing:1px;color:var(--cyan);
+    display:flex;align-items:center;gap:8px}
+  #rx .sec h3 em{font-style:normal;color:var(--dim);font-weight:400;font-size:11px;
+    letter-spacing:0}
+  #rx .sec .note{font-size:11px;color:var(--dim);margin:0 0 10px}
+  /* 图片网格：auto-fill 保证窗口变窄也自动换行；卡片底部标"生成时间"是刻意的 ——
+     charts/ 里的图可能来自上周那次 all，不标时间最容易"拿旧图当新结论"。 */
+  #rx .grid{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(230px,1fr))}
+  #rx .card{background:rgba(12,22,34,.72);border:1px solid var(--line);border-radius:10px;
+    overflow:hidden;cursor:pointer;transition:.15s;display:flex;flex-direction:column}
+  #rx .card:hover{border-color:#3d6ba8;transform:translateY(-1px);
+    box-shadow:0 6px 18px rgba(0,0,0,.45)}
+  #rx .card .thumb{width:100%;aspect-ratio:16/10;object-fit:cover;background:#08101c;
+    display:block}
+  #rx .card .cap{padding:6px 8px;font-size:11.5px;line-height:1.35}
+  #rx .card .cap b{font-weight:600;display:block;overflow:hidden;text-overflow:ellipsis;
+    white-space:nowrap}
+  #rx .card .cap span{color:var(--dim);font-size:10px;font-variant-numeric:tabular-nums}
+  #rx table{border-collapse:collapse;width:100%;font-size:11.5px;
+    font-variant-numeric:tabular-nums}
+  #rx th,#rx td{border-bottom:1px solid rgba(78,161,255,.14);padding:5px 8px;
+    text-align:right;white-space:nowrap}
+  #rx th{color:var(--dim);font-weight:600;position:sticky;top:0;background:#0a1420;
+    cursor:pointer;user-select:none}
+  #rx th:hover{color:var(--cyan)}
+  #rx td.l,#rx th.l{text-align:left}
+  #rx tbody tr:hover{background:rgba(78,161,255,.07)}
+  #rx .empty{color:var(--dim);font-size:12px;padding:18px;border:1px dashed var(--line);
+    border-radius:10px;line-height:1.8}
+  #rx code{background:rgba(78,161,255,.12);border-radius:4px;padding:1px 5px;
+    font-size:11px;color:#a9d4ff}
+  /* 本次运行卡片 */
+  #rx .kpis{display:grid;gap:8px;grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}
+  #rx .kpi{background:rgba(12,22,34,.72);border:1px solid var(--line);border-radius:9px;
+    padding:8px 10px}
+  #rx .kpi span{display:block;font-size:10.5px;color:var(--dim)}
+  #rx .kpi b{font-size:16px;font-variant-numeric:tabular-nums}
+  /* 队列回放 */
+  #rx .replay{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:8px}
+  #rx .replay select{font-size:11.5px}
+  #rx canvas.rp{width:100%;height:210px;display:block;background:#080f19;
+    border:1px solid var(--line);border-radius:9px}
+  #rx input[type=range]{flex:1;min-width:180px}
+  #rx .tip{font-size:11px;color:var(--dim);margin-top:6px;line-height:1.7}
+  /* 灯箱 */
+  #lb{position:fixed;inset:0;z-index:70;display:none;background:#020509;
+    flex-direction:column}
+  #lb.show{display:flex}
+  /* 给灯箱自己的头部一条实底色：否则底下「结果界面」的标题/页签会透上来，
+     截图里看就是两行文字叠在一起（实测踩过）。 */
+  #lb .lbar{display:flex;align-items:center;gap:10px;padding:10px 16px;flex:none;
+    font-size:12px;border-bottom:1px solid var(--line);background:#0a1420}
+  #lb .lbar b{font-weight:600}
+  #lb .lbar .sp{flex:1}
+  #lb .lbody{flex:1;display:flex;align-items:center;justify-content:center;min-height:0;
+    padding:10px}
+  #lb img{max-width:100%;max-height:100%;object-fit:contain;
+    box-shadow:0 10px 40px rgba(0,0,0,.6);border-radius:8px;background:#fff}
+  #lb .nav{cursor:pointer;font-size:22px;padding:4px 14px;border-radius:8px;
+    border:1px solid var(--line);user-select:none}
+  #lb .nav:hover{border-color:#37e2d5;color:#9ff7ee}
 </style>
 </head>
 <body>
@@ -147,6 +251,9 @@ button.ghost.on{border-color:rgba(55,226,213,.75);color:#9ff7ee;
   </div>
   <button class="go" id="btnStart">▶ 开始仿真</button>
   <button class="stop" id="btnStop">■ 停止</button>
+  <!-- 仿真结果：打开"已落盘实验产物"的浏览界面（charts/*.png + summary.csv + 时序回放）。
+       为什么放在这一排：用户的动作序列就是"跑 -> 看结果"，按钮跟控制按钮挨着最顺手。 -->
+  <button class="res" id="btnResults" title="查看已落盘的实验结果（图表 / 矩阵 / 时序回放）">📊 仿真结果</button>
   <div id="stat">
     <div id="prog"><i></i></div>
     <span id="pillStatus">未开始</span>
@@ -226,6 +333,33 @@ button.ghost.on{border-color:rgba(55,226,213,.75);color:#9ff7ee;
     <button class="ghost" data-tod="dusk">黄昏</button>
     <button class="ghost" data-tod="night">夜景</button>
   </div>
+</div>
+
+<!-- ===================== 「仿真结果」全屏浏览界面（默认隐藏） ===================== -->
+<div id="rx">
+  <div class="rxbar">
+    <h2>📊 仿真结果</h2>
+    <span class="src" id="rxSrc">读取中…</span>
+    <div class="tabs" id="rxTabs"></div>
+    <span class="sp"></span>
+    <button class="ghost" id="rxReload" title="重新读取磁盘上的实验产物（不会重跑实验）">↻ 刷新</button>
+    <button class="ghost" id="rxClose" title="关闭（Esc）">✕ 关闭</button>
+  </div>
+  <div class="body" id="rxBody"></div>
+</div>
+
+<!-- 灯箱：点图放大 + 左右键切换 -->
+<div id="lb">
+  <div class="lbar">
+    <b id="lbTitle">-</b>
+    <span class="src" id="lbMeta"></span>
+    <span class="sp"></span>
+    <span class="nav" id="lbPrev" title="上一张（←）">‹</span>
+    <span id="lbIdx" class="src">1 / 1</span>
+    <span class="nav" id="lbNext" title="下一张（→）">›</span>
+    <button class="ghost" id="lbClose">✕ 关闭（Esc）</button>
+  </div>
+  <div class="lbody"><img id="lbImg" alt=""></div>
 </div>
 
 <!-- ===== 渲染增强（3D 升级）控制台：天气与模块开关 ===== -->
@@ -2983,6 +3117,532 @@ document.getElementById("btnStart").onclick = async () => {
   else { resetCoverage(); if (state.pc) { /* 点云保留 */ } }   // 新一轮仿真：清掉上一轮的覆盖痕迹
 };
 document.getElementById("btnStop").onclick = () => fetch("/api/stop");
+
+/* ============================================================ 15.5 仿真结果界面 */
+/* 数据全部来自 GET /api/results（只读本地实验产物），图片走 /results_img/<相对路径> 懒加载。
+   这个模块的纪律：
+     ① 数据可能**不存在**（没跑过 run.py all）—— 每个分区都要能给出可执行的提示，绝不空白报错；
+     ② 每张图必须标"生成时间"，因为 charts/ 里的图很可能来自另一次实验（旧图当新结论是这类
+        项目最容易犯的错）；
+     ③ 关闭对话框/遮罩立刻停止 canvas 动画，别在后台烧 CPU。 */
+const RX = {
+  data: null, tab: "live", lb: { list: [], idx: -1 }, raf: 0,
+  replay: { all: [], items: [], series: [], t: 0, playing: false, timer: 0 },
+};
+const _rx$ = (id) => document.getElementById(id);
+function _fmtTs(s) { return String(s || "").replace(" ", " "); }
+function _fmtNum(v, nd) {
+  const n = Number(v);
+  if (!isFinite(n)) return "-";
+  return n.toFixed(nd == null ? 1 : nd);
+}
+function _fmtSize(b) {
+  const n = Number(b) || 0;
+  return n > 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.round(n / 1024) + " KB";
+}
+
+async function openResults() {
+  const rx = _rx$("rx");
+  if (!rx) return;
+  rx.classList.add("show");
+  _rx$("btnResults") && _rx$("btnResults").classList.add("on");
+  await loadResults(true);
+}
+function closeResults() {
+  _rx$("rx").classList.remove("show");
+  _rx$("btnResults") && _rx$("btnResults").classList.remove("on");
+  stopReplay();
+}
+
+async function loadResults(showSpinner) {
+  const src = _rx$("rxSrc");
+  if (showSpinner) src.textContent = "读取中…";
+  try {
+    const r = await fetch("/api/results", { cache: "no-store" });
+    const j = await r.json();
+    if (!j || j.ok === false) throw new Error((j && j.msg) || "接口返回失败");
+    RX.data = j;
+    const gen = (j.summary && j.summary.generated_at) || "（无）";
+    const nImg = (j.images || []).reduce((a, s) => a + (s.images || []).length, 0);
+    src.textContent = `产物目录 ${j.output_root} · summary.csv 生成于 ${gen} · 共 ${nImg} 张图`;
+    renderRxTabs();
+    renderRxBody();
+  } catch (e) {
+    src.textContent = "读取失败：" + (e && e.message ? e.message : e);
+    _rx$("rxBody").innerHTML =
+      '<div class="empty">读不到实验结果。<br>请先在项目根目录跑一次：' +
+      '<code>python run.py all</code>（或 <code>run.py stations</code> / <code>run.py mec</code>），' +
+      '再来这里查看。<br>如果已经跑过，检查 <code>' +
+      ((RX.data && RX.data.output_root) || "results/") + '</code> 目录是否存在。</div>';
+  }
+}
+
+function renderRxTabs() {
+  const d = RX.data || {};
+  const nSec = (d.images || []).filter((s) => (s.images || []).length).length;
+  const tabs = [
+    ["live", "本次运行"],
+    ["charts", "图表 " + nSec],
+    ["table", "15 组矩阵"],
+    ["replay", "时序回放"],
+    ["ci", "置信区间"],
+  ];
+  const box = _rx$("rxTabs");
+  box.innerHTML = "";
+  tabs.forEach(([k, label]) => {
+    const b = document.createElement("button");
+    b.className = "ghost" + (RX.tab === k ? " on" : "");
+    b.textContent = label;
+    b.onclick = () => { RX.tab = k; renderRxTabs(); renderRxBody(); };
+    box.appendChild(b);
+  });
+}
+
+function renderRxBody() {
+  stopReplay();
+  const body = _rx$("rxBody");
+  const d = RX.data || {};
+  if (RX.tab === "live") body.innerHTML = htmlLive(d.live);
+  else if (RX.tab === "charts") body.innerHTML = htmlCharts(d.images || []);
+  else if (RX.tab === "table") body.innerHTML = htmlTable(d.summary || {});
+  else if (RX.tab === "ci") body.innerHTML = htmlCi(d.replication_ci || {});
+  else if (RX.tab === "replay") { body.innerHTML = htmlReplay(d); initReplay(d); }
+  // 卡片/缩略图的点击与排序绑定
+  body.querySelectorAll("[data-img]").forEach((el) => {
+    el.onclick = () => openLightbox(el.dataset.group, Number(el.dataset.idx));
+  });
+  body.querySelectorAll("[data-sort]").forEach((th) => {
+    th.onclick = () => {
+      const key = th.dataset.sort;
+      if (RX.sortKey === key) RX.sortAsc = !RX.sortAsc; else { RX.sortKey = key; RX.sortAsc = false; }
+      renderRxBody();
+    };
+  });
+}
+
+/* ------------------------------ ① 本次运行 ------------------------------ */
+function htmlLive(live) {
+  if (live && live.has_run && (live.metrics || live.live)) {
+    const m = live.metrics || {};
+    const lv = live.live || {};
+    const q = lv.quorum || {};
+    const sts = lv.stations || [];
+    const cnt = lv.counters || {};
+    const que = lv.queue || {};
+    /* 运行中 `metrics` 是空的（指标要跑完才结算），所以每张卡都做"先取结算值、
+       再退回实时值"的兜底 —— 否则跑的时候整页都是 "-"，等于白做。 */
+    const pick = (k, liveVal, nd) => {
+      const v = (m[k] !== undefined && m[k] !== null && Number(m[k]) !== 0) ? m[k] : liveVal;
+      return (v === undefined || v === null) ? "-" : _fmtNum(v, nd);
+    };
+    const doneRate = (cnt.done != null && lv.sim_time)
+      ? Number(cnt.done) / Math.max(0.001, Number(lv.sim_time)) : null;
+    const kpis = [
+      ["吞吐（个/s）", pick("throughput", doneRate, 2)],
+      ["完整率 %", pick("completion_rate", null, 2)],
+      ["高优等待 ms", pick("avg_wait_high_ms", null, 0)],
+      ["低优等待 ms", pick("avg_wait_low_ms", null, 0)],
+      ["P95 高优 ms", pick("p95_wait_high_ms", null, 0)],
+      ["低优饥饿 %", pick("starvation_rate_low", null, 2)],
+      ["资源利用率 %", pick("resource_utilization", null, 1)],
+      ["重传率 %", pick("retry_rate", null, 2)],
+      ["站间不均衡", pick("station_load_imbalance", null, 3)],
+      ["迁移次数", pick("migration_count", null, 0)],
+      ["边缘分流 %", pick("edge_offload_ratio", null, 1)],
+      ["端到端 ms", pick("avg_e2e_ms", null, 1)],
+      ["q 提交 / 拒绝", (q.commits != null)
+        ? (Number(q.commits) + " / " + Number(q.rejects || 0))
+        : (pick("quorum_commits", null, 0) + " / " + pick("quorum_rejects", null, 0))],
+      ["未确认（待重放）", (q.uncommitted != null) ? String(q.uncommitted)
+        : pick("uncommitted_tasks", null, 0)],
+    ];
+    // 实时进度行：跑的时候比"结算指标"更有信息量
+    const prog = (lv.sim_time != null)
+      ? `进度 <b>${_fmtNum(lv.sim_time, 1)} / ${_fmtNum(lv.duration_s, 0)} s</b> · ` +
+        `已提交 <b>${cnt.submitted != null ? cnt.submitted : "-"}</b> / 已完成 ` +
+        `<b>${cnt.done != null ? cnt.done : "-"}</b> · 队列 高/低 ` +
+        `<b>${que.high != null ? que.high : "-"} / ${que.low != null ? que.low : "-"}</b> · ` +
+        `系统负载 <b>${_fmtNum(lv.system_load, 2)}</b>`
+      : "";
+    let html = '<div class="sec"><h3>本次运行 · 体检表 <em>来源：' +
+      (live.source || "") + '</em></h3>' +
+      '<p class="note">状态 <b>' + (live.status || "-") + '</b> · 工况 ' +
+      (live.scenario || "-") + ' · 策略 ' + (live.scheduler || "-") +
+      ' · 拓扑 ' + (live.stations || "单站") + (live.mec ? " + MEC" : "") +
+      '。这一组是**刚跑的这一轮（内存态，不落盘）**，与下面"图表/矩阵"里的磁盘产物不是同一批数据。' +
+      (live.status === "running" ? '<br>⚠️ 还在跑：除"进度/队列/提交"外的指标要**跑完才结算**，此刻显示 "-" 是正常的。' : "") +
+      '</p>' +
+      (prog ? '<p class="note" style="margin-bottom:10px">' + prog + '</p>' : "") +
+      '<div class="kpis">' + kpis.map(([k, v]) =>
+        '<div class="kpi"><span>' + k + '</span><b>' + v + '</b></div>').join("") + '</div>';
+    if (q && q.majority) {
+      const gs = (q.groups || []).map((g) => "{" + (g.ids || []).join(",") + "}" +
+        (g.has_quorum ? "✓" : "✗")).join(" | ");
+      html += '<p class="note" style="margin-top:10px">共识：term <b>' + q.term +
+        '</b> · 多数派门槛 <b>' + q.majority + '</b> · 分区组 ' + (gs || "未分区") +
+        ' · 提交 <b>' + q.commits + '</b> / 拒绝 <b>' + q.rejects + '</b> / 未确认 <b>' +
+        q.uncommitted + '</b>' + (q.replayed ? ' / 已重放 <b>' + q.replayed + '</b>' : "") + '</p>';
+    }
+    if (sts.length) {
+      html += '<table style="margin-top:8px"><thead><tr>' +
+        '<th class="l">站点</th><th class="l">角色</th><th>在线</th><th>分区组</th>' +
+        '<th>多数派</th><th>忙/闲</th><th>队列</th><th>负载</th><th>完成</th>' +
+        '<th>迁入/迁出</th></tr></thead><tbody>' +
+        sts.map((s) => '<tr><td class="l">' + (s.name || "#" + s.id) + '</td>' +
+          '<td class="l">' + (s.role || "") + '</td>' +
+          '<td>' + (s.online === false ? "✗" : "✓") + '</td>' +
+          '<td>' + (s.partition_group || 0) + '</td>' +
+          '<td>' + (s.is_majority === false ? "✗" : "✓") + '</td>' +
+          '<td>' + (s.active || 0) + "/" + (s.idle || 0) + '</td>' +
+          '<td>' + (s.queue_depth || 0) + '</td>' +
+          '<td>' + _fmtNum(Math.min(1, s.load || 0) * 100, 0) + '%</td>' +
+          '<td>' + (s.done || 0) + '</td>' +
+          '<td>' + (s.migrations_in || 0) + "/" + (s.migrations_out || 0) + '</td></tr>').join("") +
+        '</tbody></table>';
+    }
+    html += '<p class="tip">把上面这张表复制进报告：选中表格 → Ctrl+C（或截图）。' +
+      '要做"可复现实验"，请用 <code>run.py all</code> / <code>run.py stations</code>，' +
+      '面板里这一轮是演示口径（time_scale 放大）。</p></div>';
+    return html;
+  }
+  return '<div class="sec"><h3>本次运行 <em>还没有运行过</em></h3>' +
+    '<div class="empty">' +
+    '这里显示的是**刚点「▶ 开始仿真」跑的那一轮**（内存态）。现在还没有数据。<br>' +
+    '① 关掉本页 → 点「▶ 开始仿真」→ 跑一会儿 → 再点「📊 仿真结果」；<br>' +
+    '② 想看**正式的 15 组矩阵**，请到「15 组矩阵」页签（数据来自 <code>results/summary.csv</code>）；<br>' +
+    '③ 若磁盘上还没有任何产物，先在项目根跑一次 <code>python run.py all --no-db</code>。' +
+    '</div></div>';
+}
+
+/* ------------------------------ ② 图表 ------------------------------ */
+function htmlCharts(sections) {
+  const list = (sections || []).filter((s) => (s.images || []).length);
+  if (!list.length) {
+    return '<div class="empty">磁盘上还没有图表。<br>先在项目根执行：' +
+      '<code>python run.py all --no-db</code>（15 组 + charts/01~08）或 ' +
+      '<code>python run.py stations</code>（多站 18 组）。</div>';
+  }
+  let html = "";
+  let group = 0;
+  list.forEach((sec) => {
+    html += '<div class="sec"><h3>' + sec.title +
+      ' <em>' + sec.dir + ' · ' + sec.images.length + ' 张</em></h3>' +
+      (sec.note ? '<p class="note">' + sec.note + '</p>' : '') +
+      '<div class="grid">' +
+      sec.images.map((im, i) => {
+        const src = "/results_img/" + im.rel.split("/").map(encodeURIComponent).join("/");
+        return '<div class="card" data-img="1" data-group="' + group + '" data-idx="' + i + '">' +
+          '<img class="thumb" loading="lazy" src="' + src + '" alt="' + im.title + '">' +
+          '<div class="cap"><b title="' + im.title + '">' + im.title + '</b>' +
+          '<span>' + _fmtTs(im.mtime) + ' · ' + _fmtSize(im.size) + '</span></div></div>';
+      }).join("") + '</div></div>';
+    group += 1;
+  });
+  html += '<p class="tip">点击任意图片放大（灯箱里可用 ← → 切换、Esc 关闭）。' +
+    '卡片底部的**时间是文件生成时间** —— 若比 summary.csv 还新/更旧，说明它不是同一批实验产出的，' +
+    '引用前请核对。</p>';
+  RX.imgGroups = list.map((s) => s.images.map((im) => ({ ...im, src: "/results_img/" +
+    im.rel.split("/").map(encodeURIComponent).join("/") })));
+  return html;
+}
+
+/* ------------------------------ ③ 15 组矩阵 ------------------------------ */
+function htmlTable(sum) {
+  if (!sum || !sum.exists) {
+    return '<div class="empty">还没有 <code>results/summary.csv</code>。<br>' +
+      '先在项目根跑一次 15 组矩阵：<code>python run.py all --no-db</code>（约 100 秒）。</div>';
+  }
+  if (!sum.rows || !sum.rows.length) {
+    return '<div class="empty">summary.csv 存在但没有数据行：' +
+      ((sum.error || "可能是个空文件/未写入完成")) + '</div>';
+  }
+  const cols = sum.columns || [];
+  const key = RX.sortKey || "";
+  const rows = sum.rows.slice();
+  if (key) {
+    rows.sort((a, b) => {
+      const x = a[key], y = b[key];
+      if (typeof x === "string" || typeof y === "string") {
+        return RX.sortAsc ? String(x).localeCompare(String(y)) : String(y).localeCompare(String(x));
+      }
+      return RX.sortAsc ? x - y : y - x;
+    });
+  }
+  let html = '<div class="sec"><h3>15 组矩阵 · <code>results/summary.csv</code> ' +
+    '<em>生成于 ' + (sum.generated_at || "-") + ' · seed ' + (sum.seed || "-") +
+    ' · ' + rows.length + ' 行</em></h3>' +
+    '<p class="note">口径：3 工况 × 5 个经典策略 = 15 组（`cross_node` 与 MEC/多站是对照实验，' +
+    '不在这一张表里）。点表头可排序。</p>' +
+    '<table><thead><tr><th class="l" data-sort="scenario">工况</th>' +
+    '<th class="l" data-sort="scheduler">策略</th>' +
+    cols.map((c) => '<th data-sort="' + c.key + '">' + c.label +
+      (key === c.key ? (RX.sortAsc ? " ▲" : " ▼") : "") + '</th>').join("") +
+    '</tr></thead><tbody>';
+  rows.forEach((r) => {
+    html += '<tr><td class="l">' + (r.scenario_label || r.scenario) + '</td>' +
+      '<td class="l">' + (r.scheduler_label || r.scheduler) + '</td>' +
+      cols.map((c) => {
+        const v = Number(r[c.key]) || 0;
+        const nd = Math.abs(v) >= 100 ? 1 : 3;
+        return '<td>' + v.toFixed(nd) + '</td>';
+      }).join("") + '</tr>';
+  });
+  html += '</tbody></table>' +
+    '<p class="tip">⚠️ 单次实跑的整跑指标存在 wall-clock 抖动（完整率 0.2~0.5 pp 量级），' +
+    '结论看**方向与量级**，不要把小数位当精确值（docs/11 §7）。' +
+    '导出：在本页按 Ctrl+P 打印为 PDF，或直接用 Excel 打开 summary.csv。</p></div>';
+  return html;
+}
+
+/* ------------------------------ ④ 时序回放 ------------------------------ */
+function htmlReplay(d) {
+  const raw = d.raw || {};
+  const items = raw.items || [];
+  if (!items.length) {
+    return '<div class="empty">还没有 <code>results/raw/*.json</code>。<br>' +
+      '时序回放需要 run.py all 落盘的明细（每个策略一份 JSON，含 0.5 s 网格的队列快照）。</div>';
+  }
+  const opts = items.map((it, i) =>
+    '<option value="' + i + '">' + (it.scenario || "?") + " · " + (it.scheduler || "?") +
+    " · " + _fmtTs(it.mtime) + '</option>').join("");
+  return '<div class="sec"><h3>时序回放 <em>数据源 results/raw/*.json（不需要重跑）</em></h3>' +
+    '<p class="note">选一份明细，拖着滑块或点「播放」看这一轮**两级就绪队列 / 系统负载 / 在制线程**' +
+    '怎么随时间变化 —— 静态图 06 只画了两条曲线，这里是整段过程。</p>' +
+    '<div class="replay"><label style="font-size:11.5px;color:var(--dim)">明细</label>' +
+    '<select id="rpSel">' + opts + '</select>' +
+    '<button class="ghost" id="rpPlay">▶ 播放</button>' +
+    '<input type="range" id="rpRange" min="0" max="0" value="0">' +
+    '<span id="rpT" class="src">t=0 s</span></div>' +
+    '<canvas class="rp" id="rpCanvas"></canvas>' +
+    '<p class="tip" id="rpInfo">—</p></div>';
+}
+
+function initReplay(d) {
+  const items = (d.raw && d.raw.items) || [];
+  const sel = _rx$("rpSel"), range = _rx$("rpRange"), play = _rx$("rpPlay");
+  if (!sel) return;
+  RX.replay.items = items;
+  const load = async () => {
+    const it = items[Number(sel.value)];
+    if (!it) return;
+    _rx$("rpInfo").textContent = "读取 " + it.name + " …";
+    try {
+      const j = await (await fetch("/api/raw_series?name=" + encodeURIComponent(it.name),
+        { cache: "no-store" })).json();
+      if (!j || !j.ok) throw new Error((j && j.msg) || "读取失败");
+      RX.replay.series = j.series || [];
+      RX.replay.t = 0;
+      range.max = String(Math.max(0, RX.replay.series.length - 1));
+      range.value = "0";
+      const m = j.metrics || {};
+      _rx$("rpInfo").textContent = `${j.scenario} × ${j.scheduler}（seed ${j.seed}，${j.duration_s}s）` +
+        ` · 完整率 ${_fmtNum(m.completion_rate, 2)}% · 吞吐 ${_fmtNum(m.throughput, 2)}/s` +
+        ` · 低优饥饿 ${_fmtNum(m.starvation_rate_low, 2)}% · 采样点 ${RX.replay.series.length}`;
+      drawReplay();
+    } catch (e) {
+      _rx$("rpInfo").textContent = "读取失败：" + (e && e.message ? e.message : e);
+    }
+  };
+  sel.onchange = () => { stopReplay(); load(); };
+  range.oninput = () => { RX.replay.t = Number(range.value) || 0; drawReplay(); };
+  play.onclick = () => {
+    if (RX.replay.playing) { stopReplay(); return; }
+    if (!RX.replay.series.length) return;
+    RX.replay.playing = true;
+    play.textContent = "⏸ 暂停";
+    const step = () => {
+      if (!RX.replay.playing) return;
+      RX.replay.t += 1;
+      if (RX.replay.t >= RX.replay.series.length) RX.replay.t = 0;
+      range.value = String(RX.replay.t);
+      drawReplay();
+      RX.replay.timer = setTimeout(step, 60);
+    };
+    RX.replay.timer = setTimeout(step, 60);
+  };
+  load();
+}
+
+function stopReplay() {
+  RX.replay.playing = false;
+  if (RX.replay.timer) { clearTimeout(RX.replay.timer); RX.replay.timer = 0; }
+  if (RX.raf) { cancelAnimationFrame(RX.raf); RX.raf = 0; }
+  const p = _rx$("rpPlay");
+  if (p) p.textContent = "▶ 播放";
+}
+
+function drawReplay() {
+  const cv = _rx$("rpCanvas");
+  if (!cv) return;
+  const ser = RX.replay.series;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const W = cv.clientWidth || 800, H = cv.clientHeight || 210;
+  if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) {
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  }
+  const g = cv.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, W, H);
+  g.fillStyle = "#080f19"; g.fillRect(0, 0, W, H);
+  if (!ser.length) {
+    g.fillStyle = "#7d90aa"; g.font = "12px sans-serif";
+    g.fillText("没有时序数据", 12, 20);
+    return;
+  }
+  const pad = { l: 42, r: 62, t: 10, b: 20 };
+  const iw = W - pad.l - pad.r, ih = H - pad.t - pad.b;
+  const maxQ = Math.max(1, ...ser.map((d) => Math.max(d.high, d.low)));
+  const maxL = Math.max(1, ...ser.map((d) => d.load));
+  // 网格
+  g.strokeStyle = "rgba(78,161,255,.14)"; g.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const y = pad.t + ih * i / 4;
+    g.beginPath(); g.moveTo(pad.l, y); g.lineTo(pad.l + iw, y); g.stroke();
+  }
+  const X = (i) => pad.l + iw * (i / Math.max(1, ser.length - 1));
+  const YQ = (v) => pad.t + ih * (1 - v / maxQ);
+  const YL = (v) => pad.t + ih * (1 - v / maxL);
+  const line = (get, Y, color, w) => {
+    g.beginPath(); g.strokeStyle = color; g.lineWidth = w || 1.6;
+    ser.forEach((d, i) => { const x = X(i), y = Y(get(d)); if (i) g.lineTo(x, y); else g.moveTo(x, y); });
+    g.stroke();
+  };
+  line((d) => d.high, YQ, "#4ea1ff", 1.6);
+  line((d) => d.low, YQ, "#f5a623", 1.6);
+  line((d) => d.load, YL, "#3ddc97", 1.2);
+  // 当前时刻游标 + 读数
+  const i0 = Math.max(0, Math.min(ser.length - 1, RX.replay.t));
+  const d0 = ser[i0];
+  const x0 = X(i0);
+  g.strokeStyle = "rgba(55,226,213,.85)"; g.lineWidth = 1;
+  g.beginPath(); g.moveTo(x0, pad.t); g.lineTo(x0, pad.t + ih); g.stroke();
+  [[d0.high, YQ, "#4ea1ff"], [d0.low, YQ, "#f5a623"], [d0.load, YL, "#3ddc97"]].forEach(([v, Y, c]) => {
+    g.fillStyle = c; g.beginPath(); g.arc(x0, Y(v), 3.2, 0, Math.PI * 2); g.fill();
+  });
+  // 轴标
+  g.fillStyle = "#7d90aa"; g.font = "10px ui-monospace,Consolas,monospace";
+  g.fillText("队列 " + maxQ, 4, pad.t + 9);
+  g.fillText("0", 28, pad.t + ih - 2);
+  g.textAlign = "right";
+  g.fillText("负载 " + maxL.toFixed(1), W - 4, pad.t + 9);
+  g.textAlign = "left";
+  g.fillText("t=" + Number(d0.ts).toFixed(1) + "s", pad.l, H - 5);
+  // 图例（放在底部一行，避免与右上角的"负载"轴标打架）
+  const lg = [["高优队列", "#4ea1ff"], ["低优队列", "#f5a623"], ["系统负载", "#3ddc97"]];
+  let lx = pad.l + 6;
+  const ly = pad.t + ih - 8;
+  lg.forEach(([t, c]) => {
+    g.fillStyle = c; g.fillRect(lx, ly - 4, 9, 3);
+    g.fillStyle = "#c9d8ea"; g.fillText(t, lx + 13, ly);
+    lx += 13 + g.measureText(t).width + 14;
+  });
+  const rt = _rx$("rpT");
+  if (rt) rt.textContent = "t=" + Number(d0.ts).toFixed(1) + " s · 高优 " + d0.high +
+    " · 低优 " + d0.low + " · 在制 " + d0.running + " · 阻塞 " + d0.blocked;
+}
+
+/* ------------------------------ ⑤ 置信区间 ------------------------------ */
+function htmlCi(ci) {
+  if (!ci || !ci.exists || !(ci.rows || []).length) {
+    return '<div class="empty">还没有重复实验产物。<br>先执行：' +
+      '<code>python run.py replicate --reps 10 --scenarios PEAK --schedulers dynamic cross_node ' +
+      '--variants single,triple,triple_mec --no-db</code><br>' +
+      '（会给出"均值 ± 95% 置信半宽"，用来回应"单次实跑有 wall-clock 抖动"这个问题）</div>';
+  }
+  const byKey = {};
+  ci.rows.forEach((r) => {
+    const k = r.variant + "|" + r.scenario + "|" + r.scheduler + "|" + r.metric;
+    byKey[k] = r;
+  });
+  const metrics = [...new Set(ci.rows.map((r) => r.metric))];
+  const variants = [...new Set(ci.rows.map((r) => r.variant))];
+  const combos = [...new Set(ci.rows.map((r) => r.scenario + "|" + r.scheduler))];
+  let html = '<div class="sec"><h3>重复实验 · 均值 ± 95% 置信半宽 ' +
+    '<em>生成于 ' + (ci.generated_at || "-") + '</em></h3>' +
+    '<p class="note">每个格子是 <b>mean ± ci95_half</b>；指标方向见 docs/11 §4.7.2。' +
+    '样本量 n 见括号。</p>';
+  combos.forEach((combo) => {
+    const [sc, sch] = combo.split("|");
+    html += '<div class="sec" style="margin:14px 0 6px"><h3 style="font-size:11.5px">' +
+      sc + " × " + sch + '</h3><table><thead><tr><th class="l">指标</th>' +
+      variants.map((v) => '<th class="l">' + v + '</th>').join("") + '</tr></thead><tbody>';
+    metrics.forEach((mt) => {
+      const label = (ci.rows.find((r) => r.metric === mt) || {}).metric_label || mt;
+      html += '<tr><td class="l">' + label + '</td>' +
+        variants.map((v) => {
+          const r = byKey[v + "|" + sc + "|" + sch + "|" + mt];
+          if (!r) return '<td class="l">-</td>';
+          return '<td class="l">' + _fmtNum(r.mean, 3) + " ± " + _fmtNum(r.ci95_half, 3) +
+            ' <span style="color:var(--dim)">(n=' + r.n + ')</span></td>';
+        }).join("") + '</tr>';
+    });
+    html += '</tbody></table></div>';
+  });
+  html += '<p class="tip">⚠️ reps 很小时（如 3）置信区间极宽，只用来演示方法可用；' +
+    '要下统计结论请 <code>--reps ≥ 10</code>。</p></div>';
+  return html;
+}
+
+/* ------------------------------ 灯箱 ------------------------------ */
+function openLightbox(group, idx) {
+  const list = (RX.imgGroups && RX.imgGroups[Number(group)]) || [];
+  if (!list.length) return;
+  RX.lb = { list, idx: Math.max(0, Math.min(list.length - 1, idx)) };
+  _rx$("lb").classList.add("show");
+  renderLightbox();
+}
+function renderLightbox() {
+  const { list, idx } = RX.lb;
+  const im = list[idx];
+  if (!im) return;
+  _rx$("lbImg").src = im.src;
+  _rx$("lbTitle").textContent = im.title;
+  _rx$("lbMeta").textContent = im.rel + " · " + _fmtTs(im.mtime) + " · " + _fmtSize(im.size);
+  _rx$("lbIdx").textContent = (idx + 1) + " / " + list.length;
+}
+function stepLightbox(d) {
+  const { list, idx } = RX.lb;
+  if (!list.length) return;
+  RX.lb.idx = (idx + d + list.length) % list.length;
+  renderLightbox();
+}
+function closeLightbox() { _rx$("lb").classList.remove("show"); }
+
+/* 绑定 */
+(function bindResults() {
+  const btn = _rx$("btnResults");
+  if (btn) btn.onclick = () => openResults();
+  const close = _rx$("rxClose");
+  if (close) close.onclick = () => closeResults();
+  const reload = _rx$("rxReload");
+  if (reload) reload.onclick = () => loadResults(true);
+  const lbClose = _rx$("lbClose");
+  if (lbClose) lbClose.onclick = () => closeLightbox();
+  const prev = _rx$("lbPrev"), next = _rx$("lbNext");
+  if (prev) prev.onclick = () => stepLightbox(-1);
+  if (next) next.onclick = () => stepLightbox(1);
+  const lbImg = _rx$("lbImg");
+  if (lbImg) lbImg.onclick = () => stepLightbox(1);
+  window.addEventListener("keydown", (e) => {
+    const lbOpen = _rx$("lb").classList.contains("show");
+    const rxOpen = _rx$("rx").classList.contains("show");
+    if (e.key === "Escape") {
+      if (lbOpen) closeLightbox();
+      else if (rxOpen) closeResults();
+      return;
+    }
+    if (lbOpen) {
+      if (e.key === "ArrowLeft") { e.preventDefault(); stepLightbox(-1); }
+      if (e.key === "ArrowRight") { e.preventDefault(); stepLightbox(1); }
+      return;
+    }
+    // 快捷键：R 打开结果（不占用空格，避免与输入框/按钮冲突）
+    if (!rxOpen && (e.key === "r" || e.key === "R") && !e.ctrlKey && !e.metaKey) {
+      const tag = (e.target && e.target.tagName) || "";
+      if (tag !== "INPUT" && tag !== "TEXTAREA" && tag !== "SELECT") openResults();
+    }
+  });
+})();
 
 /* ============================================================ 15. 启动 */
 // 地形生成是同步的（约 1s），先让加载页渲染一帧再开始，避免白屏

@@ -40,6 +40,7 @@ import csv
 import io
 import json
 import logging
+import os
 import sys
 import threading
 import time
@@ -71,6 +72,72 @@ if getattr(sys, "frozen", False):
     STATIC_DIR: Path = Path(getattr(sys, "_MEIPASS", ".")) / "uav_sim" / "static"
 else:
     STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+
+def _detect_output_root() -> Path:
+    """定位「实验产物根目录」（`charts/` 与 `results/` 所在的那一层）。
+
+    为什么需要探测而不是写死：同一个程序有三种运行形态，产物位置不同 ——
+      * **源码运行**（`python run.py ui` / `app.py`）：产物在项目根；
+      * **打包成 exe 从 `dist/` 启动**：exe 旁边是 `dist/`，那里通常**没有** `charts/`，
+        而项目根（`dist/..`）才有 —— 写死 exe 目录会让「仿真结果」界面在 exe 里永远空白
+        （实测踩过：exe 里 `/api/results` 返回 0 张图）；
+      * **exe 被单独拷到别处**：那就以 exe 旁边为准（用户自己在那儿跑实验）。
+    因此按优先级探测，取第一个"看起来像产物根"的目录；可用环境变量
+    ``UAV_RESULTS_ROOT`` 显式指定（CI / 换机器最省事）。
+    """
+    cands: list[Path] = []
+    env = os.environ.get("UAV_RESULTS_ROOT")
+    if env:
+        cands.append(Path(env))
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        cands += [exe_dir, exe_dir.parent, Path.cwd()]
+    else:
+        cands += [Path(__file__).resolve().parents[2], Path.cwd()]
+    for c in cands:
+        try:
+            if (c / "charts").is_dir() or (c / "results").is_dir():
+                return c.resolve()
+        except OSError:
+            continue
+    return cands[0] if cands else Path.cwd()
+
+
+#: 「仿真结果」界面读取产物的根目录（`charts/`、`results/`、`docs/images/` 都在它下面）
+OUTPUT_ROOT: Path = _detect_output_root()
+
+#: 「仿真结果」界面能读的**图片白名单目录**（相对项目根 / exe 目录）。
+#: 只允许这几处、只允许图片扩展名 —— 这是防目录穿越的第一道闸（第二道见 _safe_chart_path）。
+RESULT_IMG_DIRS: tuple = (
+    "charts",
+    "results/stations/charts",
+    "results/station_probe",
+    "results/mec",
+    "results/weather",
+    "results/sensitivity",
+    "results/weather_eval",
+    "results/gpu",
+    "docs/images",
+)
+
+#: 结果界面里图片分组的**展示顺序与中文标题**（分组键 = 上面的相对目录）
+RESULT_SECTIONS: tuple = (
+    ("charts", "核心结论（15 组矩阵）",
+     "该目录下的 01~07 来自 run.py all；09/10 来自伴生探针与 run.py stations"),
+    ("results/stations/charts", "多站 × 多策略矩阵（18 组）",
+     "run.py stations 产出，独立口径，不与 15 组混比"),
+    ("results/station_probe", "站级 / MEC 伴生探针", "run.py all 的伴生 3 组"),
+    ("results/mec", "MEC 端-边-云对照", "run.py mec 产出"),
+    ("results/weather", "天气对照", "run.py weather 产出"),
+    ("results/weather_eval", "运行场景测评", "run.py bench-weather 产出"),
+    ("results/sensitivity", "参数敏感性", "run.py sensitivity 产出"),
+    ("results/gpu", "GPU 大规模重复实验", "run.py gpu 产出"),
+    ("docs/images", "文档截图", "docs/images 下已归档的 3D/OS 透视截图"),
+)
+
+#: 图片扩展名白名单（只读图片，绝不把 .py/.csv 之类经这个路由吐出去）
+_IMG_EXT = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 
 #: 扩展名 -> Content-Type
 _MIME = {
@@ -129,6 +196,254 @@ def _read_page(name: str) -> bytes:
 
 #: 面板专用的时间缩放（仿真变慢，便于观察）。1 倍速下 PEAK 90 仿真秒 ≈ 22.5 真实秒。
 PANEL_TIME_SCALE: float = 0.25
+
+
+# ===========================================================================
+# 实验产物读取（「仿真结果」界面用，**只读**、白名单、绝不抛异常）
+# ===========================================================================
+def _mtime_iso(path: Path) -> str:
+    """文件修改时间（本地时区 ISO8601，秒级）。"""
+    try:
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(path.stat().st_mtime))
+    except OSError:
+        return ""
+
+
+def _safe_chart_path(rel: str) -> Optional[Path]:
+    """把 ``"charts/01-吞吐量对比.png"`` 解析成**白名单目录内的绝对路径**。
+
+    两道闸（与 ``/api/state`` 的“不信任前端”设计一致）：
+      ① 只能落在 :data:`RESULT_IMG_DIRS` 里的目录下（用 ``resolve()`` 后比较前缀，
+         因此 ``../``、绝对路径、盘符都过不去）；
+      ② 只允许图片扩展名。
+    返回 None 表示"不允许"，调用方据此回 404 —— **绝不把失败原因带路径吐回去**。
+    """
+    raw = str(rel or "").replace("\\", "/").strip().lstrip("/")
+    if not raw or ".." in raw.split("/"):
+        return None
+    if Path(raw).suffix.lower() not in _IMG_EXT:
+        return None
+    # 白名单：声音上的"第一段目录"必须是允许的目录之一
+    cand = (OUTPUT_ROOT / raw).resolve()
+    for d in RESULT_IMG_DIRS:
+        base = (OUTPUT_ROOT / d).resolve()
+        try:
+            cand.relative_to(base)
+        except ValueError:
+            continue
+        return cand if cand.is_file() else None
+    return None
+
+
+def _list_result_images() -> list:
+    """扫描白名单目录里的图片，按章节分组返回（给「仿真结果」界面用）。"""
+    out = []
+    for rel_dir, title, note in RESULT_SECTIONS:
+        base = OUTPUT_ROOT / rel_dir
+        if not base.is_dir():
+            continue
+        items = []
+        try:
+            files = sorted(base.iterdir(), key=lambda p: p.name)
+        except OSError:
+            continue
+        for p in files:
+            if not p.is_file() or p.suffix.lower() not in _IMG_EXT:
+                continue
+            items.append({
+                "rel": f"{rel_dir}/{p.name}",
+                "name": p.name,
+                "title": p.stem,
+                "mtime": _mtime_iso(p),
+                "size": int(p.stat().st_size) if p.exists() else 0,
+            })
+        if items:
+            out.append({"dir": rel_dir, "title": title, "note": note, "images": items})
+    return out
+
+
+#: 结果表格里展示的指标列（键 -> 中文名；顺序即列顺序）
+RESULT_TABLE_COLUMNS: tuple = (
+    ("throughput", "吞吐"), ("completion_rate", "完整率%"),
+    ("avg_wait_high_ms", "高优等待ms"), ("avg_wait_low_ms", "低优等待ms"),
+    ("starvation_rate_low", "低优饥饿%"), ("resource_utilization", "利用率%"),
+    ("retry_rate", "重传率%"), ("station_load_imbalance", "站间不均衡"),
+    ("migration_count", "迁移次数"), ("edge_offload_ratio", "边缘分流%"),
+    ("avg_e2e_ms", "端到端ms"), ("quorum_commits", "q提交"),
+    ("quorum_rejects", "q拒绝"),
+)
+
+
+def _results_dir(cfg: dict) -> Path:
+    """定位 `results/` 目录（CSV/JSON 产物）。
+
+    与 :func:`_detect_output_root` 同理：exe 里 `config.yaml` 是**打包内置**的那份，
+    它的 `output.results_dir` 是相对路径，按 `_MEIPASS` 解析会落到临时目录；更坑的是
+    `load_config()` 会**顺手把输出目录建出来**，于是"目录存在"这个判据在 exe 里恒为真
+    （实测：exe 里 `/api/results` 的 summary_rows=0，路径指向 `_MEIxxxx\\results`）。
+    所以这里判据不是"目录存在"，而是"**目录里真的有产物**"（summary.csv 或 raw/）。
+    """
+    try:
+        from uav_sim.config import resolve_path
+
+        p = Path(resolve_path(cfg, "output.results_dir"))
+    except Exception:  # noqa: BLE001 - 配置异常不该让界面崩
+        p = OUTPUT_ROOT / "results"
+
+    def _has_artifacts(d: Path) -> bool:
+        try:
+            return (d / "summary.csv").is_file() or (d / "raw").is_dir()
+        except OSError:
+            return False
+
+    if _has_artifacts(p):
+        return p
+    alt = OUTPUT_ROOT / "results"
+    if _has_artifacts(alt):
+        return alt
+    return p
+
+
+def _read_summary_csv(cfg: dict) -> dict:
+    """读 ``results/summary.csv``（15 组矩阵）→ 结构化表格。
+
+    只读前 :data:`RESULT_TABLE_COLUMNS` 这些列 + 元信息列；CSV 不存在/损坏时
+    返回 ``{"exists": False, ...}``，**不抛异常**（界面上给一句"还没跑过 run.py all"即可）。
+    """
+    path = _results_dir(cfg) / "summary.csv"
+    if not path.is_file():
+        return {"exists": False, "path": str(path), "generated_at": "", "rows": [],
+                "columns": [{"key": k, "label": v} for k, v in RESULT_TABLE_COLUMNS]}
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as fp:
+            reader = csv.DictReader(fp)
+            rows_in = list(reader)
+    except (OSError, UnicodeDecodeError, csv.Error) as exc:  # noqa: BLE001
+        return {"exists": True, "path": str(path), "generated_at": "", "rows": [],
+                "columns": [{"key": k, "label": v} for k, v in RESULT_TABLE_COLUMNS],
+                "error": f"{type(exc).__name__}: {exc}"}
+
+    rows = []
+    seeds = set()
+    for r in rows_in:
+        item = {
+            "scenario": r.get("scenario", ""),
+            "scenario_label": r.get("scenario_label", ""),
+            "scheduler": r.get("scheduler", ""),
+            "scheduler_label": r.get("scheduler_label", ""),
+            "exp_id": r.get("exp_id", ""),
+        }
+        for key, _label in RESULT_TABLE_COLUMNS:
+            try:
+                item[key] = float(r.get(key) or 0.0)
+            except (TypeError, ValueError):
+                item[key] = 0.0
+        seeds.add(r.get("seed", ""))
+        rows.append(item)
+    return {
+        "exists": True,
+        "path": str(path),
+        "generated_at": _mtime_iso(path),
+        "seed": ",".join(sorted(s for s in seeds if s)),
+        "rows": rows,
+        "columns": [{"key": k, "label": v} for k, v in RESULT_TABLE_COLUMNS],
+    }
+
+
+def _read_last_run_raw(cfg: dict) -> dict:
+    """挑 ``results/raw`` 里**最新**的一份 JSON，取它的任务级记录给"队列回放"用。
+
+    为什么只取一份：回放面板要能左右对比两个策略，但"最新一次 all"的 15 份 raw
+    是同批产物；这里给出**整批清单**（含 queue_samples 的轻量摘要）+ 每份的取样数据按需取，
+    避免一次把 15 个 JSON（每个几百 KB）全塞进一个响应。
+    """
+    raw_dir = _results_dir(cfg) / "raw"
+    if not raw_dir.is_dir():
+        return {"exists": False, "items": []}
+    files = sorted(raw_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    items = []
+    for p in files[:40]:
+        items.append({
+            "rel": f"results/raw/{p.name}",
+            "name": p.name,
+            "mtime": _mtime_iso(p),
+            "size": int(p.stat().st_size),
+            # 从文件名解析（LIGHT-dynamic-20261031-20261101183758）
+            "scenario": p.stem.split("-")[0] if "-" in p.stem else "",
+            "scheduler": p.stem.split("-")[1] if p.stem.count("-") >= 3 else "",
+        })
+    return {"exists": True, "items": items}
+
+
+def _read_raw_series(cfg: dict, name: str) -> dict:
+    """读单份 raw JSON，抽出"队列回放"需要的时序（**只返回必需字段**，控体积）。"""
+    if "/" in name or "\\" in name or ".." in name or not name.endswith(".json"):
+        return {"ok": False, "msg": "非法文件名"}
+    raw_dir = _results_dir(cfg) / "raw"
+    p = raw_dir / name
+    if not p.is_file():
+        return {"ok": False, "msg": "文件不存在"}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:  # noqa: BLE001
+        return {"ok": False, "msg": f"读取失败 {type(exc).__name__}"}
+    samples = data.get("queue_samples") or []
+    series = []
+    for s in samples:
+        try:
+            series.append({
+                "ts": round(float(s.get("ts", 0.0)), 3),
+                "high": int(s.get("high_depth", 0) or 0),
+                "low": int(s.get("low_depth", 0) or 0),
+                "load": round(float(s.get("system_load", 0.0) or 0.0), 3),
+                "running": int(s.get("running_count", 0) or 0),
+                "blocked": int(s.get("blocked_count", 0) or 0),
+            })
+        except (TypeError, ValueError):
+            continue
+    metrics = data.get("metrics") or {}
+    return {
+        "ok": True,
+        "name": name,
+        "scenario": data.get("scenario", ""),
+        "scheduler": data.get("scheduler", ""),
+        "seed": data.get("seed", ""),
+        "duration_s": float(data.get("duration_s", 0.0) or 0.0),
+        "series": series,
+        "metrics": {k: float(v) for k, v in metrics.items()
+                    if isinstance(v, (int, float))} if isinstance(metrics, dict) else {},
+    }
+
+
+def _read_replication_ci(cfg: dict) -> dict:
+    """读 ``results/replications/replication_summary.csv``，给"均值 ± 95% CI"用。"""
+    path = _results_dir(cfg) / "replications" / "replication_summary.csv"
+    if not path.is_file():
+        return {"exists": False, "rows": [], "generated_at": ""}
+    keep = {"completion_rate", "throughput", "station_load_imbalance", "avg_e2e_ms",
+            "edge_offload_ratio", "migration_count", "avg_wait_all_ms"}
+    rows = []
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as fp:
+            for r in csv.DictReader(fp):
+                if r.get("metric") not in keep:
+                    continue
+                try:
+                    rows.append({
+                        "variant": r.get("variant", "single"),
+                        "scenario": r.get("scenario", ""),
+                        "scheduler": r.get("scheduler", ""),
+                        "metric": r.get("metric", ""),
+                        "metric_label": r.get("metric_label", ""),
+                        "n": int(float(r.get("n") or 0)),
+                        "mean": float(r.get("mean") or 0.0),
+                        "ci95_half": float(r.get("ci95_half") or 0.0),
+                    })
+                except (TypeError, ValueError):
+                    continue
+    except (OSError, UnicodeDecodeError, csv.Error):  # noqa: BLE001
+        return {"exists": True, "rows": [], "generated_at": _mtime_iso(path)}
+    return {"exists": True, "rows": rows, "generated_at": _mtime_iso(path)}
 
 
 # ===========================================================================
@@ -456,6 +771,63 @@ class Dashboard:
                 self.run.stop()
         return {"ok": True}
 
+    def run_result_snapshot(self) -> dict:
+        """「仿真结果」界面顶部的**本次运行**卡片（内存态，不是磁盘产物）。
+
+        为什么要单独有它：磁盘上的 `charts/*.png` 与 `summary.csv` 是"上一次落盘的实验"，
+        而用户刚点「开始仿真」跑的这一轮**根本不落盘**（面板走的是 time_scale 放大的演示口径）。
+        两者混在一起最容易得出"图对了但数不对"的错误结论，所以这里显式分开：
+        `{"has_run": bool, "status": ..., "source": "panel(演示口径)", ...}`。
+        """
+        run = self.run
+        if run is None:
+            return {"has_run": False, "msg": "还没有运行过仿真（点「▶ 开始仿真」）"}
+        try:
+            summary = run.state().get("summary") or {}
+        except Exception:  # noqa: BLE001
+            summary = {}
+        sim = getattr(run, "sim", None)
+        live = {}
+        if sim is not None:
+            try:
+                # 注意：`Simulator.snapshot()` 返回的**就是**前端看到的 live 对象
+                # （SimRun.state() 直接把它塞进 payload["live"]），没有嵌套一层 live 键。
+                snap = sim.snapshot() or {}
+                # 运行中 summary 还没算出来（指标是**跑完才结算**的），所以这里额外给一份
+                # "实时计数" —— 否则「本次运行」卡片在跑的时候全是 "-"，等于没用。
+                live = {
+                    "stations": snap.get("stations") or [],
+                    "quorum": snap.get("quorum"),
+                    "mec": snap.get("mec"),
+                    "sim_time": snap.get("sim_time"),
+                    "duration_s": snap.get("duration_s"),
+                    "counters": snap.get("counters") or {},
+                    "queue": snap.get("queue") or {},
+                    "system_load": snap.get("system_load"),
+                    "running_count": snap.get("running_count"),
+                }
+            except Exception:  # noqa: BLE001
+                live = {}
+        keep = ("throughput", "completion_rate", "avg_wait_high_ms", "avg_wait_low_ms",
+                "p95_wait_high_ms", "starvation_rate_low", "resource_utilization",
+                "retry_rate", "drop_rate", "station_load_imbalance",
+                "migration_count", "migration_cost_ms", "edge_offload_ratio",
+                "avg_e2e_ms", "quorum_commits", "quorum_rejects", "uncommitted_tasks",
+                "runtime_wall_s")
+        metrics = {k: float(summary.get(k, 0.0) or 0.0) for k in keep
+                   if summary.get(k) is not None}
+        return {
+            "has_run": True,
+            "status": getattr(run, "status", ""),
+            "scenario": getattr(run, "scenario", ""),
+            "scheduler": getattr(run, "scheduler", ""),
+            "stations": getattr(run, "stations", None),
+            "mec": getattr(run, "mec", None),
+            "source": "panel（演示口径：time_scale 放大，不落盘）",
+            "metrics": metrics,
+            "live": live,
+        }
+
     def state(self) -> dict:
         with self._lock:
             run = self.run
@@ -532,6 +904,54 @@ def _make_handler(dash: Dashboard):
                 return
             if path == "/api/state":
                 self._json(dash.state())
+                return
+            if path == "/api/results":
+                # GET /api/results —— 「仿真结果」界面的**全部数据源**（只读本地实验产物）
+                #   {images:[{dir,title,note,images:[...]}], summary:{...}, raw:{...},
+                #    replication_ci:{...}, live:{...}}
+                # 设计要点：一次返回**元数据**（文件名/时间/大小），图片本身走
+                # /results_img/<相对路径> 懒加载 —— 10 张图 ~1.5 MB，不该塞进 JSON。
+                try:
+                    live = dash.run_result_snapshot()
+                    self._json({
+                        "ok": True,
+                        "output_root": str(OUTPUT_ROOT),
+                        "images": _list_result_images(),
+                        "summary": _read_summary_csv(dash.cfg),
+                        "raw": _read_last_run_raw(dash.cfg),
+                        "replication_ci": _read_replication_ci(dash.cfg),
+                        "live": live,
+                    })
+                except Exception as exc:  # noqa: BLE001 - 结果界面挂了也不能 500 崩面板
+                    logger.exception("读取实验结果失败")
+                    self._json({"ok": False, "msg": f"{type(exc).__name__}: {exc}"}, 500)
+                return
+            if path.startswith("/results_img/"):
+                # GET /results_img/charts/01-吞吐量对比.png
+                # 两道闸：白名单目录 + 图片扩展名（见 _safe_chart_path）；失败一律 404，
+                # 且**不回显服务器路径**（避免把目录结构泄露给页面）。
+                rel = path[len("/results_img/"):]
+                from urllib.parse import unquote
+
+                try:
+                    rel = unquote(rel)
+                except Exception:  # noqa: BLE001 - 非法百分号编码
+                    rel = rel
+                img = _safe_chart_path(rel)
+                if img is None:
+                    self._json({"ok": False, "msg": "not found"}, 404)
+                    return
+                try:
+                    body = img.read_bytes()
+                except OSError:
+                    self._json({"ok": False, "msg": "not found"}, 404)
+                    return
+                self._send(200, body, _content_type(img.name))
+                return
+            if path == "/api/raw_series":
+                # GET /api/raw_series?name=PEAK-dynamic-...json —— 队列回放用的时序
+                name = (qs.get("name") or [""])[0].strip()
+                self._json(_read_raw_series(dash.cfg, name))
                 return
             if path == "/api/weather":
                 # 契约 §4.6.4：GET /api/weather?preset=rain
