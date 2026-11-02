@@ -32,13 +32,17 @@ def main(argv=None) -> int:
     ap.add_argument("--auto-start", default="", help="启动后自动开跑的工况代号，如 PEAK")
     ap.add_argument("--scheduler", default="dynamic")
     ap.add_argument("--speed", type=float, default=2.0)
+    ap.add_argument("--config", default=None, help="配置文件路径（默认项目根 config.yaml）")
+    ap.add_argument("--real-weather", default=None, metavar="SNAPSHOT",
+                    help="指定真实天气快照 JSON（覆盖 config.real）")
     args = ap.parse_args(argv)
 
     from uav_sim.config import load_config
     from uav_sim.dashboard import make_server
 
-    cfg = load_config()
-    httpd, dash, port = make_server(cfg, host=args.host, port=args.port)
+    cfg = load_config(args.config)
+    httpd, dash, port = make_server(
+        cfg, host=args.host, port=args.port, real_weather=args.real_weather)
     t = threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.2},
                          name="DashHTTP", daemon=True)
     t.start()

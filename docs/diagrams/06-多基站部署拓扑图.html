@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>多基站部署拓扑 · 无人机集群调度仿真</title>
+<link rel="icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=">
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&family=Noto+Serif:ital@0;1&display=swap" rel="stylesheet">
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --paper:#f5f5f5;--paper-2:#ececec;--ink:#2d3142;--muted:#4f5d75;--soft:#5a6580;
+    --accent:#bf4520;--link:#2e5aa8;--rule:rgba(45,49,66,0.12);
+    --sans:'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif;--serif:'Instrument Serif', 'Noto Serif', serif;--mono:'Geist Mono', 'Cascadia Mono', ui-monospace, monospace;
+  }
+  body{font-family:var(--sans);background:var(--paper);color:var(--ink);min-height:100vh;
+    display:flex;justify-content:center;padding:2rem 2rem 3rem}
+  .frame{width:100%;max-width:1360px;min-width:0}
+  .topnav{display:flex;align-items:center;justify-content:space-between;gap:1rem;
+    padding-bottom:1rem;margin-bottom:2rem;border-bottom:1px solid var(--rule)}
+  .topnav a,.topnav span{font-family:var(--mono);font-size:.68rem;letter-spacing:.1em;
+    text-transform:uppercase;color:var(--muted);text-decoration:none}
+  .topnav a:hover{color:var(--accent)}
+  .topnav .counter{color:var(--soft)}
+  .eyebrow{font-family:var(--mono);font-size:.66rem;font-weight:500;letter-spacing:.18em;
+    text-transform:uppercase;color:var(--muted);margin-bottom:.55rem}
+  h1{font-family:var(--serif);font-size:clamp(1.6rem,2.2vw + .8rem,2.15rem);
+    font-weight:400;letter-spacing:-.02em;line-height:1.12;margin-bottom:.45rem}
+  .dek{font-size:.86rem;line-height:1.65;color:var(--soft);max-width:72ch;margin-bottom:1.5rem}
+  .diagram-container{width:100%;max-width:100%;min-width:0;overflow-x:auto;
+    border:1px solid var(--rule);border-radius:8px;background:var(--paper-2);
+    padding:1rem}
+  svg{width:100%;min-width:1280px;display:block;background:var(--paper);border-radius:4px}
+  .notes{display:grid;grid-template-columns:1.12fr .88fr;gap:1rem;margin-top:1.25rem}
+  .card{background:#fff;border:1px solid var(--rule);border-radius:6px;padding:1.1rem 1.2rem}
+  .card h3{display:flex;align-items:center;gap:.55rem;font-size:.88rem;margin-bottom:.7rem}
+  .card-dot{width:7px;height:7px;border-radius:50%;background:var(--accent);flex:none}
+  .card ul{list-style:none;display:grid;gap:.45rem}
+  .card li{font-size:.76rem;line-height:1.55;color:var(--soft);padding-left:.85rem;position:relative}
+  .card li::before{content:"";position:absolute;left:0;top:.55em;width:4px;height:4px;
+    border-radius:50%;background:var(--muted);opacity:.55}
+  footer{display:flex;justify-content:space-between;gap:1rem;align-items:center;
+    margin-top:1.5rem;padding-top:.9rem;border-top:1px solid var(--rule);
+    font-family:var(--mono);font-size:.64rem;letter-spacing:.06em;color:var(--muted)}
+  footer .pager{display:flex;gap:1.2rem}
+  footer a{color:var(--muted);text-decoration:none}footer a:hover{color:var(--accent)}
+  .muted{color:var(--soft)}
+  @media (max-width:760px){
+    body{padding:1.2rem .8rem 2rem}.notes{grid-template-columns:1fr}
+    footer{align-items:flex-start;flex-direction:column}
+  }
+  @media print{
+    body{padding:0;background:#fff}.diagram-container{overflow-x:visible;border:0;padding:0;background:#fff}
+    svg{min-width:0}.topnav,footer{display:none}.notes{break-inside:avoid}
+  }
+</style>
+</head>
+<body>
+<div class="frame">
+  <nav class="topnav">
+    <a href="00-图册索引.html">← 系统图册</a>
+    <span class="counter">06 / 08</span>
+  </nav>
+  <p class="eyebrow">Deployment · 运行在哪里</p>
+  <h1>多基站部署拓扑</h1>
+  <p class="dek">三个边界：矿区边缘、控制面、数据面。每个节点都标注实际运行的服务和版本，路径标注协议与端口。</p>
+  <div class="diagram-container">
+<svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="deploy-title deploy-desc">
+<title id="deploy-title">多基站部署拓扑</title>
+<desc id="deploy-desc">展示边缘无人机代理、控制面仿真服务与桌面监控台、MySQL 和结果文件存储之间的网络边界和协议。</desc>
+
+      <defs>
+        <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/>
+        </marker>
+        <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#bf4520"/>
+        </marker>
+        <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/>
+        </marker>
+        <marker id="arrow-open" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polyline points="0 0, 8 3, 0 6" fill="none" stroke="#4f5d75" stroke-width="1.2"/>
+        </marker>
+      </defs>
+<rect width="1280" height="720" fill="#f5f5f5"/>
+<rect x="40" y="100" width="320" height="480" rx="8" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.20)" stroke-width="1" stroke-dasharray="4,4"/>
+<rect x="52" y="108" width="116" height="14" rx="2" fill="#f5f5f5"/>
+<text x="110" y="119" fill="#5a6580" font-size="8" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.12em">EDGE SITE</text>
+<rect x="400" y="100" width="420" height="480" rx="8" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.20)" stroke-width="1" stroke-dasharray="4,4"/>
+<rect x="412" y="108" width="116" height="14" rx="2" fill="#f5f5f5"/>
+<text x="470" y="119" fill="#5a6580" font-size="8" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.12em">CONTROL PLANE</text>
+<rect x="860" y="100" width="380" height="480" rx="8" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.20)" stroke-width="1" stroke-dasharray="4,4"/>
+<rect x="872" y="108" width="116" height="14" rx="2" fill="#f5f5f5"/>
+<text x="930" y="119" fill="#5a6580" font-size="8" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.12em">DATA PLANE</text>
+<line x1="328" y1="212" x2="440" y2="212" stroke="#2e5aa8" stroke-width="1" marker-end="url(#arrow-link)"/>
+<rect x="355.7" y="192" width="56.6" height="12" rx="2" fill="#f5f5f5"/><text x="384" y="201" fill="#5a6580" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.05em">HTTPS:443</text>
+<path d="M328 392 H420 Q428 392 428 384 V260 Q428 252 436 252 H440" fill="none" stroke="#2e5aa8" stroke-width="1" marker-end="url(#arrow-link)"/>
+<rect x="359.4" y="324" width="56.6" height="12" rx="2" fill="#f5f5f5"/><text x="365.36" y="333" fill="#5a6580" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="start" letter-spacing="0.05em">HTTPS:443</text>
+<line x1="780" y1="220" x2="900" y2="220" stroke="#2e5aa8" stroke-width="1" marker-end="url(#arrow-link)"/>
+<rect x="814.2" y="200" width="51.7" height="12" rx="2" fill="#f5f5f5"/><text x="840" y="209" fill="#5a6580" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.05em">TLS:3306</text>
+<line x1="780" y1="410" x2="900" y2="410" stroke="#2e5aa8" stroke-width="1" marker-end="url(#arrow-link)"/>
+<rect x="814.2" y="390" width="51.7" height="12" rx="2" fill="#f5f5f5"/><text x="840" y="399" fill="#5a6580" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.05em">FS WRITE</text>
+<line x1="610" y1="360" x2="610" y2="280" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+<rect x="622.0" y="314" width="81.4" height="12" rx="2" fill="#f5f5f5"/><text x="628" y="323" fill="#5a6580" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="start" letter-spacing="0.05em">HTTP:127.0.0.1</text>
+<line x1="1050" y1="280" x2="1050" y2="360" stroke="#4f5d75" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+<rect x="1062.0" y="314" width="46.7" height="12" rx="2" fill="#f5f5f5"/><text x="1068" y="323" fill="#5a6580" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="start" letter-spacing="0.05em">SUMMARY</text>
+<rect x="72" y="160" width="256" height="104" rx="6" fill="#f5f5f5"/>
+<rect x="72" y="160" width="256" height="104" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<rect x="80" y="166" width="30" height="12" rx="2" fill="transparent" stroke="#2d3142" stroke-opacity="0.42" stroke-width="0.8"/>
+<text x="95.0" y="175" fill="#2d3142" font-size="7" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">EDGE</text>
+<text x="200.0" y="198" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">矿区边缘节点 A</text>
+<rect x="82" y="208" width="236" height="24" rx="4" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="0.8"/>
+<text x="90" y="224" fill="#2d3142" font-size="9" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="start">uav-agent</text>
+<text x="310" y="224" fill="#4f5d75" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="end">v1.0</text>
+<rect x="286" y="167" width="34" height="12" rx="2" fill="#f5f5f5" stroke="rgba(45,49,66,0.12)" stroke-width="0.8"/>
+<text x="303" y="176" fill="#4f5d75" font-size="7" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">x30</text>
+<rect x="72" y="340" width="256" height="104" rx="6" fill="#f5f5f5"/>
+<rect x="72" y="340" width="256" height="104" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<rect x="80" y="346" width="30" height="12" rx="2" fill="transparent" stroke="#2d3142" stroke-opacity="0.42" stroke-width="0.8"/>
+<text x="95.0" y="355" fill="#2d3142" font-size="7" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">EDGE</text>
+<text x="200.0" y="378" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">矿区边缘节点 B</text>
+<rect x="82" y="388" width="236" height="24" rx="4" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="0.8"/>
+<text x="90" y="404" fill="#2d3142" font-size="9" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="start">uav-agent</text>
+<text x="310" y="404" fill="#4f5d75" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="end">v1.0</text>
+<rect x="286" y="347" width="34" height="12" rx="2" fill="#f5f5f5" stroke="rgba(45,49,66,0.12)" stroke-width="0.8"/>
+<text x="303" y="356" fill="#4f5d75" font-size="7" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">x30</text>
+<rect x="440" y="160" width="340" height="120" rx="6" fill="#f5f5f5"/>
+<rect x="440" y="160" width="340" height="120" rx="6" fill="rgba(191,69,32,0.08)" stroke="#bf4520" stroke-width="1.2"/>
+<rect x="448" y="166" width="30" height="12" rx="2" fill="transparent" stroke="#bf4520" stroke-opacity="0.42" stroke-width="0.8"/>
+<text x="463.0" y="175" fill="#bf4520" font-size="7" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">VM</text>
+<text x="610.0" y="198" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">控制面仿真服务</text>
+<rect x="450" y="208" width="320" height="24" rx="4" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="0.8"/>
+<text x="458" y="224" fill="#2d3142" font-size="9" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="start">simulator</text>
+<text x="762" y="224" fill="#4f5d75" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="end">v1.0</text>
+<rect x="450" y="238" width="320" height="24" rx="4" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="0.8"/>
+<text x="458" y="254" fill="#2d3142" font-size="9" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="start">webview-ui</text>
+<text x="762" y="254" fill="#4f5d75" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="end">v1.0</text>
+<rect x="738" y="167" width="34" height="12" rx="2" fill="#f5f5f5" stroke="rgba(45,49,66,0.12)" stroke-width="0.8"/>
+<text x="755" y="176" fill="#4f5d75" font-size="7" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">x1</text>
+<rect x="440" y="360" width="340" height="104" rx="6" fill="#f5f5f5"/>
+<rect x="440" y="360" width="340" height="104" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<rect x="448" y="366" width="42" height="12" rx="2" fill="transparent" stroke="#2d3142" stroke-opacity="0.42" stroke-width="0.8"/>
+<text x="469.0" y="375" fill="#2d3142" font-size="7" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">DESKTOP</text>
+<text x="610.0" y="398" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">三维监控台</text>
+<rect x="450" y="408" width="320" height="24" rx="4" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="0.8"/>
+<text x="458" y="424" fill="#2d3142" font-size="9" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="start">desktop</text>
+<text x="762" y="424" fill="#4f5d75" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="end">v1.0</text>
+<rect x="738" y="367" width="34" height="12" rx="2" fill="#f5f5f5" stroke="rgba(45,49,66,0.12)" stroke-width="0.8"/>
+<text x="755" y="376" fill="#4f5d75" font-size="7" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">x1</text>
+<rect x="900" y="160" width="300" height="120" rx="6" fill="#f5f5f5"/>
+<rect x="900" y="160" width="300" height="120" rx="6" fill="rgba(191,69,32,0.08)" stroke="#bf4520" stroke-width="1.2"/>
+<rect x="908" y="166" width="42" height="12" rx="2" fill="transparent" stroke="#bf4520" stroke-opacity="0.42" stroke-width="0.8"/>
+<text x="929.0" y="175" fill="#bf4520" font-size="7" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">MANAGED</text>
+<text x="1050.0" y="198" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">MySQL 8</text>
+<rect x="910" y="208" width="280" height="24" rx="4" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="0.8"/>
+<text x="918" y="224" fill="#2d3142" font-size="9" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="start">uav_sched_sim</text>
+<text x="1182" y="224" fill="#4f5d75" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="end">schema-v1</text>
+<rect x="1158" y="167" width="34" height="12" rx="2" fill="#f5f5f5" stroke="rgba(45,49,66,0.12)" stroke-width="0.8"/>
+<text x="1175" y="176" fill="#4f5d75" font-size="7" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">x1</text>
+<rect x="900" y="360" width="300" height="104" rx="6" fill="#f5f5f5"/>
+<rect x="900" y="360" width="300" height="104" rx="6" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="1"/>
+<rect x="908" y="366" width="33" height="12" rx="2" fill="transparent" stroke="#4f5d75" stroke-opacity="0.42" stroke-width="0.8"/>
+<text x="924.5" y="375" fill="#4f5d75" font-size="7" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">STORE</text>
+<text x="1050.0" y="398" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">结果与图表目录</text>
+<rect x="910" y="408" width="280" height="24" rx="4" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="0.8"/>
+<text x="918" y="424" fill="#2d3142" font-size="9" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="start">results / charts</text>
+<text x="1182" y="424" fill="#4f5d75" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="end">runtime</text>
+<rect x="1158" y="367" width="34" height="12" rx="2" fill="#f5f5f5" stroke="rgba(45,49,66,0.12)" stroke-width="0.8"/>
+<text x="1175" y="376" fill="#4f5d75" font-size="7" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">x1</text>
+<line x1="40" y1="670" x2="1240" y2="670" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+<text x="40" y="688" fill="#4f5d75" font-size="8" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="start" letter-spacing="0.14em">LEGEND</text>
+<line x1="112" y1="686" x2="146" y2="686" stroke="#4f5d75" stroke-width="1" stroke-dasharray="5,4"/>
+<text x="154" y="689" fill="#5a6580" font-size="9" font-weight="400" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">网络边界</text>
+<line x1="224.0" y1="686" x2="258.0" y2="686" stroke="#2e5aa8" stroke-width="1"/>
+<text x="266.0" y="689" fill="#5a6580" font-size="9" font-weight="400" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">跨边界路径</text>
+<rect x="345.0" y="679" width="14" height="14" rx="2" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<text x="367.0" y="689" fill="#5a6580" font-size="9" font-weight="400" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">主机 / 服务</text>
+<rect x="453.2" y="679" width="14" height="14" rx="2" fill="rgba(191,69,32,0.08)" stroke="#bf4520" stroke-width="1"/>
+<text x="475.2" y="689" fill="#5a6580" font-size="9" font-weight="400" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">单点关键组件</text>
+</svg>
+  </div>
+  <div class="notes">
+    <article class="card"><p class="eyebrow">READING NOTE</p><h3><span class="card-dot"></span>本地演示与多站演进</h3><ul><li>单站默认仍然是本地桌面 + 本地 HTTP 服务 + 本地 MySQL。</li><li>多站模式把边缘节点、中心站和 MEC 分流作为独立部署面展示。</li><li>控制面是单点关键组件，数据面保存指标、时序和结果文件。</li></ul></article><article class="card"><p class="eyebrow">OBSERVABILITY</p><h3><span class="card-dot"></span>部署证据</h3><ul><li>dist/logs/app.log — frozen 启动与异常</li><li>logs/ui.port — 实际本地服务端口</li><li>results/ · charts/ — exe 可写产物目录</li><li>MySQL uav_sched_sim — 结构化实验证据</li></ul></article>
+  </div>
+  <footer>
+    <span>UAV Scheduler Simulation · Operating Systems Course Project</span>
+    <span class="pager"><a href="05-调度执行时序图.html">← 执行时序</a><a href="07-数据库实体关系图.html">数据模型 →</a></span>
+  </footer>
+</div>
+</body>
+</html>

@@ -62,6 +62,7 @@ if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
 
 from uav_sim.config import get  # noqa: E402
+from uav_sim.realsource import RealDataError, validate_weather_snapshot  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -253,7 +254,8 @@ class WeatherModel:
     """
 
     def __init__(self, seed: int = 0, preset: str = "clear",
-                 duration_s: float = 90.0, cfg: Optional[dict] = None) -> None:
+                 duration_s: float = 90.0, cfg: Optional[dict] = None,
+                 real_snapshot: Optional[dict] = None) -> None:
         # 契约 §4.6.6 的示例里写作 WeatherModel("clear")（把预设放在第 1 个位置）。
         # 这里做一个无歧义的兼容：第一个位置参数是 str 时按 preset 处理，seed 取 0。
         if isinstance(seed, str):
@@ -266,15 +268,53 @@ class WeatherModel:
         self.enable_dynamic: bool = bool(
             get(self.cfg, "weather.enable_dynamic", True))
 
-        self.preset: str = config_preset(self.cfg, preset)
-        self._preset_obj: WeatherPreset = self._resolve_preset(self.preset)
         self._grid_len: int = int(math.ceil(
             self.duration_s / self.grid_s - 1e-9)) + 1
 
-        #: 预先算好的网格样本（0.5 s 一个，确定性；at() 只做插值）
-        self._samples: List[WeatherSample] = self._build_curve()
-        logger.debug("WeatherModel seed=%s preset=%s duration=%.1fs grid=%.1fs 点数=%d",
-                     self.seed, self.preset, self.duration_s, self.grid_s,
+        #: 真实数据来源元数据。合成模式为 synthetic / null；真实模式带采集时间。
+        self.source: str = "synthetic"
+        self.fetched_at: Optional[str] = None
+        self.observed_at: Optional[str] = None
+        self.real_snapshot: Optional[dict] = None
+        self._real_derived: Optional[dict] = None
+
+        if real_snapshot is not None:
+            try:
+                validate_weather_snapshot(real_snapshot)
+            except RealDataError:
+                # 调用方已经负责降级；这里再兜底一次，绝不让坏快照进入仿真。
+                logger.warning("真实天气快照非法，WeatherModel 回退合成预设")
+                real_snapshot = None
+
+        if real_snapshot is not None:
+            self.real_snapshot = validate_weather_snapshot(real_snapshot)
+            self._real_derived = dict(self.real_snapshot["derived"])
+            self.source = "real"
+            self.fetched_at = self.real_snapshot.get("fetched_at")
+            self.observed_at = self.real_snapshot.get("observed_at")
+            self.preset = str(self._real_derived["preset"])
+            base = get_preset(self.preset)
+            self._preset_obj = WeatherPreset(
+                preset=self.preset,
+                label=str(self._real_derived.get("label") or base.label),
+                visibility_km=max(0.05, float(self._real_derived["visibility_km"])),
+                link_penalty_max=max(32.0, float(self._real_derived["link_penalty"])),
+                intensity=_clamp(float(self._real_derived["intensity"]), 0.0, 1.0),
+                wind_speed_mps=max(0.0, float(self._real_derived["wind_speed_mps"])),
+                wind_dir_deg=float(self._real_derived["wind_dir_deg"]) % 360.0,
+                fog_color_hex=base.fog_color_hex,
+            )
+            self._samples = self._build_real_curve()
+            logger.info("WeatherModel 使用真实快照 source=%s observed_at=%s preset=%s",
+                        self.real_snapshot.get("source"), self.observed_at, self.preset)
+        else:
+            self.preset = config_preset(self.cfg, preset)
+            self._preset_obj = self._resolve_preset(self.preset)
+            #: 预先算好的网格样本（0.5 s 一个，确定性；at() 只做插值）
+            self._samples = self._build_curve()
+
+        logger.debug("WeatherModel seed=%s preset=%s source=%s duration=%.1fs grid=%.1fs 点数=%d",
+                     self.seed, self.preset, self.source, self.duration_s, self.grid_s,
                      len(self._samples))
 
     # ---------------------------------------------------------------- 构造辅助
@@ -418,6 +458,33 @@ class WeatherModel:
                 wind_speed_mps=wind0, wind_dir_deg=dir0)
         return samples
 
+    def _build_real_curve(self) -> List[WeatherSample]:
+        """真实快照 → 整轮常量曲线。
+
+        为什么不做 onset/阵风/尾部：真实快照只有一个观测时刻，而仿真只有
+        30~90 秒；把它包装成"真实秒级变化"是伪造。常量曲线让"同一快照回放
+        两次逐位一致"成为可证明的事实。
+        """
+        d = self._real_derived or {}
+        n = max(1, self._grid_len)
+        intensity = _clamp(float(d.get("intensity", 0.0)), 0.0, 1.0)
+        visibility = max(0.05, float(d.get("visibility_km", 12.0)))
+        penalty = _clamp(float(d.get("link_penalty", 0.0)), 0.0, 100.0)
+        wind_speed = max(0.0, float(d.get("wind_speed_mps", 0.0)))
+        wind_dir = float(d.get("wind_dir_deg", 0.0)) % 360.0
+        return [
+            WeatherSample(
+                ts=i * self.grid_s,
+                preset=self.preset,
+                intensity=intensity,
+                visibility_km=visibility,
+                link_penalty=penalty,
+                wind_speed_mps=wind_speed,
+                wind_dir_deg=wind_dir,
+            )
+            for i in range(n)
+        ]
+
     # ---------------------------------------------------------------- 查询接口
     def at(self, t: float) -> WeatherSample:
         """``t`` 时刻的天气采样（0.5 s 网格线性插值；确定性纯函数）。"""
@@ -496,8 +563,13 @@ class WeatherModel:
         的后半段，序列就依赖"何时切换"这一 wall-clock 事件，无法复现。
         """
         name = config_preset(self.cfg, preset)
-        if name == self.preset:
+        if name == self.preset and self.source != "real":
             return
+        self.source = "synthetic"
+        self.fetched_at = None
+        self.observed_at = None
+        self.real_snapshot = None
+        self._real_derived = None
         self.preset = name
         self._preset_obj = self._resolve_preset(name)
         self._samples = self._build_curve()
@@ -527,11 +599,15 @@ class WeatherModel:
             "link_penalty": round(float(s.link_penalty), 3),
             "wind_speed_mps": round(float(s.wind_speed_mps), 2),
             "wind_dir_deg": round(float(s.wind_dir_deg), 1),
+            "source": self.source,
+            "fetched_at": self.fetched_at,
+            "observed_at": self.observed_at,
             "available": available_presets(),
         }
 
     def __repr__(self) -> str:  # pragma: no cover - 调试用
         return (f"<WeatherModel seed={self.seed} preset={self.preset} "
+                f"source={self.source} "
                 f"duration={self.duration_s:.0f}s grid={self.grid_s}s "
                 f"mean_penalty={self.mean_penalty():.2f}>")
 

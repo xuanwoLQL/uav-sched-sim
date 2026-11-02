@@ -192,6 +192,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         "uav_sim.scenarios",
         "uav_sim.queue_manager",
         "uav_sim.link_monitor",
+        "uav_sim.realsource",
         "uav_sim.resource_limiter",
         "uav_sim.simulator",
         "uav_sim.scheduler",
@@ -1846,6 +1847,7 @@ def cmd_ui(args: argparse.Namespace) -> int:
         stations=(str(args.stations).strip().lower() or None) if getattr(
             args, "stations", None) else None,
         mec=(None if getattr(args, "mec", None) is None else bool(args.mec)),
+        real_weather=getattr(args, "real_weather", None),
     )
 
 
@@ -1965,6 +1967,8 @@ def build_parser() -> argparse.ArgumentParser:
                          "会被记为会话默认值，页面上点「开始仿真」即按它启动")
     sp.add_argument("--mec", action="store_true", default=None,
                     help="启用 MEC 边缘计算（轻量运维下沉边缘、重勘查回中心）")
+    sp.add_argument("--real-weather", default=None, metavar="SNAPSHOT",
+                    help="指定真实天气快照 JSON（覆盖 config.real；不填则按配置）")
     sp.add_argument("--speed", type=float, default=1.0, help="播放速度倍率（0.5 ~ 4）")
     sp.add_argument("--autostart", action="store_true", help="打开页面后立即开始仿真")
     sp.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")

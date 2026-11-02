@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>动态权重决策流程 · 无人机集群调度仿真</title>
+<link rel="icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=">
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&family=Noto+Serif:ital@0;1&display=swap" rel="stylesheet">
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --paper:#f5f5f5;--paper-2:#ececec;--ink:#2d3142;--muted:#4f5d75;--soft:#5a6580;
+    --accent:#bf4520;--link:#2e5aa8;--rule:rgba(45,49,66,0.12);
+    --sans:'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif;--serif:'Instrument Serif', 'Noto Serif', serif;--mono:'Geist Mono', 'Cascadia Mono', ui-monospace, monospace;
+  }
+  body{font-family:var(--sans);background:var(--paper);color:var(--ink);min-height:100vh;
+    display:flex;justify-content:center;padding:2rem 2rem 3rem}
+  .frame{width:100%;max-width:1360px;min-width:0}
+  .topnav{display:flex;align-items:center;justify-content:space-between;gap:1rem;
+    padding-bottom:1rem;margin-bottom:2rem;border-bottom:1px solid var(--rule)}
+  .topnav a,.topnav span{font-family:var(--mono);font-size:.68rem;letter-spacing:.1em;
+    text-transform:uppercase;color:var(--muted);text-decoration:none}
+  .topnav a:hover{color:var(--accent)}
+  .topnav .counter{color:var(--soft)}
+  .eyebrow{font-family:var(--mono);font-size:.66rem;font-weight:500;letter-spacing:.18em;
+    text-transform:uppercase;color:var(--muted);margin-bottom:.55rem}
+  h1{font-family:var(--serif);font-size:clamp(1.6rem,2.2vw + .8rem,2.15rem);
+    font-weight:400;letter-spacing:-.02em;line-height:1.12;margin-bottom:.45rem}
+  .dek{font-size:.86rem;line-height:1.65;color:var(--soft);max-width:72ch;margin-bottom:1.5rem}
+  .diagram-container{width:100%;max-width:100%;min-width:0;overflow-x:auto;
+    border:1px solid var(--rule);border-radius:8px;background:var(--paper-2);
+    padding:1rem}
+  svg{width:100%;min-width:1280px;display:block;background:var(--paper);border-radius:4px}
+  .notes{display:grid;grid-template-columns:1.12fr .88fr;gap:1rem;margin-top:1.25rem}
+  .card{background:#fff;border:1px solid var(--rule);border-radius:6px;padding:1.1rem 1.2rem}
+  .card h3{display:flex;align-items:center;gap:.55rem;font-size:.88rem;margin-bottom:.7rem}
+  .card-dot{width:7px;height:7px;border-radius:50%;background:var(--accent);flex:none}
+  .card ul{list-style:none;display:grid;gap:.45rem}
+  .card li{font-size:.76rem;line-height:1.55;color:var(--soft);padding-left:.85rem;position:relative}
+  .card li::before{content:"";position:absolute;left:0;top:.55em;width:4px;height:4px;
+    border-radius:50%;background:var(--muted);opacity:.55}
+  footer{display:flex;justify-content:space-between;gap:1rem;align-items:center;
+    margin-top:1.5rem;padding-top:.9rem;border-top:1px solid var(--rule);
+    font-family:var(--mono);font-size:.64rem;letter-spacing:.06em;color:var(--muted)}
+  footer .pager{display:flex;gap:1.2rem}
+  footer a{color:var(--muted);text-decoration:none}footer a:hover{color:var(--accent)}
+  .muted{color:var(--soft)}
+  @media (max-width:760px){
+    body{padding:1.2rem .8rem 2rem}.notes{grid-template-columns:1fr}
+    footer{align-items:flex-start;flex-direction:column}
+  }
+  @media print{
+    body{padding:0;background:#fff}.diagram-container{overflow-x:visible;border:0;padding:0;background:#fff}
+    svg{min-width:0}.topnav,footer{display:none}.notes{break-inside:avoid}
+  }
+</style>
+</head>
+<body>
+<div class="frame">
+  <nav class="topnav">
+    <a href="00-图册索引.html">← 系统图册</a>
+    <span class="counter">04 / 08</span>
+  </nav>
+  <p class="eyebrow">Flowchart · 一次调度怎么选</p>
+  <h1>动态权重决策流程</h1>
+  <p class="dek">先做饥饿硬补偿，再计算四因子权重；候选择优之后还要经过限流准入，才会真正占用线程池槽位。</p>
+  <div class="diagram-container">
+<svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="decision-title decision-desc">
+<title id="decision-title">动态权重调度决策流程</title>
+<desc id="decision-desc">展示动态权重调度器先检查饥饿硬补偿，再计算四因子权重，并据候选权重决定派发或回队。</desc>
+
+      <defs>
+        <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/>
+        </marker>
+        <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#bf4520"/>
+        </marker>
+        <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/>
+        </marker>
+        <marker id="arrow-open" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polyline points="0 0, 8 3, 0 6" fill="none" stroke="#4f5d75" stroke-width="1.2"/>
+        </marker>
+      </defs>
+<rect width="1280" height="720" fill="#f5f5f5"/>
+<line x1="560" y1="76" x2="560" y2="116" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="560" y1="180" x2="560" y2="220" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+<line x1="460" y1="270" x2="400" y2="270" stroke="#bf4520" stroke-width="1.2" marker-end="url(#arrow-accent)"/>
+<rect x="415.0" y="250" width="30.0" height="12" rx="2" fill="#f5f5f5"/><text x="430" y="259" fill="#bf4520" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.05em">YES</text>
+<line x1="560" y1="330" x2="560" y2="380" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+<rect x="572.0" y="350" width="32.0" height="12" rx="2" fill="#f5f5f5"/><text x="578" y="359" fill="#5a6580" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="start" letter-spacing="0.05em">NO</text>
+<line x1="560" y1="444" x2="560" y2="500" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+<rect x="572.0" y="468" width="46.7" height="12" rx="2" fill="#f5f5f5"/><text x="578" y="477" fill="#5a6580" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="start" letter-spacing="0.05em">COMPUTE</text>
+<path d="M660 560 H1020 V310" fill="none" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+<rect x="852.0" y="554" width="32.0" height="12" rx="2" fill="#f5f5f5"/><text x="858" y="563" fill="#5a6580" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="start" letter-spacing="0.05em">YES</text>
+<path d="M460 560 H308 Q300 560 300 568 V600" fill="none" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+<rect x="365.0" y="540" width="30.0" height="12" rx="2" fill="#f5f5f5"/><text x="380" y="549" fill="#5a6580" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.05em">NO</text>
+<path d="M300 310 V350 H940 V310" fill="none" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+<rect x="480" y="32" width="160" height="44" rx="20" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<text x="560" y="59" fill="#2d3142" font-size="10" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.10em">START</text>
+<rect x="420" y="116" width="280" height="64" rx="6" fill="#f5f5f5"/>
+<rect x="420" y="116" width="280" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<rect x="428" y="122" width="33" height="12" rx="2" fill="transparent" stroke="#2d3142" stroke-opacity="0.42" stroke-width="0.8"/>
+<text x="444.5" y="131" fill="#2d3142" font-size="7" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">INPUT</text>
+<text x="560.0" y="144" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">采集四因子</text>
+<text x="560.0" y="160" fill="#4f5d75" font-size="9" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle">Q 拥堵 · W 等待 · L 链路 · S 负载</text>
+<path d="M560 220 L660 270 L560 320 L460 270 Z" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<text x="560" y="266" fill="#2d3142" font-size="10" font-weight="600" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">饥饿阈值已到？</text>
+<rect x="200" y="230" width="200" height="80" rx="6" fill="#f5f5f5"/>
+<rect x="200" y="230" width="200" height="80" rx="6" fill="rgba(191,69,32,0.08)" stroke="#bf4520" stroke-width="1.2"/>
+<rect x="208" y="236" width="42" height="12" rx="2" fill="transparent" stroke="#bf4520" stroke-opacity="0.42" stroke-width="0.8"/>
+<text x="229.0" y="245" fill="#bf4520" font-size="7" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">PROMOTE</text>
+<text x="300.0" y="262" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">低优硬补偿</text>
+<text x="300.0" y="279" fill="#4f5d75" font-size="9" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle">bypass weight</text>
+<text x="300.0" y="292" fill="#4f5d75" font-size="9" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle">boost low</text>
+<rect x="880" y="230" width="200" height="80" rx="6" fill="#f5f5f5"/>
+<rect x="880" y="230" width="200" height="80" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<rect x="888" y="236" width="46" height="12" rx="2" fill="transparent" stroke="#2d3142" stroke-opacity="0.42" stroke-width="0.8"/>
+<text x="911.0" y="245" fill="#2d3142" font-size="7" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">DISPATCH</text>
+<text x="980.0" y="262" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">派发</text>
+<text x="980.0" y="279" fill="#4f5d75" font-size="9" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle">try_admit</text>
+<text x="980.0" y="292" fill="#4f5d75" font-size="9" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle">slot</text>
+<rect x="420" y="380" width="280" height="64" rx="6" fill="#f5f5f5"/>
+<rect x="420" y="380" width="280" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<rect x="428" y="386" width="38" height="12" rx="2" fill="transparent" stroke="#2d3142" stroke-opacity="0.42" stroke-width="0.8"/>
+<text x="447.0" y="395" fill="#2d3142" font-size="7" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">WEIGHT</text>
+<text x="560.0" y="408" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">计算动态权重</text>
+<text x="560.0" y="424" fill="#4f5d75" font-size="9" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle">base × (w0+αQ+βW+γL) × (1−δS)</text>
+<path d="M560 500 L660 560 L560 620 L460 560 Z" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<text x="560" y="556" fill="#2d3142" font-size="10" font-weight="600" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">候选权重最高？</text>
+<rect x="200" y="600" width="200" height="72" rx="6" fill="#f5f5f5"/>
+<rect x="200" y="600" width="200" height="72" rx="6" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.20)" stroke-width="1" stroke-dasharray="4,3"/>
+<rect x="208" y="606" width="42" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.20)" stroke-opacity="0.42" stroke-width="0.8"/>
+<text x="229.0" y="615" fill="rgba(45,49,66,0.20)" font-size="7" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">REQUEUE</text>
+<text x="300.0" y="630" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">回队等待</text>
+<text x="300.0" y="646" fill="#4f5d75" font-size="9" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle">push_front / back</text>
+<text x="300.0" y="659" fill="#4f5d75" font-size="9" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle">next tick</text>
+<line x1="40" y1="670" x2="1240" y2="670" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+<text x="40" y="688" fill="#4f5d75" font-size="8" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="start" letter-spacing="0.14em">LEGEND</text>
+<line x1="112" y1="686" x2="146" y2="686" stroke="#bf4520" stroke-width="1"/>
+<text x="154" y="689" fill="#5a6580" font-size="9" font-weight="400" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">硬补偿优先路径</text>
+<line x1="251.0" y1="686" x2="285.0" y2="686" stroke="#4f5d75" stroke-width="1"/>
+<text x="293.0" y="689" fill="#5a6580" font-size="9" font-weight="400" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">常规决策流</text>
+<rect x="372.0" y="679" width="14" height="14" rx="2" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<text x="394.0" y="689" fill="#5a6580" font-size="9" font-weight="400" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">动作</text>
+<rect x="446.0" y="679" width="14" height="14" rx="2" fill="rgba(191,69,32,0.08)" stroke="#bf4520" stroke-width="1"/>
+<text x="468.0" y="689" fill="#5a6580" font-size="9" font-weight="400" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">关键决策结果</text>
+</svg>
+  </div>
+  <div class="notes">
+    <article class="card"><p class="eyebrow">READING NOTE</p><h3><span class="card-dot"></span>两条优先级规则</h3><ul><li>低优任务等待超过阈值时，硬补偿通道绕过常规权重比较。</li><li>常规路径使用 Q 拥堵、W 等待、L 链路、S 系统负载四个因子。</li><li>候选权重最高并不等于一定执行，资源限流仍可能把任务留在队列。</li></ul></article><article class="card"><p class="eyebrow">FORMULA</p><h3><span class="card-dot"></span>权重口径</h3><ul><li>W = base × (w0 + αQ + βW + γL) × (1 − δS)</li><li>健康度低于阈值时叠加 weaknet_downweight。</li><li>动态时间片随队列拥堵度伸缩，避免大任务长期占槽。</li></ul></article>
+  </div>
+  <footer>
+    <span>UAV Scheduler Simulation · Operating Systems Course Project</span>
+    <span class="pager"><a href="03-任务生命周期状态机.html">← 状态机</a><a href="05-调度执行时序图.html">执行时序 →</a></span>
+  </footer>
+</div>
+</body>
+</html>

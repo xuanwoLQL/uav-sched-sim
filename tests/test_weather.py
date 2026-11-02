@@ -213,9 +213,13 @@ def test_simulator_end_to_end_dust() -> None:
     assert "weather" in snap, "Simulator.snapshot() 必须包含 weather 字段（契约 §4.6.4）"
     weather = snap["weather"]
     need = {"preset", "label", "intensity", "visibility_km", "link_penalty",
-            "wind_speed_mps", "wind_dir_deg", "available"}
+            "wind_speed_mps", "wind_dir_deg", "source", "fetched_at",
+            "observed_at", "available"}
     assert set(weather) == need, f"weather 字段键名不符契约：{sorted(weather)}"
     assert weather["preset"] == "dust"
+    assert weather["source"] == "synthetic"
+    assert weather["fetched_at"] is None
+    assert weather["observed_at"] is None
     assert len(weather["available"]) == 4
     assert [a["preset"] for a in weather["available"]] == list(PRESET_ORDER)
     assert available_presets() == weather["available"]

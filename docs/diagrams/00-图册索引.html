@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>系统图册 · 无人机集群调度仿真</title>
+<link rel="icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=">
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  :root{--paper:#f5f5f5;--ink:#2d3142;--muted:#4f5d75;--soft:#5a6580;--accent:#bf4520;--rule:rgba(45,49,66,0.12);
+    --sans:'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif;--serif:'Instrument Serif', 'Noto Serif', serif;--mono:'Geist Mono', 'Cascadia Mono', ui-monospace, monospace}
+  body{font-family:var(--sans);background:var(--paper);color:var(--ink);min-height:100vh;
+    display:flex;justify-content:center;padding:2rem 2rem 3rem}
+  .frame{width:100%;max-width:1120px}
+  .top{display:flex;align-items:flex-start;justify-content:space-between;gap:2rem;
+    padding-bottom:1.5rem;border-bottom:1px solid var(--rule);margin-bottom:2rem}
+  .eyebrow{font-family:var(--mono);font-size:.66rem;font-weight:500;letter-spacing:.18em;
+    text-transform:uppercase;color:var(--muted);margin-bottom:.55rem}
+  h1{font-family:var(--serif);font-size:clamp(2rem,4vw,3.4rem);font-weight:400;
+    line-height:1;letter-spacing:-.03em;margin-bottom:.6rem}
+  .dek{font-size:.9rem;line-height:1.65;color:var(--soft);max-width:62ch}
+  .meta{font-family:var(--mono);font-size:.68rem;line-height:1.8;color:var(--muted);
+    text-align:right;white-space:nowrap;padding-top:.25rem}
+  .atlas-map{width:100%;overflow-x:auto;margin-bottom:1.25rem;border:1px solid var(--rule);
+    border-radius:6px;background:#fff;padding:.8rem 1rem}
+  .atlas-map svg{width:100%;min-width:1000px;display:block}
+  .entries{display:grid;grid-template-columns:1fr 1fr;gap:1rem}
+  .entry{display:grid;grid-template-columns:52px 1fr auto;gap:1rem;align-items:start;
+    min-height:118px;padding:1.1rem 1.15rem;background:#fff;border:1px solid var(--rule);
+    border-radius:6px;text-decoration:none;color:inherit;transition:border-color .16s,transform .16s}
+  .entry:hover{border-color:rgba(191,69,32,.45);transform:translateY(-2px)}
+  .number{font-family:var(--mono);font-size:1.25rem;color:var(--accent);line-height:1}
+  .entry-body{display:flex;flex-direction:column;gap:.32rem;min-width:0}
+  .kind{font-family:var(--mono);font-size:.6rem;letter-spacing:.12em;color:var(--muted)}
+  .entry strong{font-size:.9rem;font-weight:600}
+  .desc{font-size:.74rem;line-height:1.55;color:var(--soft)}
+  .open{font-family:var(--mono);font-size:.62rem;color:var(--muted);white-space:nowrap;padding-top:.15rem}
+  .foot{display:flex;justify-content:space-between;gap:1rem;margin-top:1.5rem;padding-top:.9rem;
+    border-top:1px solid var(--rule);font-family:var(--mono);font-size:.64rem;color:var(--muted)}
+  @media (max-width:760px){body{padding:1.2rem .8rem 2rem}.entries{grid-template-columns:1fr}
+    .top{flex-direction:column}.meta{text-align:left}.foot{flex-direction:column}}
+  @media print{.atlas-map{overflow-x:visible}.atlas-map svg{min-width:0}}
+</style>
+</head>
+<body>
+<div class="frame">
+  <header class="top">
+    <div>
+      <p class="eyebrow">UAV SCHEDULER SIMULATION / SYSTEM ATLAS</p>
+      <h1>系统图册</h1>
+      <p class="dek">八张图把业务场景、OS 原理、算法决策、数据证据和部署形态连成一条可讲解、可核查的链路。</p>
+    </div>
+    <div class="meta">8 FIGURES<br>OS COURSE PROJECT<br>2026-11</div>
+  </header>
+  <div class="atlas-map">
+    <svg viewBox="0 0 1000 140" xmlns="http://www.w3.org/2000/svg" role="img"
+         aria-labelledby="atlas-title atlas-desc">
+      <title id="atlas-title">系统图册阅读路径</title>
+      <desc id="atlas-desc">从系统架构、数据流、状态机、决策、时序、部署、数据模型到实验评测的八站阅读路径。</desc>
+      <line x1="70" y1="64" x2="930" y2="64" stroke="rgba(45,49,66,0.18)" stroke-width="1"/>
+      <circle cx="70" cy="64" r="12" fill="#bf4520"/>
+      <text x="70" y="68" fill="#f5f5f5" font-size="8" font-family="'Geist Mono', monospace"
+            text-anchor="middle">01</text>
+      <text x="70" y="98" fill="#2d3142" font-size="11" font-weight="600"
+            font-family="'Geist', 'Noto Sans SC', sans-serif" text-anchor="middle">架构</text>
+      <circle cx="193" cy="64" r="12" fill="#2d3142"/>
+      <text x="193" y="68" fill="#f5f5f5" font-size="8" font-family="'Geist Mono', monospace"
+            text-anchor="middle">02</text>
+      <text x="193" y="98" fill="#2d3142" font-size="11" font-weight="600"
+            font-family="'Geist', 'Noto Sans SC', sans-serif" text-anchor="middle">数据流</text>
+      <circle cx="316" cy="64" r="12" fill="#2d3142"/>
+      <text x="316" y="68" fill="#f5f5f5" font-size="8" font-family="'Geist Mono', monospace"
+            text-anchor="middle">03</text>
+      <text x="316" y="98" fill="#2d3142" font-size="11" font-weight="600"
+            font-family="'Geist', 'Noto Sans SC', sans-serif" text-anchor="middle">状态机</text>
+      <circle cx="439" cy="64" r="12" fill="#2d3142"/>
+      <text x="439" y="68" fill="#f5f5f5" font-size="8" font-family="'Geist Mono', monospace"
+            text-anchor="middle">04</text>
+      <text x="439" y="98" fill="#2d3142" font-size="11" font-weight="600"
+            font-family="'Geist', 'Noto Sans SC', sans-serif" text-anchor="middle">决策</text>
+      <circle cx="562" cy="64" r="12" fill="#2d3142"/>
+      <text x="562" y="68" fill="#f5f5f5" font-size="8" font-family="'Geist Mono', monospace"
+            text-anchor="middle">05</text>
+      <text x="562" y="98" fill="#2d3142" font-size="11" font-weight="600"
+            font-family="'Geist', 'Noto Sans SC', sans-serif" text-anchor="middle">时序</text>
+      <circle cx="685" cy="64" r="12" fill="#2d3142"/>
+      <text x="685" y="68" fill="#f5f5f5" font-size="8" font-family="'Geist Mono', monospace"
+            text-anchor="middle">06</text>
+      <text x="685" y="98" fill="#2d3142" font-size="11" font-weight="600"
+            font-family="'Geist', 'Noto Sans SC', sans-serif" text-anchor="middle">部署</text>
+      <circle cx="808" cy="64" r="12" fill="#2d3142"/>
+      <text x="808" y="68" fill="#f5f5f5" font-size="8" font-family="'Geist Mono', monospace"
+            text-anchor="middle">07</text>
+      <text x="808" y="98" fill="#2d3142" font-size="11" font-weight="600"
+            font-family="'Geist', 'Noto Sans SC', sans-serif" text-anchor="middle">数据模型</text>
+      <circle cx="930" cy="64" r="12" fill="#2d3142"/>
+      <text x="930" y="68" fill="#f5f5f5" font-size="8" font-family="'Geist Mono', monospace"
+            text-anchor="middle">08</text>
+      <text x="930" y="98" fill="#2d3142" font-size="11" font-weight="600"
+            font-family="'Geist', 'Noto Sans SC', sans-serif" text-anchor="middle">评测</text>
+    </svg>
+  </div>
+  <main class="entries">
+    
+        <a class="entry" href="01-系统框架图.html">
+          <span class="number">01</span>
+          <span class="entry-body">
+            <span class="kind">ARCHITECTURE</span>
+            <strong>系统分层架构图</strong>
+            <span class="desc">现场线程、调度内核、评测存储和 3D 监控台的全景关系。</span>
+          </span>
+          <span class="open">打开 ↗</span>
+        </a>
+        <a class="entry" href="02-数据流详细逻辑图.html">
+          <span class="number">02</span>
+          <span class="entry-body">
+            <span class="kind">DATA FLOW</span>
+            <strong>任务调度数据流图</strong>
+            <span class="desc">从任务生成、双队列入队、动态权重、限流执行到指标发布。</span>
+          </span>
+          <span class="open">打开 ↗</span>
+        </a>
+        <a class="entry" href="03-任务生命周期状态机.html">
+          <span class="number">03</span>
+          <span class="entry-body">
+            <span class="kind">STATE MACHINE</span>
+            <strong>任务生命周期状态机</strong>
+            <span class="desc">READY / RUNNING / BLOCKED / RETRY / CACHED / DONE / FAILED / CANCELLED。</span>
+          </span>
+          <span class="open">打开 ↗</span>
+        </a>
+        <a class="entry" href="04-动态权重决策流程图.html">
+          <span class="number">04</span>
+          <span class="entry-body">
+            <span class="kind">FLOWCHART</span>
+            <strong>动态权重决策流程</strong>
+            <span class="desc">饥饿硬补偿、四因子权重、候选比较、派发与回队的决策路径。</span>
+          </span>
+          <span class="open">打开 ↗</span>
+        </a>
+        <a class="entry" href="05-调度执行时序图.html">
+          <span class="number">05</span>
+          <span class="entry-body">
+            <span class="kind">SEQUENCE</span>
+            <strong>调度执行时序图</strong>
+            <span class="desc">UAV、队列、调度器、限流器和线程池之间的消息顺序与弱网分支。</span>
+          </span>
+          <span class="open">打开 ↗</span>
+        </a>
+        <a class="entry" href="06-多基站部署拓扑图.html">
+          <span class="number">06</span>
+          <span class="entry-body">
+            <span class="kind">DEPLOYMENT</span>
+            <strong>多基站部署拓扑</strong>
+            <span class="desc">边缘节点、控制面、桌面监控台、MySQL 与结果目录的部署边界。</span>
+          </span>
+          <span class="open">打开 ↗</span>
+        </a>
+        <a class="entry" href="07-数据库实体关系图.html">
+          <span class="number">07</span>
+          <span class="entry-body">
+            <span class="kind">ER / DATA MODEL</span>
+            <strong>数据库实体关系图</strong>
+            <span class="desc">experiment 聚合根与指标、任务、队列、链路四类明细表的一对多关系。</span>
+          </span>
+          <span class="open">打开 ↗</span>
+        </a>
+        <a class="entry" href="08-实验评测流水线.html">
+          <span class="number">08</span>
+          <span class="entry-body">
+            <span class="kind">PROCESS</span>
+            <strong>实验评测流水线</strong>
+            <span class="desc">标定、轨迹生成、多策略运行、采样、指标、持久化和发布。</span>
+          </span>
+          <span class="open">打开 ↗</span>
+        </a>
+  </main>
+  <footer class="foot">
+    <span>建议阅读顺序：01 → 02 → 04 → 05 → 03 → 06 → 07 → 08</span>
+    <span>HTML / inline SVG · print-ready</span>
+  </footer>
+</div>
+</body>
+</html>

@@ -128,6 +128,13 @@
   #quorumBadge.ok{border-color:rgba(61,220,151,.45);color:#7ff0bf}
   #quorumBadge.warn{border-color:rgba(255,209,102,.5);color:#ffdf9b}
   #quorumBadge.bad{border-color:rgba(255,107,107,.55);color:#ffb0b0}
+  /* 天气来源徽章：真实快照绿色，合成天气琥珀色。 */
+  #wxSourceBadge{font:500 10px/1 ui-monospace,Consolas,monospace;letter-spacing:.2px;
+    padding:4px 8px;border-radius:7px;border:1px solid rgba(255,209,102,.38);
+    background:rgba(10,22,34,.66);color:#ffdf9b;white-space:nowrap;
+    overflow:hidden;text-overflow:ellipsis;max-width:220px}
+  #wxSourceBadge.real{border-color:rgba(61,220,151,.45);color:#7ff0bf}
+  #wxSourceBadge.synth{border-color:rgba(255,209,102,.38);color:#ffdf9b}
 /* 电影暗角：纯 CSS，零 GPU 成本 */
 .todrow{display:flex;gap:5px;margin-top:6px;flex-wrap:wrap}
 button.ghost.on{border-color:rgba(55,226,213,.75);color:#9ff7ee;
@@ -249,133 +256,999 @@ button.ghost.on{border-color:rgba(55,226,213,.75);color:#9ff7ee;
     color:#b9cbe0;white-space:pre-wrap}
   #runDlg .spin{width:12px;height:12px;border-radius:50%;border:2px solid rgba(55,226,213,.25);
     border-top-color:#37e2d5;display:inline-block;animation:spin 1s linear infinite;vertical-align:-2px}
+
+  /* ==========================================================================
+     2026-11 视觉重构：从“3D 场景 + 浮窗”升级为工程监控工作台
+     - 主叙事固定为：任务控制台 → 3D 现场 → 运行遥测
+     - 所有模块共用 8px 栅格、1px 冷灰边界和一套状态色
+     - 背景只负责氛围，信息密度由层级、对齐和数字排版承担
+     ========================================================================== */
+  :root{
+    --bg:#061014; --bg-deep:#040a0d; --surface:#0a1519; --surface-2:#0e1c21;
+    --surface-3:#12262c; --panel:rgba(10,21,25,.96);
+    --line:#20343a; --line-strong:#2b474f; --line-soft:rgba(129,174,184,.12);
+    --txt:#dfecef; --dim:#84999f; --muted:#60777d;
+    --cyan:#55d6c2; --cyan-bright:#8af4e2; --blue:#69aefc;
+    --amber:#f2b455; --green:#62d99a; --red:#f2766c;
+    --font-ui:"Bahnschrift","Microsoft YaHei UI","Noto Sans SC",sans-serif;
+    --font-mono:"Cascadia Mono","Consolas","SFMono-Regular",monospace;
+    --radius:12px;
+  }
+  html,body{
+    background:
+      radial-gradient(1100px 540px at 62% -8%,rgba(29,89,93,.16),transparent 64%),
+      radial-gradient(820px 500px at 0% 100%,rgba(28,68,81,.12),transparent 68%),
+      var(--bg);
+    color:var(--txt);font-family:var(--font-ui);
+    font-variant-numeric:tabular-nums;
+  }
+  body::before{
+    content:"";position:fixed;inset:0;pointer-events:none;z-index:0;opacity:.42;
+    background-image:
+      linear-gradient(rgba(103,154,162,.035) 1px,transparent 1px),
+      linear-gradient(90deg,rgba(103,154,162,.035) 1px,transparent 1px);
+    background-size:32px 32px;
+    mask-image:linear-gradient(180deg,#000 0%,transparent 78%);
+  }
+  ::selection{background:rgba(85,214,194,.3);color:#fff}
+  *{scrollbar-width:thin;scrollbar-color:#29434b transparent}
+  *::-webkit-scrollbar{width:8px;height:8px}
+  *::-webkit-scrollbar-thumb{background:#29434b;border-radius:8px;border:2px solid var(--bg)}
+  *::-webkit-scrollbar-track{background:transparent}
+  select,button{font-family:var(--font-ui)}
+
+  /* ---------- 顶部任务栏 ---------- */
+  #top{
+    left:0;right:0;top:0;height:72px;padding:0 16px;gap:14px;
+    display:grid;grid-template-columns:286px minmax(360px,1fr) auto auto;
+    align-items:center;background:rgba(5,13,16,.97);
+    border-bottom:1px solid var(--line);backdrop-filter:blur(14px);
+    box-shadow:0 10px 30px rgba(0,0,0,.22);overflow:visible;
+  }
+  #top::after{
+    content:"";position:absolute;left:0;right:0;bottom:-1px;height:1px;
+    background:linear-gradient(90deg,transparent,rgba(85,214,194,.55),transparent);
+    opacity:.45;
+  }
+  .brand-lockup{display:flex;align-items:center;gap:12px;min-width:0}
+  .brand-mark{
+    width:38px;height:38px;flex:none;position:relative;border:1px solid rgba(85,214,194,.45);
+    border-radius:11px;background:
+      radial-gradient(circle at 32% 28%,rgba(138,244,226,.3),transparent 42%),
+      linear-gradient(145deg,#102a30,#071116);
+    box-shadow:inset 0 0 0 1px rgba(255,255,255,.03),0 8px 24px rgba(0,0,0,.28);
+  }
+  .brand-mark::before{
+    content:"";position:absolute;inset:8px;border:1px solid rgba(85,214,194,.5);
+    transform:rotate(45deg);border-radius:4px;
+  }
+  .brand-mark::after{
+    content:"U";position:absolute;inset:0;display:grid;place-items:center;
+    font:700 12px/1 var(--font-mono);color:var(--cyan-bright);
+  }
+  .brand-copy{display:flex;flex-direction:column;gap:3px;min-width:0}
+  .eyebrow{
+    color:var(--muted);font:600 9px/1.2 var(--font-mono);
+    letter-spacing:1.55px;text-transform:uppercase;white-space:nowrap;
+  }
+  .brand-lockup .brand{
+    display:block;font:650 15px/1.2 var(--font-ui);letter-spacing:.2px;
+    color:#e9f5f6;background:none;-webkit-text-fill-color:currentColor;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  }
+  .top-controls{display:flex;align-items:center;gap:8px;min-width:0}
+  .field{
+    display:flex;flex-direction:column;gap:3px;min-width:0;
+    padding:0;background:none;border:0;
+  }
+  .field>span{
+    color:var(--muted);font:600 8.5px/1 var(--font-mono);letter-spacing:1.05px;
+    text-transform:uppercase;padding-left:1px;white-space:nowrap;
+  }
+  #top .field select{
+    height:34px;min-width:122px;max-width:220px;padding:0 30px 0 10px;
+    border:1px solid var(--line);border-radius:8px;background:#0b171c;
+    color:#d9e7ea;font-size:11.5px;
+  }
+  #top .field select:hover{border-color:var(--line-strong);background:#0e1d22}
+  #top .field select:focus{border-color:rgba(85,214,194,.7);box-shadow:0 0 0 3px rgba(85,214,194,.08)}
+  .field.scenario select{min-width:184px}
+  .field.strategy select{min-width:176px}
+  .field.speed select{min-width:72px}
+  .field.topology select{min-width:104px}
+  #topoHint{
+    position:absolute;top:60px;right:14px;max-width:300px;padding:6px 9px;
+    border:1px solid rgba(85,214,194,.4);border-radius:7px;background:#0c1b20;
+    color:var(--cyan);font:10px/1.4 var(--font-mono);z-index:60;
+  }
+  .top-actions{display:flex;align-items:center;gap:6px;justify-content:flex-end}
+  #top .top-actions button{
+    height:34px;padding:0 12px;border-radius:8px;border:1px solid var(--line);
+    background:#0c181d;color:#b9cbcf;font:600 11px/1 var(--font-ui);
+    letter-spacing:.1px;box-shadow:none;transition:border-color .16s,background .16s,color .16s;
+  }
+  #top .top-actions button:hover{border-color:var(--line-strong);background:#11242a;color:#eefafa}
+  #top .top-actions button.go{
+    background:var(--cyan);border-color:var(--cyan);color:#06201d;
+    font-weight:700;box-shadow:0 5px 16px rgba(85,214,194,.14);
+  }
+  #top .top-actions button.go:hover{background:#75e7d5;border-color:#75e7d5}
+  #top .top-actions button.stop{background:#1a1112;border-color:#412528;color:#e7a6a1}
+  #top .top-actions button.stop:hover{background:#2a1719;border-color:#633339}
+  #top .top-actions button.res{background:#111d1e;border-color:#35554e;color:#a8ded4}
+  #top .top-actions button.res.on{
+    background:rgba(85,214,194,.14);border-color:rgba(85,214,194,.8);color:var(--cyan-bright)
+  }
+  #osBtnHost{display:flex;align-items:center}
+  #osBtn{
+    height:34px!important;padding:0 11px!important;border:1px solid var(--line)!important;
+    border-radius:8px!important;background:#0c181d!important;color:#aabfc4!important;
+    font:600 11px/1 var(--font-ui)!important;margin:0!important;
+  }
+  #osBtn:hover{border-color:var(--line-strong)!important;background:#11242a!important;color:#eefafa!important}
+  #stat{
+    min-width:274px;max-width:350px;display:grid;grid-template-columns:1fr auto;
+    grid-template-areas:"status badges" "progress progress";gap:5px 8px;
+    align-items:center;margin-left:0;overflow:visible;
+  }
+  #pillStatus{
+    grid-area:status;justify-self:start;display:inline-flex;align-items:center;gap:7px;
+    max-width:100%;padding:5px 9px;border:1px solid var(--line);border-radius:7px;
+    background:#0b171b;color:#c8d9dc;font:10.5px/1.2 var(--font-mono);
+  }
+  #pillStatus::before{
+    content:"";width:6px;height:6px;border-radius:50%;background:var(--muted);
+    box-shadow:0 0 0 3px rgba(96,119,125,.1);flex:none;
+  }
+  body[data-run-state="running"] #pillStatus::before{
+    background:var(--green);box-shadow:0 0 0 3px rgba(98,217,154,.13);
+    animation:statusPulse 1.8s ease-in-out infinite;
+  }
+  body[data-run-state="finished"] #pillStatus::before{background:var(--cyan)}
+  body[data-run-state="error"] #pillStatus::before,
+  body[data-run-state="stopped"] #pillStatus::before{background:var(--red)}
+  @keyframes statusPulse{0%,100%{opacity:1}50%{opacity:.45}}
+  #stat #badges{grid-area:badges;display:flex;align-items:center;gap:4px;justify-content:flex-end;min-width:0}
+  #prog{grid-area:progress;width:100%;height:3px;border-radius:4px;background:#111f24;overflow:hidden}
+  #prog>i{background:linear-gradient(90deg,var(--blue),var(--cyan));box-shadow:0 0 8px rgba(85,214,194,.35)}
+  #gpuBadge,#fpsBadge,#quorumBadge,#wxSourceBadge{
+    max-width:150px;padding:4px 7px;border-radius:5px;border:1px solid var(--line);
+    background:#0b171b;color:#8fa5aa;font:9px/1 var(--font-mono);
+  }
+  #fpsBadge{min-width:56px;text-align:center;color:#9fc9d2}
+  #quorumBadge,#wxSourceBadge{max-width:170px;overflow:hidden;text-overflow:ellipsis}
+
+  /* ---------- 工作台布局 ---------- */
+  #workspace{
+    position:fixed;left:14px;right:14px;top:86px;bottom:14px;z-index:3;
+    display:grid;grid-template-columns:264px minmax(0,1fr) 292px;gap:12px;min-height:0;
+  }
+  .rail{display:flex;flex-direction:column;gap:12px;min-height:0;overflow:auto;padding-right:2px}
+  #workspace .panel{
+    position:relative;left:auto;right:auto;top:auto;bottom:auto;width:auto;
+    transform:none;padding:13px 14px;border-radius:var(--radius);
+    border:1px solid var(--line);background:
+      linear-gradient(180deg,rgba(17,33,39,.96),rgba(8,18,22,.97));
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.025),0 12px 28px rgba(0,0,0,.16);
+    backdrop-filter:blur(14px);z-index:5;
+  }
+  #workspace .panel::before{
+    content:"";position:absolute;left:14px;right:14px;top:0;height:1px;
+    background:linear-gradient(90deg,transparent,rgba(104,167,177,.26),transparent);
+  }
+  #workspace .panel h3{
+    margin:0;color:#d9e7ea;font:650 12px/1.3 var(--font-ui);
+    letter-spacing:.15px;text-transform:none;
+  }
+  #workspace .panel h3::before{display:none}
+  .panel-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:12px}
+  .panel-head>div{display:flex;flex-direction:column;gap:4px;min-width:0}
+  .panel-head .eyebrow{margin:0}
+  .panel-chip{
+    flex:none;padding:3px 6px;border:1px solid var(--line);border-radius:5px;
+    color:var(--dim);font:9px/1 var(--font-mono);letter-spacing:.45px;background:#0a171b;
+  }
+  .panel-chip.live{color:var(--green);border-color:rgba(98,217,154,.3);background:rgba(98,217,154,.06)}
+  .panel-chip.warn{color:var(--amber);border-color:rgba(242,180,85,.32);background:rgba(242,180,85,.06)}
+  .section-label{
+    display:flex;align-items:center;justify-content:space-between;gap:8px;
+    margin:13px 0 8px;padding-top:11px;border-top:1px solid var(--line-soft);
+    color:var(--muted);font:600 8.5px/1 var(--font-mono);letter-spacing:1.15px;text-transform:uppercase;
+  }
+  .section-label>b{color:#abc1c6;font-weight:600;letter-spacing:.2px}
+  .kv{display:flex;align-items:baseline;justify-content:space-between;gap:10px;padding:5px 0;font-size:11px}
+  .kv span{color:var(--dim);white-space:nowrap}
+  .kv b{color:#d7e6e8;font:600 11.5px/1.25 var(--font-mono);text-align:right}
+  .kv b small{font-size:8.5px;color:var(--muted);font-weight:400}
+  .sep{display:none}
+  .bar{height:6px;background:#081317;border-radius:3px;overflow:hidden;margin:4px 0 7px;border:1px solid rgba(255,255,255,.025)}
+  .bar>i{height:100%;border-radius:3px;transition:width .24s ease}
+  .legend{
+    display:flex;align-items:center;gap:7px;padding:3px 0;font-size:10px;color:var(--dim);
+  }
+  .legend .dot{width:6px;height:6px;border-radius:2px;box-shadow:none}
+
+  /* 左栏：任务总览 */
+  .fleet-hero{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;padding:2px 0 10px}
+  .fleet-hero .hero-main{display:flex;flex-direction:column;gap:3px;min-width:0}
+  .fleet-hero .hero-main b{
+    color:#f2fbfc;font:650 36px/.95 var(--font-ui);letter-spacing:-1.1px;
+  }
+  .fleet-hero .hero-main span{color:var(--dim);font:10px/1.2 var(--font-mono);letter-spacing:.45px}
+  .readiness{
+    width:66px;height:66px;border-radius:50%;flex:none;display:grid;place-items:center;
+    position:relative;background:conic-gradient(var(--cyan) 0deg,rgba(85,214,194,.1) 0);
+    transition:background .3s;
+  }
+  .readiness::before{
+    content:"";position:absolute;inset:6px;border-radius:50%;background:#0b171c;
+    border:1px solid var(--line-soft);
+  }
+  .readiness>span{
+    position:relative;z-index:1;display:flex;flex-direction:column;align-items:center;gap:1px;
+    font:10px/1 var(--font-mono);color:var(--dim);
+  }
+  .readiness>span b{color:#dff3f4;font:650 13px/1 var(--font-ui)}
+  .metric-pair{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin:2px 0 4px}
+  .mini-metric{
+    padding:8px 9px;border:1px solid var(--line-soft);border-radius:8px;background:#0a161a;
+  }
+  .mini-metric span{display:block;color:var(--muted);font:8.5px/1.2 var(--font-mono);letter-spacing:.6px;text-transform:uppercase}
+  .mini-metric b{display:block;margin-top:5px;color:#e4f2f4;font:600 17px/1 var(--font-mono)}
+  .mini-metric b small{font-size:9px;color:var(--muted);font-weight:400}
+  .quality-track{display:flex;height:7px;gap:2px;margin:3px 0 8px;overflow:hidden;border-radius:4px;background:#071216}
+  .quality-track i{display:block;height:100%;transition:width .24s ease;min-width:0}
+  .quality-track .good{background:var(--green)}
+  .quality-track .mid{background:var(--amber)}
+  .quality-track .bad{background:var(--red)}
+  .quality-list{display:grid;gap:5px}
+  .quality-list .legend{justify-content:space-between}
+  .quality-list .legend em{font-style:normal;color:#c9dddf;font:600 10px/1 var(--font-mono)}
+  .queue-row{margin-top:9px}
+  .queue-line{display:flex;align-items:flex-end;justify-content:space-between;gap:10px}
+  .queue-line span{display:flex;flex-direction:column;gap:2px;color:#c0d1d4;font-size:10.5px}
+  .queue-line span small{color:var(--muted);font:8px/1 var(--font-mono);letter-spacing:.45px;text-transform:uppercase}
+  .queue-line b{color:#eef8f9;font:600 19px/1 var(--font-mono)}
+  .queue-row .bar{margin-top:5px;height:5px}
+  .load-readout{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px}
+  .load-readout b{font:650 17px/1 var(--font-mono);color:var(--cyan-bright)}
+  .load-readout b.hot{color:var(--red)}
+  .load-readout span{font:8.5px/1 var(--font-mono);color:var(--muted);letter-spacing:.55px}
+
+  /* 中央 3D 现场 */
+  #stage{
+    position:relative;min-width:0;min-height:0;overflow:hidden;border-radius:14px;
+    border:1px solid var(--line-strong);background:#071014;
+    box-shadow:inset 0 0 0 1px rgba(255,255,255,.018),0 18px 42px rgba(0,0,0,.26);
+  }
+  #stage #app{position:absolute;inset:0;z-index:0;overflow:hidden}
+  #stage #app canvas{display:block}
+  #stage #vignette{
+    position:absolute;inset:0;z-index:1;pointer-events:none;
+    background:
+      linear-gradient(180deg,rgba(3,9,12,.48),transparent 18%,transparent 72%,rgba(3,9,12,.62)),
+      radial-gradient(ellipse at 50% 48%,transparent 46%,rgba(2,8,10,.3) 100%);
+  }
+  #stage::after{
+    content:"";position:absolute;inset:0;z-index:2;pointer-events:none;
+    box-shadow:inset 0 0 0 1px rgba(137,186,194,.05);
+  }
+  .stage-hud{
+    position:absolute;left:12px;right:12px;top:12px;z-index:6;
+    display:flex;align-items:flex-start;justify-content:space-between;gap:12px;pointer-events:none;
+  }
+  .hud-block{
+    min-width:0;padding:8px 10px;border:1px solid rgba(101,151,159,.22);border-radius:9px;
+    background:rgba(4,12,15,.72);backdrop-filter:blur(10px);
+    box-shadow:0 8px 24px rgba(0,0,0,.18);
+  }
+  .hud-block.primary{display:flex;align-items:center;gap:10px}
+  .hud-rule{width:2px;height:29px;background:linear-gradient(180deg,var(--cyan),transparent);border-radius:2px}
+  .hud-copy{display:flex;flex-direction:column;gap:3px;min-width:0}
+  .hud-copy .eyebrow{font-size:8px;letter-spacing:1.3px}
+  .hud-copy b{color:#edf9fa;font:600 12px/1.1 var(--font-ui);white-space:nowrap}
+  .hud-copy span{color:#91a8ad;font:9px/1 var(--font-mono)}
+  .hud-meta{display:flex;align-items:center;gap:8px}
+  .hud-meta .hud-block{display:flex;align-items:center;gap:7px;padding:7px 9px}
+  .hud-meta .hud-block b{color:#dcebed;font:600 9.5px/1 var(--font-mono)}
+  .hud-meta .hud-block span{color:var(--muted);font:8.5px/1 var(--font-mono)}
+  .signal-dot{width:6px;height:6px;border-radius:50%;background:var(--green);box-shadow:0 0 0 3px rgba(98,217,154,.1)}
+  .stage-coord{
+    position:absolute;left:16px;bottom:190px;z-index:4;color:rgba(174,201,205,.48);
+    font:8.5px/1.5 var(--font-mono);letter-spacing:.45px;pointer-events:none;text-transform:uppercase;
+    writing-mode:vertical-rl;transform:rotate(180deg);
+  }
+  .stage-reticle{
+    position:absolute;left:50%;top:51%;width:34px;height:34px;z-index:3;
+    transform:translate(-50%,-50%);opacity:.24;pointer-events:none;
+  }
+  .stage-reticle::before,.stage-reticle::after{
+    content:"";position:absolute;background:rgba(138,244,226,.7);
+  }
+  .stage-reticle::before{left:0;right:0;top:16px;height:1px}
+  .stage-reticle::after{top:0;bottom:0;left:16px;width:1px}
+
+  /* 场景底部图表 */
+  #stage #chartbox{
+    position:absolute;left:12px;right:12px;bottom:12px;z-index:7;
+    padding:11px 13px 9px;border-radius:11px;background:rgba(6,16,20,.9);
+    border-color:rgba(93,150,159,.26);box-shadow:0 16px 36px rgba(0,0,0,.28);
+  }
+  .chart-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:6px}
+  .chart-head>div{display:flex;flex-direction:column;gap:3px}
+  .chart-head h3{font-size:11.5px}
+  .chart-head .eyebrow{font-size:8px}
+  .chart-head .chart-now{
+    color:var(--muted);font:8.5px/1 var(--font-mono);padding:4px 6px;border:1px solid var(--line-soft);
+    border-radius:5px;background:#09151a;
+  }
+  .chart-body{display:grid;grid-template-columns:minmax(0,1fr) 156px;gap:14px;align-items:stretch}
+  .chart-main{min-width:0}
+  #chart{width:100%;height:94px;display:block}
+  .chart-legend{margin-top:2px!important;gap:14px!important;justify-content:flex-start!important;font-size:9px!important}
+  .chart-readout{
+    display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--line-soft);
+    border:1px solid var(--line-soft);border-radius:7px;overflow:hidden;
+  }
+  .chart-readout div{background:#081419;padding:7px 8px;min-width:0}
+  .chart-readout span{display:block;color:var(--muted);font:7.5px/1 var(--font-mono);letter-spacing:.55px;text-transform:uppercase}
+  .chart-readout b{display:block;margin-top:4px;color:#dcebed;font:600 13px/1 var(--font-mono)}
+
+  /* 右栏：运行遥测 */
+  .run-verdict{
+    display:flex;align-items:center;justify-content:space-between;gap:10px;
+    padding:9px 10px;margin-bottom:9px;border:1px solid var(--line-soft);
+    border-radius:8px;background:#09161a;
+  }
+  .run-verdict>div{display:flex;flex-direction:column;gap:4px}
+  .run-verdict b{color:#d8e7e9;font:650 17px/1 var(--font-ui)}
+  .verdict-mark{
+    width:9px;height:9px;border-radius:50%;background:var(--muted);flex:none;
+    box-shadow:0 0 0 4px rgba(96,119,125,.1);
+  }
+  .run-verdict.stable .verdict-mark{background:var(--green);box-shadow:0 0 0 4px rgba(98,217,154,.1)}
+  .run-verdict.watch .verdict-mark{background:var(--amber);box-shadow:0 0 0 4px rgba(242,180,85,.1)}
+  .run-verdict.risk .verdict-mark{background:var(--red);box-shadow:0 0 0 4px rgba(242,118,108,.11)}
+  .kpi-grid{display:grid;grid-template-columns:1fr 1fr;gap:7px}
+  .kpi-cell{
+    padding:9px 10px;border:1px solid var(--line-soft);border-radius:8px;background:#09161a;
+    min-width:0;
+  }
+  .kpi-cell.wide{grid-column:span 2;background:linear-gradient(135deg,#0a191d,#0c1d22)}
+  .kpi-cell span{display:block;color:var(--muted);font:8px/1.2 var(--font-mono);letter-spacing:.55px;text-transform:uppercase}
+  .kpi-cell b{display:block;margin-top:6px;color:#e5f3f5;font:600 18px/1.05 var(--font-mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .kpi-cell.wide b{font-size:22px;color:var(--cyan-bright)}
+  .telemetry-list{margin-top:9px;border-top:1px solid var(--line-soft);padding-top:7px}
+  .telemetry-list .kv{padding:4.5px 0;font-size:10px}
+  .telemetry-list .kv b{font-size:10.5px}
+  .result-strip{display:grid;grid-template-columns:1fr 1fr 1fr;gap:1px;margin-top:10px;background:var(--line-soft);border:1px solid var(--line-soft);border-radius:8px;overflow:hidden}
+  .result-strip>div{background:#09161a;padding:8px;min-width:0}
+  .result-strip span{display:block;color:var(--muted);font:7.5px/1.1 var(--font-mono);letter-spacing:.4px;text-transform:uppercase}
+  .result-strip b{display:block;margin-top:5px;color:#dbeaec;font:600 11px/1.15 var(--font-mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .consensus-list{margin-top:1px}
+  .consensus-list .kv span{max-width:112px;overflow:hidden;text-overflow:ellipsis}
+  .consensus-list .kv b{max-width:150px;overflow:hidden;text-overflow:ellipsis}
+
+  /* 左栏：机位与光照 */
+  .camera-grid{display:grid;grid-template-columns:1fr 1fr;gap:5px}
+  #hint .camera-grid button,#hint .todrow button{
+    height:29px;padding:0 6px;border:1px solid var(--line-soft);border-radius:6px;
+    background:#09161a;color:#a9bdc1;font:10px/1 var(--font-ui);
+  }
+  #hint .camera-grid button:hover,#hint .todrow button:hover{border-color:var(--line-strong);background:#102229;color:#eaf6f7}
+  #hint .camera-grid button.on,#hint .todrow button.on{color:var(--cyan-bright);border-color:rgba(85,214,194,.55);background:rgba(85,214,194,.08)}
+  #hint .todrow{display:grid;grid-template-columns:repeat(4,1fr);gap:5px;margin-top:5px}
+  .control-note{margin-top:9px;color:var(--muted);font:8.5px/1.5 var(--font-mono);letter-spacing:.2px}
+
+  /* 右栏：环境与渲染 */
+  .env-grid{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--line-soft);border:1px solid var(--line-soft);border-radius:8px;overflow:hidden}
+  .env-grid>div{background:#09161a;padding:8px;min-width:0}
+  .env-grid span{display:block;color:var(--muted);font:7.5px/1.1 var(--font-mono);letter-spacing:.4px;text-transform:uppercase}
+  .env-grid b{display:block;margin-top:5px;color:#d8e8ea;font:600 11px/1.15 var(--font-mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .render-stats{margin-top:8px}
+  .render-stats .kv{padding:3.5px 0;font-size:9.5px}
+  .render-stats .kv b{font-size:9.8px}
+  #rnd .advanced{margin-top:5px;border-top:1px solid var(--line-soft);padding-top:5px}
+  #rnd .advanced summary{
+    list-style:none;display:flex;align-items:center;justify-content:space-between;gap:8px;
+    cursor:pointer;color:#8fa5aa;font:600 8px/1.2 var(--font-mono);letter-spacing:.7px;
+  }
+  #rnd .advanced summary::-webkit-details-marker{display:none}
+  #rnd .advanced summary b{color:var(--muted);font:8px/1 var(--font-mono);font-weight:500}
+  #rnd .advanced summary::after{content:"+";color:var(--cyan);font:12px/1 var(--font-mono);margin-left:2px}
+  #rnd .advanced[open] summary::after{content:"−"}
+  #rnd .advanced-body{padding-top:4px}
+  #rnd .todrow{display:flex;gap:4px;flex-wrap:wrap;margin-top:5px}
+  #rnd .todrow button{
+    min-width:42px;height:26px;padding:0 7px;border:1px solid var(--line-soft);
+    border-radius:5px;background:#09161a;color:#a2b7bb;font:9.5px/1 var(--font-ui);
+  }
+  #rnd .todrow button:hover{border-color:var(--line-strong);background:#102229;color:#eaf6f7}
+  #rnd .todrow button.on{color:var(--cyan-bright);border-color:rgba(85,214,194,.55);background:rgba(85,214,194,.08)}
+  #rnd .weather-state{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
+  #rnd .weather-state b{color:#dcebed;font:600 13px/1 var(--font-ui)}
+  #rnd .weather-state span{color:var(--amber);font:9px/1 var(--font-mono)}
+
+  /* ---------- 结果工作区 ---------- */
+  #rx{
+    background:
+      radial-gradient(1000px 560px at 70% -10%,rgba(31,93,95,.14),transparent 64%),
+      var(--bg);
+    backdrop-filter:none;
+  }
+  #rx .rxbar{
+    display:grid;grid-template-columns:auto minmax(260px,1fr) auto;
+    grid-template-areas:"title meta actions" "tabs tabs tabs";
+    gap:9px 18px;align-items:center;padding:14px 20px 0;
+    border-bottom:1px solid var(--line);background:rgba(5,13,16,.94);
+    backdrop-filter:blur(14px);flex-wrap:nowrap;
+  }
+  #rx .rx-title{grid-area:title;display:flex;align-items:center;gap:11px}
+  #rx .rx-title .brand-mark{width:32px;height:32px;border-radius:9px}
+  #rx .rx-title .brand-mark::before{inset:7px}
+  #rx .rx-title .brand-mark::after{content:"R"}
+  #rx .rx-title>div{display:flex;flex-direction:column;gap:3px}
+  #rx .rxbar h2{
+    margin:0;font:650 17px/1 var(--font-ui);letter-spacing:.2px;color:#eaf6f7;
+    background:none;-webkit-text-fill-color:currentColor;
+  }
+  #rx .rx-meta{grid-area:meta;min-width:0;display:flex;align-items:center;gap:8px}
+  #rx .rxbar .src{
+    color:var(--muted);font:9.5px/1.4 var(--font-mono);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  }
+  #rx .rx-actions{grid-area:actions;display:flex;align-items:center;gap:6px;justify-content:flex-end}
+  #rx .rx-actions button{
+    height:31px;padding:0 10px;border:1px solid var(--line);border-radius:7px;
+    background:#0b171b;color:#aabfc3;font:10px/1 var(--font-ui);
+  }
+  #rx .rx-actions button:hover{border-color:var(--line-strong);background:#102229;color:#edf7f8}
+  #rx .tabs{
+    grid-area:tabs;display:flex;align-items:stretch;gap:0;flex-wrap:nowrap;
+    border-top:1px solid var(--line-soft);overflow:hidden;
+  }
+  #rx .tabs button{
+    position:relative;height:40px;padding:0 16px;border:0;border-radius:0;
+    background:transparent;color:#7f969c;font:600 10.5px/1 var(--font-ui);
+    letter-spacing:.1px;white-space:nowrap;
+  }
+  #rx .tabs button:hover{color:#c3d6d9;background:rgba(255,255,255,.018)}
+  #rx .tabs button.on{color:var(--cyan-bright);background:rgba(85,214,194,.045)}
+  #rx .tabs button.on::after{
+    content:"";position:absolute;left:14px;right:14px;bottom:0;height:2px;
+    background:var(--cyan);border-radius:2px 2px 0 0;
+  }
+  #rx .body{
+    padding:16px 20px 34px;background:
+      linear-gradient(rgba(103,154,162,.022) 1px,transparent 1px),
+      linear-gradient(90deg,rgba(103,154,162,.022) 1px,transparent 1px);
+    background-size:36px 36px;
+  }
+  .rx-snapshot{
+    display:grid;grid-template-columns:repeat(5,minmax(130px,1fr));gap:8px;
+    margin-bottom:14px;
+  }
+  .rx-snapshot-card{
+    min-width:0;padding:10px 11px;border:1px solid var(--line);border-radius:9px;
+    background:linear-gradient(180deg,#0d1b20,#091419);
+  }
+  .rx-snapshot-card span{
+    display:block;color:var(--muted);font:7.5px/1.2 var(--font-mono);
+    letter-spacing:.75px;text-transform:uppercase;
+  }
+  .rx-snapshot-card b{
+    display:block;margin-top:6px;color:#dcebed;font:600 14px/1.1 var(--font-mono);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  }
+  .rx-snapshot-card small{
+    display:block;margin-top:4px;color:#6f858b;font:8.5px/1.3 var(--font-mono);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  }
+  .rx-snapshot-card.good b{color:var(--green)}
+  .rx-snapshot-card.warn b{color:var(--amber)}
+  .rx-insights{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;margin-bottom:14px}
+  .rx-insight{
+    position:relative;overflow:hidden;padding:12px 13px;border:1px solid var(--line);
+    border-radius:10px;background:linear-gradient(145deg,#0d1b20,#09151a);
+  }
+  .rx-insight::after{
+    content:"";position:absolute;right:-12px;top:-20px;width:70px;height:70px;border-radius:50%;
+    border:1px solid rgba(85,214,194,.09);
+  }
+  .rx-insight span{display:block;color:var(--muted);font:8px/1.2 var(--font-mono);letter-spacing:.7px;text-transform:uppercase}
+  .rx-insight b{display:block;margin-top:8px;color:#edf8f9;font:650 19px/1 var(--font-mono)}
+  .rx-insight em{display:block;margin-top:6px;font:normal 9px/1.35 var(--font-mono);color:var(--dim)}
+  .rx-insight em.good{color:var(--green)}
+  .rx-insight em.warn{color:var(--amber)}
+  #rx .sec{
+    padding:14px 15px 16px;margin-bottom:14px;border:1px solid var(--line);
+    border-radius:11px;background:rgba(8,18,22,.86);
+  }
+  #rx .sec h3{
+    margin:0 0 4px;color:#dfeef0;font:650 12px/1.3 var(--font-ui);
+    letter-spacing:.1px;display:flex;align-items:center;gap:8px;
+  }
+  #rx .sec h3::before{
+    content:"";width:3px;height:12px;border-radius:2px;background:var(--cyan);flex:none;
+  }
+  #rx .sec h3 em{
+    margin-left:auto;color:var(--muted);font:8.5px/1.3 var(--font-mono);
+    letter-spacing:.2px;white-space:nowrap;
+  }
+  #rx .sec .note{color:#7c9298;font:9.5px/1.55 var(--font-mono);margin:4px 0 11px}
+  #rx .grid{grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:11px}
+  #rx .card{
+    position:relative;background:#0b171b;border-color:var(--line);
+    border-radius:9px;overflow:hidden;
+  }
+  #rx .card:hover{
+    border-color:rgba(85,214,194,.5);transform:translateY(-2px);
+    box-shadow:0 14px 28px rgba(0,0,0,.28);
+  }
+  #rx .card .thumb{
+    aspect-ratio:16/9;object-fit:cover;background:#f7f8f8;border-bottom:1px solid var(--line-soft);
+  }
+  #rx .card .cap{padding:9px 10px 10px;min-width:0}
+  #rx .card .cap b{font:600 10.5px/1.35 var(--font-ui);color:#d5e5e7}
+  #rx .card .cap span{display:block;margin-top:4px;color:#687f85;font:8px/1.25 var(--font-mono)}
+  #rx .card .card-no{
+    position:absolute;left:8px;top:8px;z-index:2;padding:3px 5px;border-radius:4px;
+    background:rgba(5,14,17,.78);border:1px solid rgba(137,186,194,.25);
+    color:#c8e9e5;font:8px/1 var(--font-mono);backdrop-filter:blur(6px);
+  }
+  #rx .kpis{grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
+  #rx .kpi{
+    background:linear-gradient(180deg,#0d1b20,#091419);border-color:var(--line);
+    padding:10px 11px;border-radius:8px;
+  }
+  #rx .kpi span{font:8px/1.2 var(--font-mono);letter-spacing:.55px;text-transform:uppercase}
+  #rx .kpi b{display:block;margin-top:6px;font:600 19px/1 var(--font-mono);color:#e4f2f4}
+  #rx .kpi b small{font-size:9px;color:var(--muted)}
+  .live-bottom{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(260px,.7fr);gap:9px;margin-top:10px}
+  .live-panel{border:1px solid var(--line);border-radius:8px;background:#09151a;padding:10px 11px;min-width:0}
+  .pipeline{display:flex;align-items:center;gap:7px;margin:5px 0 8px}
+  .pipe-node{
+    flex:1;min-width:0;padding:9px 10px;border:1px solid var(--line-soft);border-radius:7px;
+    background:#0c1b20;
+  }
+  .pipe-node span{display:block;color:var(--muted);font:7.5px/1 var(--font-mono);letter-spacing:.55px}
+  .pipe-node b{display:block;margin-top:5px;color:#deedef;font:600 16px/1 var(--font-mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .pipe-arrow{color:var(--cyan);font:12px/1 var(--font-mono);font-style:normal;flex:none}
+  .pipe-rail{height:5px;border-radius:4px;background:#071216;overflow:hidden}
+  .pipe-rail i{display:block;height:100%;background:linear-gradient(90deg,var(--blue),var(--cyan));border-radius:4px}
+  .value-warn{color:var(--amber)!important}
+  #rx .table-wrap{
+    border:1px solid var(--line);border-radius:8px;overflow:auto;max-height:calc(100vh - 300px);
+    background:#09151a;
+  }
+  #rx table{font-size:10px;font-variant-numeric:tabular-nums;border-collapse:separate;border-spacing:0}
+  #rx th,#rx td{
+    padding:7px 9px;border-bottom:1px solid rgba(129,174,184,.1);border-right:1px solid rgba(129,174,184,.05);
+    text-align:right;
+  }
+  #rx th{
+    top:0;background:#0d1c21;color:#849ba1;font:600 8.5px/1.2 var(--font-mono);
+    letter-spacing:.2px;white-space:nowrap;border-bottom-color:var(--line-strong);z-index:2;
+  }
+  #rx td{color:#b7c9cd}
+  #rx td.l,#rx th.l{text-align:left}
+  #rx tbody tr:nth-child(even){background:rgba(255,255,255,.012)}
+  #rx tbody tr:hover{background:rgba(85,214,194,.045)}
+  #rx tbody tr.row-dynamic{
+    background:linear-gradient(90deg,rgba(85,214,194,.08),rgba(85,214,194,.025));
+    box-shadow:inset 3px 0 0 var(--cyan);
+  }
+  #rx .empty{
+    color:#81979d;font:10px/1.7 var(--font-mono);padding:20px;border:1px dashed var(--line-strong);
+    border-radius:9px;background:#09151a;
+  }
+  #rx code{background:rgba(85,214,194,.08);color:#9ce7dc;border:1px solid rgba(85,214,194,.12)}
+  #rx .tip{color:#657b81;font:8.8px/1.55 var(--font-mono)}
+  .replay-layout{display:grid;grid-template-columns:minmax(0,1fr) 214px;gap:11px;align-items:stretch}
+  .replay-main,.replay-side{border:1px solid var(--line);border-radius:9px;background:#09151a;min-width:0}
+  .replay-main{padding:10px}
+  .replay-side{padding:10px;display:flex;flex-direction:column;gap:8px}
+  #rx .replay{display:flex;gap:9px;flex-wrap:wrap;align-items:center;margin-bottom:9px}
+  #rx .replay label{color:var(--muted);font:8.5px/1 var(--font-mono);letter-spacing:.4px}
+  #rx .replay select{height:30px;min-width:220px;font-size:10px;background:#0b171b}
+  #rx .replay button{height:30px;font-size:10px}
+  #rx canvas.rp{
+    width:100%;height:clamp(340px,48vh,470px);display:block;background:#071217;
+    border:1px solid var(--line-soft);border-radius:7px;
+  }
+  .readout-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+  .readout{padding:9px;border:1px solid var(--line-soft);border-radius:7px;background:#0b171b}
+  .readout span{display:block;color:var(--muted);font:7.5px/1 var(--font-mono);letter-spacing:.55px;text-transform:uppercase}
+  .readout b{display:block;margin-top:6px;color:#deedef;font:600 16px/1 var(--font-mono)}
+  .replay-side .kv{padding:4px 0;font-size:9.5px}
+  .replay-side .kv b{font-size:9.5px}
+  #rx input[type=range]{accent-color:var(--cyan);height:4px}
+  #rx .replay-side .tip{margin:auto 0 0}
+  #rx .replay-side .replay-meta{padding-top:8px;border-top:1px solid var(--line-soft)}
+  #rx .replay-side .replay-meta #rpInfo{color:#7e969c;font:8.5px/1.5 var(--font-mono);margin:0}
+
+  /* 弹窗与灯箱沿用工作台材质 */
+  #runDlg{background:rgba(2,8,10,.78)}
+  #runDlg .box{background:#0a171b;border-color:var(--line-strong);border-radius:12px}
+  #runDlg .hd{border-bottom-color:var(--line)}
+  #runDlg .hd h3{color:#dcebed;font:650 13px/1.3 var(--font-ui)}
+  #runDlg .ft{border-top-color:var(--line)}
+  #runDlg .opt{border-color:var(--line);background:#0b171b}
+  #runDlg .opt:hover{border-color:var(--line-strong);background:#102229}
+  #runDlg .opt.on{border-color:rgba(85,214,194,.6);background:rgba(85,214,194,.06)}
+  #lb{background:rgba(2,8,10,.97)}
+  #lb .lbar{background:#081419;border-bottom-color:var(--line)}
+
+  @media (max-width:1500px){
+    #top{grid-template-columns:250px minmax(330px,1fr) auto auto;gap:10px}
+    .brand-lockup .brand{font-size:14px}
+    #top .field select{min-width:108px}
+    .field.scenario select{min-width:164px}
+    .field.strategy select{min-width:158px}
+    #gpuBadge{display:none}
+    #stat{min-width:248px}
+  }
+  @media (max-width:1320px){
+    #top{grid-template-columns:220px minmax(300px,1fr) auto auto}
+    .brand-copy .eyebrow{display:none}
+    .brand-lockup .brand{font-size:13px}
+    #top .field select{font-size:10.5px}
+    .field.scenario select{min-width:144px}
+    .field.strategy select{min-width:140px}
+    #fpsBadge,#quorumBadge{display:none}
+    #stat{min-width:190px;max-width:220px}
+    #workspace{grid-template-columns:236px minmax(0,1fr) 270px}
+    #rx .rx-snapshot{grid-template-columns:repeat(3,minmax(130px,1fr))}
+    .rx-insights{grid-template-columns:repeat(2,minmax(0,1fr))}
+  }
+  @media (max-width:1160px){
+    #top{grid-template-columns:205px minmax(280px,1fr) auto;height:68px}
+    #stat{display:none}
+    .field.speed,.field.topology{display:none}
+    #workspace{top:80px;grid-template-columns:220px minmax(0,1fr) 250px;gap:9px}
+    #top .top-actions button{padding:0 9px}
+    .replay-layout{grid-template-columns:1fr}
+    #rx .replay-side{display:grid;grid-template-columns:1fr 1fr}
+  }
+
+  /* 终检：压缩顶栏与右栏，让 1480×920 首屏不靠滚动也能看到核心信息 */
+  #top{grid-template-columns:260px minmax(0,1fr) auto 270px}
+  #top .top-controls{min-width:0}
+  #top .field{flex:0 1 auto}
+  #top .field.scenario{flex:1 1 152px;max-width:176px}
+  #top .field.strategy{flex:1 1 148px;max-width:178px}
+  #top .field.speed{flex:0 0 72px}
+  #top .field.topology{flex:0 0 94px}
+  #top .field select{width:100%;min-width:0;max-width:100%}
+  #quorumBadge{display:none!important}
+  #stat{width:270px;min-width:270px;max-width:270px;grid-template-columns:minmax(0,1fr) auto}
+  #pillStatus{max-width:148px;overflow:hidden;text-overflow:ellipsis}
+  #workspace .panel{padding:11px 12px}
+  #railRight{gap:9px}
+  .panel-head{margin-bottom:9px}
+  .section-label{margin:10px 0 7px;padding-top:8px}
+  .run-verdict{padding:7px 9px;margin-bottom:7px}
+  .kpi-cell{padding:7px 8px}
+  .kpi-cell b{font-size:13.5px}
+  .kpi-cell.wide b{font-size:20px}
+  .telemetry-list{margin-top:7px;padding-top:5px}
+  .telemetry-list .kv{padding:3.4px 0}
+  .result-strip>div{padding:6px 7px}
+  .result-strip b{font-size:10px}
+  .consensus-list .kv{padding:3.7px 0}
+  #rx .rx-title{align-items:center}
+  #rx .rxbar h2{line-height:1.24;padding-top:1px}
+  .rx-title .eyebrow{line-height:1.1}
+  #rx .rx-snapshot{margin-bottom:11px}
+  .rx-snapshot-card{padding:9px 10px}
+  .rx-insight{padding:10px 12px}
+  @media (max-width:1320px){
+    #top{grid-template-columns:220px minmax(0,1fr) auto 204px}
+    #stat{width:204px;min-width:204px;max-width:204px}
+    .field.speed{display:none}
+    #top .field.scenario{max-width:150px}
+    #top .field.strategy{max-width:150px}
+    #top .field.topology{flex-basis:88px}
+  }
+  @media (max-width:1160px){
+    #top{grid-template-columns:205px minmax(0,1fr) auto;height:68px}
+    #stat{display:none}
+    #workspace{top:80px;grid-template-columns:220px minmax(0,1fr) 250px;gap:9px}
+  }
 </style>
 </head>
 <body>
-<div id="app"></div>
-<div id="vignette"></div>
-<i class="corner c1"></i><i class="corner c2"></i><i class="corner c3"></i><i class="corner c4"></i>
-
-<div id="top">
-  <i class="logo"></i>
-  <span class="brand">无人机集群并发自适应调度仿真系统</span>
-  <span class="sub">智慧地质勘查 · 3D 实时可视化</span>
-  <div class="ctrl" style="margin-left:16px">
-    <label>工况</label><select id="scn"></select>
-    <label>策略</label><select id="sch"></select>
-    <label>速度</label>
-    <select id="spd">
-      <option value="0.5">0.5×</option><option value="1" selected>1×</option>
-      <option value="2">2×</option><option value="4">4×</option>
-    </select>
+<header id="top">
+  <div class="brand-lockup">
+    <i class="brand-mark"></i>
+    <div class="brand-copy">
+      <span class="eyebrow">UAV SWARM / MISSION CONTROL</span>
+      <span class="brand">智慧地质勘查 · 集群调度</span>
+    </div>
   </div>
-  <!-- 拓扑：只设"会话默认值"（/api/topology），下一次点「开始仿真」才生效。
-       为什么不直接改 /api/start 的参数：运行中换拓扑会让正在跑的仿真状态错乱。 -->
-  <div class="ctrl" style="margin-left:10px">
-    <label>拓扑</label>
-    <select id="topo" title="多基站拓扑（改动在重启仿真后生效）">
-      <option value="1">单站</option>
-      <option value="triple">3 站·端-边-云</option>
-    </select>
+
+  <div class="top-controls">
+    <label class="field scenario">
+      <span>工况 / SCENARIO</span>
+      <select id="scn"></select>
+    </label>
+    <label class="field strategy">
+      <span>策略 / SCHEDULER</span>
+      <select id="sch"></select>
+    </label>
+    <label class="field speed">
+      <span>倍率 / SPEED</span>
+      <select id="spd">
+        <option value="0.5">0.5×</option><option value="1" selected>1×</option>
+        <option value="2">2×</option><option value="4">4×</option>
+      </select>
+    </label>
+    <label class="field topology">
+      <span>拓扑 / TOPOLOGY</span>
+      <select id="topo" title="多基站拓扑（改动在重启仿真后生效）">
+        <option value="1">单站</option>
+        <option value="triple">3 站 · 端-边-云</option>
+      </select>
+    </label>
     <span id="topoHint"></span>
   </div>
-  <button class="go" id="btnStart">▶ 开始仿真</button>
-  <button class="stop" id="btnStop">■ 停止</button>
-  <!-- 仿真结果：打开"已落盘实验产物"的浏览界面（charts/*.png + summary.csv + 时序回放）。
-       为什么放在这一排：用户的动作序列就是"跑 -> 看结果"，按钮跟控制按钮挨着最顺手。 -->
-  <button class="res" id="btnResults" title="查看已落盘的实验结果（图表 / 矩阵 / 时序回放）">📊 仿真结果</button>
+
+  <div class="top-actions">
+    <button class="go" id="btnStart">▶ 开始仿真</button>
+    <button class="stop" id="btnStop">■ 停止</button>
+    <button class="res" id="btnResults" title="查看已落盘的实验结果（图表 / 矩阵 / 时序回放）">▦ 仿真结果</button>
+    <span id="osBtnHost"></span>
+  </div>
+
   <div id="stat">
-    <div id="prog"><i></i></div>
     <span id="pillStatus">未开始</span>
-    <span id="quorumBadge" title="quorum 共识：任期 / 各分区组是否达到多数派">quorum -</span>
-    <span id="gpuBadge" title="渲染后端">GPU 检测中…</span>
-    <span id="fpsBadge">-- fps</span>
+    <div id="badges">
+      <span id="quorumBadge" title="quorum 共识：任期 / 各分区组是否达到多数派">quorum -</span>
+      <span id="wxSourceBadge" title="天气数据来源：合成 / 真实快照">天气 合成</span>
+      <span id="gpuBadge" title="渲染后端">GPU 检测中…</span>
+      <span id="fpsBadge">-- fps</span>
+    </div>
+    <div id="prog"><i></i></div>
   </div>
-</div>
+</header>
 
-<div class="panel" id="left">
-  <h3>机群状态</h3>
-  <div class="kv"><span>在线 / 总数</span><b id="fOn">0 / 0</b></div>
-  <div class="kv"><span>上传中</span><b id="fBusy">0</b></div>
-  <div class="kv"><span>链路健康均值</span><b id="fHealth">-</b></div>
-  <div class="bar"><i id="fHealthBar" style="width:0;background:linear-gradient(90deg,#ff6b6b,#ffd166,#3ddc97)"></i></div>
-  <div class="sep"></div>
-  <div class="legend"><i class="dot" style="background:#3ddc97"></i>优质链路 ≥85</div>
-  <div class="legend"><i class="dot" style="background:#ffd166"></i>一般 55~85</div>
-  <div class="legend"><i class="dot" style="background:#ff6b6b"></i>弱网 &lt;55</div>
-  <div class="sep"></div>
-  <div class="kv"><span>高优队列（勘查）</span><b id="qHi">0</b></div>
-  <div class="bar"><i id="qHiBar" style="background:linear-gradient(90deg,#2f7ff5,#4ea1ff)"></i></div>
-  <div class="kv"><span>低优队列（运维）</span><b id="qLo">0</b></div>
-  <div class="bar"><i id="qLoBar" style="background:linear-gradient(90deg,#b9761a,#f5a623)"></i></div>
-  <div class="kv"><span>系统负载</span><b id="qLoad">0.00</b></div>
-  <div class="bar"><i id="qLoadBar" style="background:linear-gradient(90deg,#3ddc97,#ffd166,#ff6b6b)"></i></div>
-</div>
+<main id="workspace">
+  <aside class="rail" id="railLeft">
+    <section class="panel" id="left">
+      <div class="panel-head">
+        <div><span class="eyebrow">FLEET TELEMETRY</span><h3>机群状态</h3></div>
+        <span class="panel-chip" id="fleetStateChip">STANDBY</span>
+      </div>
 
-<div class="panel" id="right">
-  <h3>实时指标</h3>
-  <div class="kv"><span>仿真时间</span><b id="mTime">0 / 0 s</b></div>
-  <div class="kv"><span>已提交 / 已完成</span><b id="mTasks">0 / 0</b></div>
-  <div class="kv"><span>吞吐量</span><b id="mThr">0.00 个/s</b></div>
-  <div class="kv"><span>弱网重传累计</span><b id="mRetry">0</b></div>
-  <div class="kv"><span>阻塞 / 待重传</span><b id="mBlock">0 / 0</b></div>
-  <div class="kv"><span>被抢占</span><b id="mPre">0</b></div>
-  <div class="kv"><span>上下文切换</span><b id="mCtx">0</b></div>
-  <div class="kv"><span>时间片 高/低</span><b id="mSlice">- / -</b></div>
-  <div class="kv"><span>限流 / 拒绝大任务</span><b id="mLim">0 / 0</b></div>
-  <div class="kv"><span>过载累计</span><b id="mOver">0 s</b></div>
-  <div class="sep"></div>
-  <h3>本次结果</h3>
-  <div class="kv"><span>完成率</span><b id="rCompl">-</b></div>
-  <div class="kv"><span>高/低优平均等待</span><b id="rWait">-</b></div>
-  <div class="kv"><span>低优饥饿率</span><b id="rStarve">-</b></div>
-  <!-- 分布式共识（教学用最小 quorum，见 docs/11 §5）：单站时恒为 1/1 且不显示异常 -->
-  <div class="sep"></div>
-  <h3>分布式共识</h3>
-  <div class="kv"><span>任期 / 多数派</span><b id="qTerm">- / -</b></div>
-  <div class="kv"><span>分区视图</span><b id="qGroups">-</b></div>
-  <div class="kv"><span>已提交 / 被拒写</span><b id="qCommit">- / -</b></div>
-  <div class="kv"><span>未确认（待重放）</span><b id="qUncommitted">-</b></div>
-</div>
+      <div class="fleet-hero">
+        <div class="hero-main">
+          <b id="fOn">0 / 0</b>
+          <span>ONLINE / TOTAL NODES</span>
+        </div>
+        <div class="readiness" id="readinessRing">
+          <span><b id="readinessPct">0%</b>READY</span>
+        </div>
+      </div>
 
-<div class="panel" id="chartbox">
-  <h3>就绪队列深度 / 系统负载 / 时间片</h3>
-  <canvas id="chart" height="82"></canvas>
-  <div class="legend" style="justify-content:space-between;margin-top:2px">
-    <span><i class="dot" style="background:#4ea1ff"></i>高优队列</span>
-    <span><i class="dot" style="background:#f5a623"></i>低优队列</span>
-    <span><i class="dot" style="background:#3ddc97"></i>系统负载</span>
-    <span>左键旋转 · 滚轮缩放 · 右键平移</span>
-  </div>
-</div>
+      <div class="metric-pair">
+        <div class="mini-metric"><span>UPLINK ACTIVE</span><b id="fBusy">0</b></div>
+        <div class="mini-metric"><span>LINK HEALTH</span><b id="fHealth">-</b></div>
+      </div>
+      <div class="bar"><i id="fHealthBar" style="width:0;background:linear-gradient(90deg,#f2766c,#f2b455,#62d99a)"></i></div>
 
-<div class="panel" id="hint">
-  <h3>机位</h3>
-  <button class="ghost" data-cam="iso">立体视角</button>
-  <button class="ghost" data-cam="top">俯视</button>
-  <button class="ghost" data-cam="station">地面站</button>
-  <button class="ghost" data-cam="pit">矿区</button>
-  <button class="ghost" data-cam="follow">跟随</button>
-  <button class="ghost" data-cam="orbit">环绕巡航</button>
-  <div class="todrow">
-    <button class="ghost" data-tod="dawn">黎明</button>
-    <button class="ghost" data-tod="noon">正午</button>
-    <button class="ghost" data-tod="dusk">黄昏</button>
-    <button class="ghost" data-tod="night">夜景</button>
-  </div>
-</div>
+      <div class="section-label"><span>LINK QUALITY</span><b id="linkSummary">0 / 0 / 0</b></div>
+      <div class="quality-track">
+        <i class="good" id="linkGoodSeg" style="width:0"></i>
+        <i class="mid" id="linkMidSeg" style="width:0"></i>
+        <i class="bad" id="linkBadSeg" style="width:0"></i>
+      </div>
+      <div class="quality-list">
+        <div class="legend"><i class="dot" style="background:#62d99a"></i>优质 ≥85 <em id="linkGoodCount">0</em></div>
+        <div class="legend"><i class="dot" style="background:#f2b455"></i>一般 55–84 <em id="linkMidCount">0</em></div>
+        <div class="legend"><i class="dot" style="background:#f2766c"></i>弱网 &lt;55 <em id="linkBadCount">0</em></div>
+      </div>
+
+      <div class="section-label"><span>READY QUEUES</span><b>HIGH / LOW</b></div>
+      <div class="queue-row">
+        <div class="queue-line">
+          <span>高优 · 勘查<small>PRIORITY / SURVEY</small></span>
+          <b id="qHi">0</b>
+        </div>
+        <div class="bar"><i id="qHiBar" style="background:linear-gradient(90deg,#4a82c8,#69aefc)"></i></div>
+      </div>
+      <div class="queue-row">
+        <div class="queue-line">
+          <span>低优 · 运维<small>PRIORITY / OPS</small></span>
+          <b id="qLo">0</b>
+        </div>
+        <div class="bar"><i id="qLoBar" style="background:linear-gradient(90deg,#a97727,#f2b455)"></i></div>
+      </div>
+
+      <div class="section-label"><span>SYSTEM PRESSURE</span><b id="loadState">NORMAL</b></div>
+      <div class="load-readout">
+        <span>LOAD FACTOR</span>
+        <b id="qLoad">0.00</b>
+      </div>
+      <div class="bar"><i id="qLoadBar" style="background:linear-gradient(90deg,#62d99a,#f2b455,#f2766c)"></i></div>
+    </section>
+
+    <section class="panel" id="hint">
+      <div class="panel-head">
+        <div><span class="eyebrow">VIEWPORT CONTROL</span><h3>机位与光照</h3></div>
+        <span class="panel-chip">3D</span>
+      </div>
+      <div class="section-label"><span>CAMERA</span><b>6 PRESETS</b></div>
+      <div class="camera-grid">
+        <button class="ghost" data-cam="iso">立体视角</button>
+        <button class="ghost" data-cam="top">俯视</button>
+        <button class="ghost" data-cam="station">地面站</button>
+        <button class="ghost" data-cam="pit">矿区</button>
+        <button class="ghost" data-cam="follow">跟随</button>
+        <button class="ghost" data-cam="orbit">环绕巡航</button>
+      </div>
+      <div class="section-label"><span>TIME OF DAY</span><b>ATMOSPHERE</b></div>
+      <div class="todrow">
+        <button class="ghost" data-tod="dawn">黎明</button>
+        <button class="ghost" data-tod="noon">正午</button>
+        <button class="ghost" data-tod="dusk">黄昏</button>
+        <button class="ghost" data-tod="night">夜景</button>
+      </div>
+      <div class="control-note">左键旋转 · 滚轮缩放 · 右键平移<br>昼 / 夜切换仅影响场景光照，不改调度指标。</div>
+    </section>
+  </aside>
+
+  <section id="stage">
+    <div id="app"></div>
+    <div id="vignette"></div>
+    <div class="stage-reticle"></div>
+
+    <div class="stage-hud">
+      <div class="hud-block primary">
+        <i class="hud-rule"></i>
+        <div class="hud-copy">
+          <span class="eyebrow">ACTIVE MISSION / LIVE FIELD</span>
+          <b id="stageScenario">高并发峰值勘查</b>
+          <span id="stageScheduler">动态权重自适应</span>
+        </div>
+      </div>
+      <div class="hud-meta">
+        <div class="hud-block"><i class="signal-dot"></i><span>LIVE</span><b id="stageClock">--:--:--</b></div>
+        <div class="hud-block"><span>TOPOLOGY</span><b id="stageTopology">SINGLE</b></div>
+        <div class="hud-block"><span>SECTOR</span><b>07-FS</b></div>
+      </div>
+    </div>
+
+    <div class="stage-coord">FUSHUN MINING AREA · 41.88N 123.91E · SURVEY GRID 07</div>
+
+    <section class="panel" id="chartbox">
+      <div class="chart-head">
+        <div><span class="eyebrow">SCHEDULER TRACE / ROLLING WINDOW</span><h3>就绪队列深度 / 系统负载 / 时间片</h3></div>
+        <span class="chart-now" id="chartWindow">WINDOW 00:00 / 00:00</span>
+      </div>
+      <div class="chart-body">
+        <div class="chart-main">
+          <canvas id="chart" height="94"></canvas>
+          <div class="legend chart-legend">
+            <span><i class="dot" style="background:#69aefc"></i>高优队列</span>
+            <span><i class="dot" style="background:#f2b455"></i>低优队列</span>
+            <span><i class="dot" style="background:#62d99a"></i>系统负载</span>
+          </div>
+        </div>
+        <div class="chart-readout">
+          <div><span>HIGH Q</span><b id="chartQHi">0</b></div>
+          <div><span>LOW Q</span><b id="chartQLow">0</b></div>
+          <div><span>LOAD</span><b id="chartLoad">0.00</b></div>
+          <div><span>RUNNING</span><b id="chartRunning">0</b></div>
+          <div><span>BLOCKED</span><b id="chartBlocked">0</b></div>
+          <div><span>SLICE</span><b id="chartSlice">-</b></div>
+        </div>
+      </div>
+    </section>
+  </section>
+
+  <aside class="rail" id="railRight">
+    <section class="panel" id="right">
+      <div class="panel-head">
+        <div><span class="eyebrow">RUNTIME TELEMETRY</span><h3>实时性能</h3></div>
+        <span class="panel-chip" id="runStateChip">IDLE</span>
+      </div>
+
+      <div class="run-verdict" id="runVerdictBox">
+        <div><span class="eyebrow">RUN ASSESSMENT</span><b id="runVerdict">待命</b></div>
+        <i class="verdict-mark"></i>
+      </div>
+
+      <div class="kpi-grid">
+        <div class="kpi-cell wide"><span>THROUGHPUT</span><b id="mThr">0.00 个/s</b></div>
+        <div class="kpi-cell"><span>SIM TIME</span><b id="mTime">0 / 0 s</b></div>
+        <div class="kpi-cell"><span>SUBMITTED / DONE</span><b id="mTasks">0 / 0</b></div>
+      </div>
+
+      <div class="telemetry-list">
+        <div class="kv"><span>弱网重传累计</span><b id="mRetry">0</b></div>
+        <div class="kv"><span>阻塞 / 待重传</span><b id="mBlock">0 / 0</b></div>
+        <div class="kv"><span>被抢占 / 上下文切换</span><b><span id="mPre">0</span> / <span id="mCtx">0</span></b></div>
+        <div class="kv"><span>时间片 高 / 低</span><b id="mSlice">- / -</b></div>
+        <div class="kv"><span>限流 / 拒绝大任务</span><b id="mLim">0 / 0</b></div>
+        <div class="kv"><span>过载累计</span><b id="mOver">0 s</b></div>
+      </div>
+
+      <div class="section-label"><span>RUN OUTCOME</span><b>SETTLED</b></div>
+      <div class="result-strip">
+        <div><span>完成率</span><b id="rCompl">-</b></div>
+        <div><span>高/低等待</span><b id="rWait">-</b></div>
+        <div><span>低优饥饿</span><b id="rStarve">-</b></div>
+      </div>
+
+      <div class="section-label"><span>DISTRIBUTED CONSENSUS</span><b>QUORUM</b></div>
+      <div class="consensus-list">
+        <div class="kv"><span>任期 / 多数派</span><b id="qTerm">- / -</b></div>
+        <div class="kv"><span>分区视图</span><b id="qGroups">-</b></div>
+        <div class="kv"><span>已提交 / 被拒写</span><b id="qCommit">- / -</b></div>
+        <div class="kv"><span>未确认（待重放）</span><b id="qUncommitted">-</b></div>
+      </div>
+    </section>
+
+    <section class="panel" id="rnd">
+      <div class="panel-head">
+        <div><span class="eyebrow">ENVIRONMENT / RENDER</span><h3>环境与渲染</h3></div>
+        <span class="panel-chip" id="weatherTag">SYNTH</span>
+      </div>
+
+      <div class="weather-state"><b id="wName">晴朗</b><span id="wSource">合成</span></div>
+      <div class="env-grid">
+        <div><span>VISIBILITY</span><b id="wVis">-</b></div>
+        <div><span>LINK LOSS</span><b id="wPen">-</b></div>
+        <div><span>SSAO COST</span><b id="wMs">-</b></div>
+        <div><span>TERRAIN TRI</span><b id="wTri">-</b></div>
+      </div>
+      <div class="render-stats">
+        <div class="kv"><span>观测 / 采集时间</span><b id="wFetched">-</b></div>
+        <div class="kv"><span>HUD 任务箭头</span><b id="wArr">-</b></div>
+      </div>
+
+      <details class="advanced">
+        <summary><span>WEATHER PRESET / RENDER MODULES</span><b>ADVANCED</b></summary>
+        <div class="advanced-body">
+          <div class="section-label"><span>WEATHER PRESET</span><b>LINK PENALTY</b></div>
+          <div class="todrow" id="wxRow">
+            <button class="ghost" data-wx="clear">晴</button>
+            <button class="ghost" data-wx="rain">雨</button>
+            <button class="ghost" data-wx="snow">雪</button>
+            <button class="ghost" data-wx="dust">沙尘</button>
+          </div>
+          <div class="section-label"><span>RENDER MODULES</span><b>GPU PATH</b></div>
+          <div class="todrow" id="rndRow">
+            <button class="ghost" data-rnd="ssao">SSAO</button>
+            <button class="ghost" data-rnd="lod">地形 LOD</button>
+            <button class="ghost" data-rnd="flow">任务流</button>
+            <button class="ghost" data-rnd="waterfall">瀑布图</button>
+            <button class="ghost" data-rnd="wx">天气粒子</button>
+          </div>
+        </div>
+      </details>
+    </section>
+  </aside>
+</main>
 
 <!-- ===================== 「仿真结果」全屏浏览界面（默认隐藏） ===================== -->
 <div id="rx">
   <div class="rxbar">
-    <h2>📊 仿真结果</h2>
-    <span class="src" id="rxSrc">读取中…</span>
+    <div class="rx-title">
+      <i class="brand-mark"></i>
+      <div>
+        <span class="eyebrow">EXPERIMENT ARCHIVE / READ ONLY</span>
+        <h2>仿真结果</h2>
+      </div>
+    </div>
+    <div class="rx-meta"><span class="src" id="rxSrc">读取中…</span></div>
     <div class="tabs" id="rxTabs"></div>
-    <span class="sp"></span>
-    <button class="ghost" id="rxRun" title="在后台重跑一次实验（会覆盖对应产物，先备份 summary.csv）">↻ 重跑</button>
-    <button class="ghost" id="rxExport" title="把图表 + 结论表 + 自动生成的结论摘要打成一个 zip">⤓ 导出素材包</button>
-    <button class="ghost" id="rxReload" title="重新读取磁盘上的实验产物（不会重跑实验）">↻ 刷新</button>
-    <button class="ghost" id="rxClose" title="关闭（Esc）">✕ 关闭</button>
+    <div class="rx-actions">
+      <button class="ghost" id="rxRun" title="在后台重跑一次实验（会覆盖对应产物，先备份 summary.csv）">↻ 重跑</button>
+      <button class="ghost" id="rxExport" title="把图表 + 结论表 + 自动生成的结论摘要打成一个 zip">⤓ 导出素材包</button>
+      <button class="ghost" id="rxReload" title="重新读取磁盘上的实验产物（不会重跑实验）">↻ 刷新</button>
+      <button class="ghost" id="rxClose" title="关闭（Esc）">✕ 关闭</button>
+    </div>
   </div>
   <div class="body" id="rxBody"></div>
 </div>
@@ -409,33 +1282,6 @@ button.ghost.on{border-color:rgba(55,226,213,.75);color:#9ff7ee;
     <button class="ghost" id="lbClose">✕ 关闭（Esc）</button>
   </div>
   <div class="lbody"><img id="lbImg" alt=""></div>
-</div>
-
-<!-- ===== 渲染增强（3D 升级）控制台：天气与模块开关 ===== -->
-<div class="panel" id="rnd">
-  <h3>渲染增强 · 天气与模块</h3>
-  <div class="kv"><span>天气</span><b id="wName" class="wv">晴朗</b></div>
-  <div class="kv"><span>能见度</span><b id="wVis" class="wv">-</b></div>
-  <div class="kv"><span>链路衰减</span><b id="wPen" class="wv">-</b></div>
-  <div class="sep"></div>
-  <div class="kv"><span>SSAO 耗时</span><b id="wMs" class="wv">-</b></div>
-  <div class="kv"><span>地形三角形</span><b id="wTri" class="wv">-</b></div>
-  <div class="kv"><span>HUD 箭头</span><b id="wArr" class="wv">-</b></div>
-  <div class="sep"></div>
-  <div class="kv" style="font-size:11px;color:var(--dim)"><span>天气工况（改链路健康度）</span></div>
-  <div class="todrow" id="wxRow">
-    <button class="ghost" data-wx="clear">晴</button>
-    <button class="ghost" data-wx="rain">雨</button>
-    <button class="ghost" data-wx="snow">雪</button>
-    <button class="ghost" data-wx="dust">沙尘</button>
-  </div>
-  <div class="todrow" id="rndRow" style="margin-top:7px">
-    <button class="ghost" data-rnd="ssao">SSAO</button>
-    <button class="ghost" data-rnd="lod">地形LOD</button>
-    <button class="ghost" data-rnd="flow">任务流</button>
-    <button class="ghost" data-rnd="waterfall">瀑布图</button>
-    <button class="ghost" data-rnd="wx">天气粒子</button>
-  </div>
 </div>
 
 <div id="banner"></div>
@@ -2131,8 +2977,9 @@ function initUpgradeModules() {
   // 旧版只有"雾 + 粒子"，没有分级 → 雾色把动态范围压扁，雨/雪/沙尘都糊成单色。
   if (composer && window.UAVWeatherGrade && typeof UAVWeatherGrade.create === "function") {
     try {
+      const vpGrade = stageViewport();
       gradeFX = UAVWeatherGrade.create({
-        THREE, composer, renderer, width: innerWidth, height: innerHeight,
+        THREE, composer, renderer, width: vpGrade.w, height: vpGrade.h,
       });
       if (gradeFX) {
         composer.addPass(gradeFX.pass);
@@ -2207,6 +3054,14 @@ function fitSprites() {
   }
 }
 
+function stageViewport() {
+  const stage = document.getElementById("stage");
+  return {
+    w: Math.max(320, stage ? stage.clientWidth : innerWidth),
+    h: Math.max(260, stage ? stage.clientHeight : innerHeight),
+  };
+}
+
 function initScene() {
   const fail = (msg) => {
     document.getElementById("loading").innerHTML =
@@ -2218,8 +3073,9 @@ function initScene() {
       preserveDrawingBuffer: STILL });   // 静态模式保留缓冲，否则截图会抓到已清空的画布
   } catch (e) { fail(e.message); return; }
 
+  const vp0 = stageViewport();
   renderer.setPixelRatio(Math.min(devicePixelRatio || 1, RENDER.maxPixelRatio));
-  renderer.setSize(innerWidth, innerHeight);
+  renderer.setSize(vp0.w, vp0.h);
   renderer.shadowMap.enabled = RENDER.shadows;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   if (THREE.sRGBEncoding) renderer.outputEncoding = THREE.sRGBEncoding;
@@ -2230,7 +3086,7 @@ function initScene() {
   scene = new THREE.Scene();
   scene.fog = new THREE.FogExp2(0x0b1a26, 0.0016);
 
-  camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.5, 5200);
+  camera = new THREE.PerspectiveCamera(50, vp0.w / vp0.h, 0.5, 5200);
   /* `?cam=station`：起动时直接落到「地面站」机位 —— 给**多基站全景图**用。
      需要它的原因（实测踩坑）：OrbitControls 的 update() 在 `follow` 或
      autoRotate 模式下会每帧改写相机位姿，用 setTimeout 事后切机位会被下一帧
@@ -2305,7 +3161,7 @@ function initScene() {
     composer = new THREE.EffectComposer(renderer);
     composer.addPass(new THREE.RenderPass(scene, camera));
     bloomPass = new THREE.UnrealBloomPass(
-      new THREE.Vector2(innerWidth, innerHeight),
+      new THREE.Vector2(vp0.w, vp0.h),
       RENDER.bloomStrength, RENDER.bloomRadius, RENDER.bloomThreshold);
     composer.addPass(bloomPass);
   } catch (e) {
@@ -2324,14 +3180,20 @@ function initScene() {
   _step("⑧ 渲染增强…");
   initUpgradeModules();
 
-  addEventListener("resize", () => {
-    camera.aspect = innerWidth / innerHeight;
+  const onStageResize = () => {
+    const vp = stageViewport();
+    camera.aspect = vp.w / vp.h;
     camera.updateProjectionMatrix();
-    renderer.setSize(innerWidth, innerHeight);
-    if (composer) composer.setSize(innerWidth, innerHeight);
-    if (gradeFX && gradeFX.setSize) { try { gradeFX.setSize(innerWidth, innerHeight); } catch (e) {} }
-    if (ssaoFX && ssaoFX.setSize) { try { ssaoFX.setSize(innerWidth, innerHeight); } catch (e) {} }
-  });
+    renderer.setSize(vp.w, vp.h);
+    if (composer) composer.setSize(vp.w, vp.h);
+    if (gradeFX && gradeFX.setSize) { try { gradeFX.setSize(vp.w, vp.h); } catch (e) {} }
+    if (ssaoFX && ssaoFX.setSize) { try { ssaoFX.setSize(vp.w, vp.h); } catch (e) {} }
+  };
+  addEventListener("resize", onStageResize);
+  if (typeof ResizeObserver !== "undefined") {
+    const stageEl = document.getElementById("stage");
+    if (stageEl) new ResizeObserver(onStageResize).observe(stageEl);
+  }
 
   const el = document.getElementById("loading");
   el.style.opacity = "0";
@@ -2638,12 +3500,62 @@ function updateQuorum(live) {
   setText("qUncommitted", uncomm);
 }
 
+function setChip(id, text, tone) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = text;
+  el.classList.remove("live", "warn");
+  if (tone) el.classList.add(tone);
+}
+
+function updateRunAssessment(st, live, hAvg, load) {
+  const box = document.getElementById("runVerdictBox");
+  let cls = "", verdict = "待命", chip = "IDLE", fleet = "STANDBY", detail = "等待启动仿真";
+  if (st.status === "running") {
+    const stressed = load > 1.15 || (hAvg > 0 && hAvg < 60);
+    cls = stressed ? "watch" : "stable";
+    verdict = stressed ? "负载关注" : "运行稳定";
+    chip = "RUNNING";
+    fleet = "ACTIVE";
+    detail = "系统负载 " + load.toFixed(2) + " · 平均链路健康 " + (hAvg || 0).toFixed(1);
+  } else if (st.status === "finished") {
+    const sm = st.summary || {};
+    const completion = Number(sm.completion_rate);
+    const starvation = Number(sm.starvation_rate_low);
+    const warning = (isFinite(completion) && completion < 95)
+      || (isFinite(starvation) && starvation > 5);
+    cls = warning ? "watch" : "stable";
+    verdict = warning ? "结果待复核" : "结果稳定";
+    chip = "FINISHED";
+    fleet = "SETTLED";
+    detail = "完成率 " + (isFinite(completion) ? completion.toFixed(2) + "%" : "-")
+      + " · 低优饥饿 " + (isFinite(starvation) ? starvation.toFixed(2) + "%" : "-");
+  } else if (st.status === "error") {
+    cls = "risk"; verdict = "运行异常"; chip = "ALERT"; fleet = "ALERT";
+    detail = st.error || "仿真内核返回错误";
+  } else if (st.status === "stopped") {
+    cls = "watch"; verdict = "已停止"; chip = "STOPPED"; fleet = "HOLD";
+    detail = "本轮已手动停止";
+  }
+  if (box) {
+    box.className = "run-verdict" + (cls ? " " + cls : "");
+    box.title = detail;
+  }
+  setText("runVerdict", verdict);
+  setChip("runStateChip", chip, cls === "risk" ? "warn" : (cls === "stable" ? "live" : (cls === "watch" ? "warn" : "")));
+  setChip("fleetStateChip", fleet, st.status === "running" ? "live" : (st.status === "error" ? "warn" : ""));
+}
+
 function applyState(st) {
   const live = st.live;
+  document.body.dataset.runState = st.status || "idle";
   const map = { idle: "未开始", running: "仿真中", finished: "已完成", stopped: "已停止", error: "出错" };
   let txt = map[st.status] || st.status;
-  if (st.scenario_label) txt += " · " + st.scenario_label + " × " + (st.scheduler_label || "");
+  const schShort = { dynamic: "DYN", cross_node: "X-NODE", mlfq: "MLFQ", priority: "PRIO", rr: "RR", fcfs: "FCFS" };
+  if (st.scenario) txt += " · " + st.scenario + (st.scheduler ? " · " + (schShort[st.scheduler] || String(st.scheduler).toUpperCase()) : "");
   setText("pillStatus", txt);
+  setText("stageScenario", st.scenario_label || "高并发峰值勘查");
+  setText("stageScheduler", (st.scheduler_label || "动态权重自适应") + (st.mec ? " · MEC" : ""));
   document.querySelector("#prog>i").style.width =
     (live ? Math.min(100, live.sim_time / Math.max(0.001, live.duration_s) * 100) : 0) + "%";
 
@@ -2660,7 +3572,7 @@ function applyState(st) {
   // 每机接入站 + 链路健康度矩阵（契约新增键）；缺失时 bindDroneStation 内部有兜底
   const sof = (live && live.station_of_uav) || null;
   const lmx = (live && live.link_matrix) || null;
-  let hs = 0, on = 0, busy = 0;
+  let hs = 0, on = 0, busy = 0, good = 0, mid = 0, bad = 0;
   state.drones.forEach(d => {
     const u = live && live.uav_states ? live.uav_states[String(d.id)] : null;
     d.health = u ? u.health : 100;
@@ -2670,7 +3582,12 @@ function applyState(st) {
     d.priority = t ? t.priority : null;
     d.progress = t ? t.progress : 0;
     try { bindDroneStation(d, sof, lmx); } catch (eBd) { /* 单机绑定失败不能拖垮整轮刷新 */ }
-    if (d.online) { hs += d.health; on++; }
+    if (d.online) {
+      hs += d.health; on++;
+      if (d.health >= 85) good++;
+      else if (d.health >= 55) mid++;
+      else bad++;
+    }
     if (d.busy) busy++;
   });
   const hAvg = on ? hs / on : 0;
@@ -2678,11 +3595,34 @@ function applyState(st) {
   setText("fBusy", busy);
   setText("fHealth", on ? hAvg.toFixed(1) : "-");
   document.getElementById("fHealthBar").style.width = hAvg + "%";
+  const onlinePct = state.drones.length ? Math.round(on / state.drones.length * 100) : 0;
+  setText("readinessPct", onlinePct + "%");
+  const ring = document.getElementById("readinessRing");
+  if (ring) {
+    ring.style.background = "conic-gradient("
+      + (onlinePct >= 90 ? "var(--green)" : onlinePct >= 60 ? "var(--amber)" : "var(--red)")
+      + " " + (onlinePct * 3.6) + "deg, rgba(85,214,194,.08) 0)";
+  }
+  const onlineTotal = Math.max(1, on);
+  const goodPct = good / onlineTotal * 100, midPct = mid / onlineTotal * 100, badPct = bad / onlineTotal * 100;
+  document.getElementById("linkGoodSeg").style.width = goodPct + "%";
+  document.getElementById("linkMidSeg").style.width = midPct + "%";
+  document.getElementById("linkBadSeg").style.width = badPct + "%";
+  setText("linkGoodCount", good);
+  setText("linkMidCount", mid);
+  setText("linkBadCount", bad);
+  setText("linkSummary", good + " / " + mid + " / " + bad);
 
   const qh = live ? live.queue.high : 0, ql = live ? live.queue.low : 0;
   const load = live ? live.system_load : 0;
   setText("qHi", qh); setText("qLo", ql);
-  setText("qLoad", load.toFixed(2) + (load > 1 ? " 过载" : ""));
+  setText("qLoad", load.toFixed(2));
+  const loadEl = document.getElementById("qLoad");
+  if (loadEl) loadEl.classList.toggle("hot", load > 1);
+  setText("loadState", load > 1.3 ? "OVERLOAD" : load > 1 ? "ELEVATED" : "NORMAL");
+  setText("chartQHi", qh);
+  setText("chartQLow", ql);
+  setText("chartLoad", load.toFixed(2));
   document.getElementById("qHiBar").style.width = Math.min(100, qh / 120 * 100) + "%";
   document.getElementById("qLoBar").style.width = Math.min(100, ql / 120 * 100) + "%";
   document.getElementById("qLoadBar").style.width = Math.min(100, load / 2 * 100) + "%";
@@ -2700,24 +3640,57 @@ function applyState(st) {
        直接显示会变成 "1000000000 ms"，对用户毫无意义 —— 这里翻译成人话。 */
     const sliceTxt = (v) => (v >= 1e6 ? "不抢占" : v.toFixed(0) + " ms");
     setText("mSlice", sliceTxt(s.high_time_slice_ms) + " / " + sliceTxt(s.low_time_slice_ms));
+    const sliceShort = (v) => (v >= 1e6 ? "∞" : Math.round(v));
+    setText("chartSlice", sliceShort(s.high_time_slice_ms) + " / " + sliceShort(s.low_time_slice_ms));
+    setText("chartRunning", (live.running_tasks || []).length);
+    setText("chartBlocked", c.blocked || 0);
+    setText("chartWindow", live.sim_time.toFixed(0).padStart(2, "0") + " / "
+      + live.duration_s.toFixed(0).padStart(2, "0") + " S");
+    const nStations = (live.stations || []).length;
+    setText("stageTopology", nStations > 1 ? (nStations + " STATIONS") : (live.mec ? "EDGE MEC" : "SINGLE"));
     setText("mLim", l.throttled + " / " + l.rejected_large);
     setText("mOver", live.overload_seconds.toFixed(1) + " s");
+  } else {
+    setText("chartRunning", 0);
+    setText("chartBlocked", 0);
+    setText("chartSlice", "-");
+    setText("chartWindow", "00 / 00 S");
+    setText("stageTopology", "SINGLE");
   }
   const sm = st.summary || {};
   setText("rCompl", sm.completion_rate !== undefined ? sm.completion_rate.toFixed(2) + " %" : "-");
+  const compactMs = (v) => {
+    const n = Number(v);
+    if (!isFinite(n)) return "-";
+    return n >= 1000 ? (n / 1000).toFixed(1) + "k" : n.toFixed(0);
+  };
   setText("rWait", sm.avg_wait_high_ms !== undefined
-    ? sm.avg_wait_high_ms.toFixed(0) + " / " + sm.avg_wait_low_ms.toFixed(0) + " ms" : "-");
+    ? compactMs(sm.avg_wait_high_ms) + " / " + compactMs(sm.avg_wait_low_ms) + " ms" : "-");
   setText("rStarve", sm.starvation_rate_low !== undefined
     ? sm.starvation_rate_low.toFixed(2) + " %" : "-");
+  updateRunAssessment(st, live, hAvg, load);
   // ---- 天气联动：后端 /api/state.weather → 面板读数 + 3D 天气效果 ----
   // 天气不是纯滤镜：它是后端按工况算出的链路衰减（link_penalty），
   // 会真的压低健康度 -> 影响动态权重 -> 影响指标。画面与指标是同一份数据。
   const wx = st.weather || null;
   if (wx) {
     state.wx = wx;
+    const wxReal = wx.source === "real";
+    const wxStamp = String(wx.observed_at || wx.fetched_at || "-").replace("T", " ");
     setText("wName", wx.label || wx.preset || "-");
+    setText("wSource", wxReal ? "真实快照" : "合成");
+    setText("weatherTag", wxReal ? "REAL" : "SYNTH");
+    setText("wFetched", wxStamp);
     setText("wVis", (wx.visibility_km != null ? Number(wx.visibility_km).toFixed(1) + " km" : "-"));
     setText("wPen", (wx.link_penalty != null ? "-" + Number(wx.link_penalty).toFixed(1) + " 分" : "0 分"));
+    const wxBadge = document.getElementById("wxSourceBadge");
+    if (wxBadge) {
+      wxBadge.textContent = wxReal ? ("天气 真实 · " + wxStamp) : "天气 合成";
+      wxBadge.className = wxReal ? "real" : "synth";
+      wxBadge.title = wxReal
+        ? "真实天气快照（Open-Meteo），观测时间 " + wxStamp
+        : "内置合成天气模型（默认离线）";
+    }
     if (weatherFX && weatherFX.apply) { try { weatherFX.apply(wx); } catch (e) { /* 忽略 */ } }
     document.querySelectorAll("[data-wx]").forEach(b => b.classList.toggle("on", b.dataset.wx === wx.preset));
   }
@@ -3065,7 +4038,7 @@ function animate() {
 function drawChart(live) {
   const cv = document.getElementById("chart");
   const dpr = Math.min(devicePixelRatio || 1, 2);
-  const w = Math.max(60, cv.clientWidth || 300), h = 82;
+  const w = Math.max(60, cv.clientWidth || 300), h = Math.max(60, cv.clientHeight || 94);
   const wantW = Math.floor(w * dpr), wantH = Math.floor(h * dpr);
   if (cv.width !== wantW && wantW < 4096) { cv.width = wantW; cv.height = wantH; }
   const g = cv.getContext("2d");
@@ -3107,14 +4080,21 @@ async function initControls() {
   const r = await fetch("/api/state", { cache: "no-store" });
   const st = await r.json();
   const scn = document.getElementById("scn"), sch = document.getElementById("sch");
+  const scnShort = { LIGHT: "轻载巡检", NORMAL: "常规勘查", PEAK: "峰值勘查" };
+  const schShort = { fcfs: "FCFS", rr: "RR", priority: "静态优先", mlfq: "MLFQ",
+    dynamic: "动态自适应", cross_node: "跨节点" };
   scn.innerHTML = ""; sch.innerHTML = "";
   (st.scenarios || []).forEach(o => {
     const e = document.createElement("option"); e.value = o.code;
-    e.textContent = o.code + " · " + o.label; scn.appendChild(e);
+    e.textContent = o.code + " · " + (scnShort[o.code] || o.label);
+    e.title = o.code + " · " + o.label;
+    scn.appendChild(e);
   });
   (st.schedulers || []).forEach(o => {
     const e = document.createElement("option"); e.value = o.code;
-    e.textContent = o.label; sch.appendChild(e);
+    e.textContent = schShort[o.code] || o.label;
+    e.title = o.label;
+    sch.appendChild(e);
   });
   scn.value = "PEAK"; sch.value = "dynamic";
 }
@@ -3156,6 +4136,14 @@ async function initTopology() {
     }
   };
 }
+
+function tickMissionClock() {
+  const d = new Date();
+  setText("stageClock", d.toLocaleTimeString("zh-CN", { hour12: false }));
+}
+tickMissionClock();
+setInterval(tickMissionClock, 1000);
+
 document.getElementById("btnStart").onclick = async () => {
   const q = "?scenario=" + document.getElementById("scn").value
           + "&scheduler=" + document.getElementById("sch").value
@@ -3190,6 +4178,67 @@ function _fmtSize(b) {
   return n > 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.round(n / 1024) + " KB";
 }
 
+function htmlResultSnapshot(d) {
+  const sum = d.summary || {};
+  const raw = d.raw || {};
+  const images = (d.images || []).reduce((n, s) => n + (s.images || []).length, 0);
+  const groups = (d.images || []).filter((s) => (s.images || []).length).length;
+  const traces = (raw.items || []).length;
+  const ciRows = ((d.replication_ci || {}).rows || []).length;
+  const complete = !!(sum.exists && (sum.rows || []).length);
+  return '<div class="rx-snapshot">' +
+    '<div class="rx-snapshot-card ' + (complete ? "good" : "warn") + '"><span>MATRIX STATUS</span><b>' +
+      (complete ? "READY" : "MISSING") + '</b><small>' + ((sum.rows || []).length) + ' rows · 3 scenarios × 5 schedulers</small></div>' +
+    '<div class="rx-snapshot-card"><span>TRACE FILES</span><b>' + traces +
+      '</b><small>queue samples · 500 ms grid</small></div>' +
+    '<div class="rx-snapshot-card"><span>CHART ASSETS</span><b>' + images +
+      '</b><small>' + groups + ' groups · PNG exports</small></div>' +
+    '<div class="rx-snapshot-card"><span>CI SAMPLE ROWS</span><b>' + ciRows +
+      '</b><small>mean ± 95% half-width</small></div>' +
+    '<div class="rx-snapshot-card"><span>LAST GENERATED</span><b>' +
+      (sum.generated_at || "—") + '</b><small>seed ' + (sum.seed || "—") + '</small></div>' +
+    '</div>';
+}
+
+function _matrixRow(sum, scenario, scheduler) {
+  return ((sum || {}).rows || []).find((r) =>
+    String(r.scenario || "").toUpperCase() === scenario &&
+    String(r.scheduler || "").toLowerCase() === scheduler) || null;
+}
+
+function htmlResultInsights(sum) {
+  const rows = (sum || {}).rows || [];
+  if (!rows.length) return "";
+  const dyn = _matrixRow(sum, "PEAK", "dynamic");
+  const fcfs = _matrixRow(sum, "PEAK", "fcfs");
+  const maxThr = rows.reduce((a, r) => (!a || Number(r.throughput) > Number(a.throughput) ? r : a), null);
+  const maxDone = rows.reduce((a, r) => (!a || Number(r.completion_rate) > Number(a.completion_rate) ? r : a), null);
+  const cards = [];
+  if (dyn && fcfs) {
+    const diff = Number(dyn.completion_rate) - Number(fcfs.completion_rate);
+    cards.push('<div class="rx-insight"><span>PEAK / COMPLETION</span><b>' +
+      _fmtNum(dyn.completion_rate, 2) + '%</b><em class="' + (diff >= 0 ? "good" : "warn") + '">' +
+      '较 FCFS ' + (diff >= 0 ? "+" : "") + _fmtNum(diff, 2) + ' pp</em></div>');
+    const sd = Number(dyn.starvation_rate_low) - Number(fcfs.starvation_rate_low);
+    cards.push('<div class="rx-insight"><span>PEAK / LOW-PRIO STARVATION</span><b>' +
+      _fmtNum(dyn.starvation_rate_low, 2) + '%</b><em class="' + (sd <= 0 ? "good" : "warn") + '">' +
+      '较 FCFS ' + (sd >= 0 ? "+" : "") + _fmtNum(sd, 2) + ' pp</em></div>');
+  }
+  if (maxThr) {
+    cards.push('<div class="rx-insight"><span>THROUGHPUT PEAK</span><b>' +
+      _fmtNum(maxThr.throughput, 3) + '/s</b><em>' +
+      (maxThr.scenario_label || maxThr.scenario) + ' · ' + (maxThr.scheduler_label || maxThr.scheduler) +
+      '</em></div>');
+  }
+  if (maxDone) {
+    cards.push('<div class="rx-insight"><span>BEST COMPLETION</span><b>' +
+      _fmtNum(maxDone.completion_rate, 2) + '%</b><em>' +
+      (maxDone.scenario_label || maxDone.scenario) + ' · ' + (maxDone.scheduler_label || maxDone.scheduler) +
+      '</em></div>');
+  }
+  return cards.length ? '<div class="rx-insights">' + cards.join("") + '</div>' : "";
+}
+
 async function openResults() {
   const rx = _rx$("rx");
   if (!rx) return;
@@ -3213,7 +4262,11 @@ async function loadResults(showSpinner) {
     RX.data = j;
     const gen = (j.summary && j.summary.generated_at) || "（无）";
     const nImg = (j.images || []).reduce((a, s) => a + (s.images || []).length, 0);
-    src.textContent = `产物目录 ${j.output_root} · summary.csv 生成于 ${gen} · 共 ${nImg} 张图`;
+    const wx = j.weather || {};
+    const wxTxt = wx.source === "real"
+      ? ("真实 · " + (wx.observed_at || wx.fetched_at || "时间未知"))
+      : "合成";
+    src.textContent = `产物目录 ${j.output_root} · summary.csv 生成于 ${gen} · 共 ${nImg} 张图 · 天气 ${wxTxt}`;
     renderRxTabs();
     renderRxBody();
   } catch (e) {
@@ -3228,14 +4281,16 @@ async function loadResults(showSpinner) {
 
 function renderRxTabs() {
   const d = RX.data || {};
-  const nSec = (d.images || []).filter((s) => (s.images || []).length).length;
+  const nImg = (d.images || []).reduce((n, s) => n + (s.images || []).length, 0);
+  const nRows = ((d.summary || {}).rows || []).length;
+  const nRaw = ((d.raw || {}).items || []).length;
   const tabs = [
-    ["live", "本次运行"],
-    ["charts", "图表 " + nSec],
-    ["table", "15 组矩阵"],
-    ["replay", "时序回放"],
-    ["compare", "对比"],
-    ["ci", "置信区间"],
+    ["live", "01 本次运行"],
+    ["charts", "02 图表 " + nImg],
+    ["table", "03 实验矩阵 " + nRows],
+    ["replay", "04 时序回放 " + nRaw],
+    ["compare", "05 双策略对比"],
+    ["ci", "06 置信区间"],
   ];
   const box = _rx$("rxTabs");
   box.innerHTML = "";
@@ -3252,12 +4307,13 @@ function renderRxBody() {
   stopReplay();
   const body = _rx$("rxBody");
   const d = RX.data || {};
-  if (RX.tab === "live") body.innerHTML = htmlLive(d.live);
-  else if (RX.tab === "charts") body.innerHTML = htmlCharts(d.images || []);
-  else if (RX.tab === "table") body.innerHTML = htmlTable(d.summary || {});
-  else if (RX.tab === "ci") body.innerHTML = htmlCi(d.replication_ci || {});
-  else if (RX.tab === "replay") { body.innerHTML = htmlReplay(d); initReplay(d); }
-  else if (RX.tab === "compare") { body.innerHTML = htmlCompare(d); initCompare(d); }
+  const snap = htmlResultSnapshot(d);
+  if (RX.tab === "live") body.innerHTML = snap + htmlLive(d.live);
+  else if (RX.tab === "charts") body.innerHTML = snap + htmlCharts(d.images || [], d.summary || {});
+  else if (RX.tab === "table") body.innerHTML = snap + htmlTable(d.summary || {});
+  else if (RX.tab === "ci") body.innerHTML = snap + htmlCi(d.replication_ci || {});
+  else if (RX.tab === "replay") { body.innerHTML = snap + htmlReplay(d); initReplay(d); }
+  else if (RX.tab === "compare") { body.innerHTML = snap + htmlCompare(d); initCompare(d); }
   // 卡片/缩略图的点击与排序绑定
   body.querySelectorAll("[data-img]").forEach((el) => {
     el.onclick = () => openLightbox(el.dataset.group, Number(el.dataset.idx));
@@ -3280,6 +4336,10 @@ function htmlLive(live) {
     const sts = lv.stations || [];
     const cnt = lv.counters || {};
     const que = lv.queue || {};
+    const wx = lv.weather || {};
+    const wxTxt = wx.source === "real"
+      ? ("真实 · " + (wx.observed_at || wx.fetched_at || "时间未知"))
+      : "合成";
     /* 运行中 `metrics` 是空的（指标要跑完才结算），所以每张卡都做"先取结算值、
        再退回实时值"的兜底 —— 否则跑的时候整页都是 "-"，等于白做。 */
     const pick = (k, liveVal, nd) => {
@@ -3320,6 +4380,7 @@ function htmlLive(live) {
       '<p class="note">状态 <b>' + (live.status || "-") + '</b> · 工况 ' +
       (live.scenario || "-") + ' · 策略 ' + (live.scheduler || "-") +
       ' · 拓扑 ' + (live.stations || "单站") + (live.mec ? " + MEC" : "") +
+      ' · 天气源 <b>' + wxTxt + '</b>' +
       '。这一组是<b>刚跑的这一轮（内存态，不落盘）</b>，与下面"图表/矩阵"里的磁盘产物不是同一批数据。' +
       (live.status === "running" ? '<br>⚠️ 还在跑：除"进度/队列/提交"外的指标要<b>跑完才结算</b>，此刻显示 "-" 是正常的。' : "") +
       '</p>' +
@@ -3351,6 +4412,32 @@ function htmlLive(live) {
           '<td>' + (s.migrations_in || 0) + "/" + (s.migrations_out || 0) + '</td></tr>').join("") +
         '</tbody></table>';
     }
+    const workers = sts.reduce((n, s) => n + (Number(s.workers) || 0), 0) || 8;
+    const activeWorkers = sts.reduce((n, s) => n + (Number(s.active) || 0), 0);
+    const queueTotal = Number(que.high || 0) + Number(que.low || 0);
+    const queueScale = Math.max(120, queueTotal);
+    html += '<div class="live-bottom">' +
+      '<div class="live-panel"><div class="section-label"><span>LIVE PIPELINE</span><b>THREADS → QUEUE → WORKERS</b></div>' +
+        '<div class="pipeline">' +
+          '<div class="pipe-node"><span>UAV THREADS</span><b>' + (lv.uav_count || state.drones.length) + '</b></div>' +
+          '<i class="pipe-arrow">→</i>' +
+          '<div class="pipe-node"><span>READY QUEUE</span><b>' + queueTotal + '</b></div>' +
+          '<i class="pipe-arrow">→</i>' +
+          '<div class="pipe-node"><span>WORKERS</span><b>' + activeWorkers + ' / ' + workers + '</b></div>' +
+          '<i class="pipe-arrow">→</i>' +
+          '<div class="pipe-node"><span>COMPLETED</span><b>' + (cnt.done != null ? cnt.done : 0) + '</b></div>' +
+        '</div>' +
+        '<div class="pipe-rail"><i style="width:' + Math.min(100, queueTotal / queueScale * 100) + '%"></i></div>' +
+      '</div>' +
+      '<div class="live-panel"><div class="section-label"><span>RESOURCE PRESSURE</span><b>LIVE</b></div>' +
+        '<div class="kv"><span>队列高 / 低</span><b>' + (que.high || 0) + ' / ' + (que.low || 0) + '</b></div>' +
+        '<div class="kv"><span>在制 / 阻塞</span><b>' + (lv.running_count || 0) + ' / ' + (cnt.blocked || 0) + '</b></div>' +
+        '<div class="kv"><span>系统负载</span><b class="' + (Number(lv.system_load) > 1 ? "value-warn" : "") + '">' +
+          _fmtNum(lv.system_load, 2) + '</b></div>' +
+        '<div class="kv"><span>队列容量占用</span><b>' +
+          (que.capacity ? _fmtNum(queueTotal / que.capacity * 100, 1) + '%' : "—") + '</b></div>' +
+      '</div>' +
+    '</div>';
     html += '<p class="tip">把上面这张表复制进报告：选中表格 → Ctrl+C（或截图）。' +
       '要做"可复现实验"，请用 <code>run.py all</code> / <code>run.py stations</code>，' +
       '面板里这一轮是演示口径（time_scale 放大）。</p></div>';
@@ -3366,14 +4453,14 @@ function htmlLive(live) {
 }
 
 /* ------------------------------ ② 图表 ------------------------------ */
-function htmlCharts(sections) {
+function htmlCharts(sections, summary) {
   const list = (sections || []).filter((s) => (s.images || []).length);
   if (!list.length) {
     return '<div class="empty">磁盘上还没有图表。<br>先在项目根执行：' +
       '<code>python run.py all --no-db</code>（15 组 + charts/01~08）或 ' +
       '<code>python run.py stations</code>（多站 18 组）。</div>';
   }
-  let html = "";
+  let html = htmlResultInsights(summary || {});
   let group = 0;
   list.forEach((sec) => {
     html += '<div class="sec"><h3>' + sec.title +
@@ -3382,7 +4469,9 @@ function htmlCharts(sections) {
       '<div class="grid">' +
       sec.images.map((im, i) => {
         const src = "/results_img/" + im.rel.split("/").map(encodeURIComponent).join("/");
+        const no = (String(im.title || "").match(/^\d+/) || [String(i + 1).padStart(2, "0")])[0];
         return '<div class="card" data-img="1" data-group="' + group + '" data-idx="' + i + '">' +
+          '<span class="card-no">' + no + '</span>' +
           '<img class="thumb" loading="lazy" src="' + src + '" alt="' + im.title + '">' +
           '<div class="cap"><b title="' + im.title + '">' + im.title + '</b>' +
           '<span>' + _fmtTs(im.mtime) + ' · ' + _fmtSize(im.size) + '</span></div></div>';
@@ -3429,13 +4518,14 @@ function htmlTable(sum) {
     ' · ' + rows.length + ' 行</em></h3>' +
     '<p class="note">口径：3 工况 × 5 个经典策略 = 15 组（`cross_node` 与 MEC/多站是对照实验，' +
     '不在这一张表里）。点表头可排序。</p>' +
-    '<table><thead><tr><th class="l" data-sort="scenario">工况</th>' +
+    '<div class="table-wrap"><table><thead><tr><th class="l" data-sort="scenario">工况</th>' +
     '<th class="l" data-sort="scheduler">策略</th>' +
     cols.map((c) => '<th data-sort="' + c.key + '">' + c.label +
       (key === c.key ? (RX.sortAsc ? " ▲" : " ▼") : "") + '</th>').join("") +
     '</tr></thead><tbody>';
   rows.forEach((r) => {
-    html += '<tr><td class="l">' + (r.scenario_label || r.scenario) + '</td>' +
+    html += '<tr' + (r.scheduler === "dynamic" ? ' class="row-dynamic"' : '') + '>' +
+      '<td class="l">' + (r.scenario_label || r.scenario) + '</td>' +
       '<td class="l">' + (r.scheduler_label || r.scheduler) + '</td>' +
       cols.map((c) => {
         const v = Number(r[c.key]) || 0;
@@ -3443,7 +4533,7 @@ function htmlTable(sum) {
         return '<td>' + v.toFixed(nd) + '</td>';
       }).join("") + '</tr>';
   });
-  html += '</tbody></table>' +
+  html += '</tbody></table></div>' +
     '<p class="tip">⚠️ 单次实跑的整跑指标存在 wall-clock 抖动（完整率 0.2~0.5 pp 量级），' +
     '结论看<b>方向与量级</b>，不要把小数位当精确值（docs/11 §7）。' +
     '导出：在本页按 Ctrl+P 打印为 PDF，或直接用 Excel 打开 summary.csv。</p></div>';
@@ -3469,8 +4559,20 @@ function htmlReplay(d) {
     '<button class="ghost" id="rpPlay">▶ 播放</button>' +
     '<input type="range" id="rpRange" min="0" max="0" value="0">' +
     '<span id="rpT" class="src">t=0 s</span></div>' +
-    '<canvas class="rp" id="rpCanvas"></canvas>' +
-    '<p class="tip" id="rpInfo">—</p></div>';
+    '<div class="replay-layout">' +
+      '<div class="replay-main"><canvas class="rp" id="rpCanvas"></canvas></div>' +
+      '<div class="replay-side">' +
+        '<div class="readout-grid">' +
+          '<div class="readout"><span>HIGH QUEUE</span><b id="rpHigh">0</b></div>' +
+          '<div class="readout"><span>LOW QUEUE</span><b id="rpLow">0</b></div>' +
+          '<div class="readout"><span>LOAD</span><b id="rpLoad">0.00</b></div>' +
+          '<div class="readout"><span>RUNNING</span><b id="rpRunning">0</b></div>' +
+          '<div class="readout"><span>BLOCKED</span><b id="rpBlocked">0</b></div>' +
+          '<div class="readout"><span>TIME</span><b id="rpTime">0.0</b></div>' +
+        '</div>' +
+        '<div class="replay-meta"><p id="rpInfo">—</p></div>' +
+      '</div>' +
+    '</div></div>';
 }
 
 function initReplay(d) {
@@ -3539,18 +4641,18 @@ function drawReplay() {
   const g = cv.getContext("2d");
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.clearRect(0, 0, W, H);
-  g.fillStyle = "#080f19"; g.fillRect(0, 0, W, H);
+  g.fillStyle = "#071217"; g.fillRect(0, 0, W, H);
   if (!ser.length) {
-    g.fillStyle = "#7d90aa"; g.font = "12px sans-serif";
+    g.fillStyle = "#6f858b"; g.font = "12px Cascadia Mono, Consolas, monospace";
     g.fillText("没有时序数据", 12, 20);
     return;
   }
-  const pad = { l: 42, r: 62, t: 10, b: 20 };
+  const pad = { l: 44, r: 64, t: 12, b: 24 };
   const iw = W - pad.l - pad.r, ih = H - pad.t - pad.b;
   const maxQ = Math.max(1, ...ser.map((d) => Math.max(d.high, d.low)));
   const maxL = Math.max(1, ...ser.map((d) => d.load));
   // 网格
-  g.strokeStyle = "rgba(78,161,255,.14)"; g.lineWidth = 1;
+  g.strokeStyle = "rgba(129,174,184,.11)"; g.lineWidth = 1;
   for (let i = 0; i <= 4; i++) {
     const y = pad.t + ih * i / 4;
     g.beginPath(); g.moveTo(pad.l, y); g.lineTo(pad.l + iw, y); g.stroke();
@@ -3563,20 +4665,20 @@ function drawReplay() {
     ser.forEach((d, i) => { const x = X(i), y = Y(get(d)); if (i) g.lineTo(x, y); else g.moveTo(x, y); });
     g.stroke();
   };
-  line((d) => d.high, YQ, "#4ea1ff", 1.6);
-  line((d) => d.low, YQ, "#f5a623", 1.6);
-  line((d) => d.load, YL, "#3ddc97", 1.2);
+  line((d) => d.high, YQ, "#69aefc", 1.7);
+  line((d) => d.low, YQ, "#f2b455", 1.7);
+  line((d) => d.load, YL, "#62d99a", 1.25);
   // 当前时刻游标 + 读数
   const i0 = Math.max(0, Math.min(ser.length - 1, RX.replay.t));
   const d0 = ser[i0];
   const x0 = X(i0);
   g.strokeStyle = "rgba(55,226,213,.85)"; g.lineWidth = 1;
   g.beginPath(); g.moveTo(x0, pad.t); g.lineTo(x0, pad.t + ih); g.stroke();
-  [[d0.high, YQ, "#4ea1ff"], [d0.low, YQ, "#f5a623"], [d0.load, YL, "#3ddc97"]].forEach(([v, Y, c]) => {
+  [[d0.high, YQ, "#69aefc"], [d0.low, YQ, "#f2b455"], [d0.load, YL, "#62d99a"]].forEach(([v, Y, c]) => {
     g.fillStyle = c; g.beginPath(); g.arc(x0, Y(v), 3.2, 0, Math.PI * 2); g.fill();
   });
   // 轴标
-  g.fillStyle = "#7d90aa"; g.font = "10px ui-monospace,Consolas,monospace";
+  g.fillStyle = "#6f858b"; g.font = "10px Cascadia Mono,Consolas,monospace";
   g.fillText("队列 " + maxQ, 4, pad.t + 9);
   g.fillText("0", 28, pad.t + ih - 2);
   g.textAlign = "right";
@@ -3584,17 +4686,24 @@ function drawReplay() {
   g.textAlign = "left";
   g.fillText("t=" + Number(d0.ts).toFixed(1) + "s", pad.l, H - 5);
   // 图例（放在底部一行，避免与右上角的"负载"轴标打架）
-  const lg = [["高优队列", "#4ea1ff"], ["低优队列", "#f5a623"], ["系统负载", "#3ddc97"]];
+  const lg = [["高优队列", "#69aefc"], ["低优队列", "#f2b455"], ["系统负载", "#62d99a"]];
   let lx = pad.l + 6;
   const ly = pad.t + ih - 8;
   lg.forEach(([t, c]) => {
     g.fillStyle = c; g.fillRect(lx, ly - 4, 9, 3);
-    g.fillStyle = "#c9d8ea"; g.fillText(t, lx + 13, ly);
+    g.fillStyle = "#b7c9cd"; g.fillText(t, lx + 13, ly);
     lx += 13 + g.measureText(t).width + 14;
   });
   const rt = _rx$("rpT");
   if (rt) rt.textContent = "t=" + Number(d0.ts).toFixed(1) + " s · 高优 " + d0.high +
     " · 低优 " + d0.low + " · 在制 " + d0.running + " · 阻塞 " + d0.blocked;
+  const setReadout = (id, value) => { const el = _rx$(id); if (el) el.textContent = value; };
+  setReadout("rpHigh", d0.high);
+  setReadout("rpLow", d0.low);
+  setReadout("rpLoad", Number(d0.load).toFixed(2));
+  setReadout("rpRunning", d0.running);
+  setReadout("rpBlocked", d0.blocked);
+  setReadout("rpTime", Number(d0.ts).toFixed(1) + "s");
 }
 
 /* ------------------------------ ⑤ 对比 ------------------------------ */
@@ -3633,7 +4742,7 @@ function htmlCompare(d) {
     '<select id="cmpB">' + opt(0) + '</select>' +
     '<button class="ghost" id="cmpSwap">⇄ 交换</button></div>' +
     '<div id="cmpBody"><div class="empty">读取中…</div></div>' +
-    '<canvas class="rp" id="cmpCanvas" style="height:230px;margin-top:10px"></canvas>' +
+    '<canvas class="rp" id="cmpCanvas" style="margin-top:10px"></canvas>' +
     '<p class="tip" id="cmpTip">—</p></div>';
 }
 
@@ -3692,7 +4801,7 @@ function cmpTableHtml(ja, jb) {
   const title = (j) => j.scenario + " × " + j.scheduler + "（seed " + j.seed + "）";
   return '<p class="note">基线 A = <b>' + title(ja) + '</b>；对照 B = <b>' + title(jb) + '</b>' +
     '。⚠️ 若两份明细的 seed 不同，"差值"里混着随机性，不能当因果结论。</p>' +
-    head + rows + '</tbody></table>';
+    '<div class="table-wrap">' + head + rows + '</tbody></table></div>';
 }
 
 function drawCompare() {
@@ -3707,13 +4816,13 @@ function drawCompare() {
   const g = cv.getContext("2d");
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.clearRect(0, 0, W, H);
-  g.fillStyle = "#080f19"; g.fillRect(0, 0, W, H);
+  g.fillStyle = "#071217"; g.fillRect(0, 0, W, H);
   const pad = { l: 44, r: 14, t: 12, b: 22 };
   const iw = W - pad.l - pad.r, ih = H - pad.t - pad.b;
   const all = [...(a.series || []), ...(b.series || [])];
   const maxQ = Math.max(1, ...all.map((d) => Math.max(d.high, d.low)));
   const n = Math.max((a.series || []).length, (b.series || []).length, 2);
-  g.strokeStyle = "rgba(78,161,255,.14)";
+  g.strokeStyle = "rgba(129,174,184,.11)";
   for (let i = 0; i <= 4; i++) {
     const y = pad.t + ih * i / 4;
     g.beginPath(); g.moveTo(pad.l, y); g.lineTo(pad.l + iw, y); g.stroke();
@@ -3732,20 +4841,20 @@ function drawCompare() {
     });
     g.setLineDash([]);
   };
-  draw(a.series, "#4ea1ff");
+  draw(a.series, "#69aefc");
   draw(b.series, "#ff9f43");
-  g.fillStyle = "#7d90aa"; g.font = "10px ui-monospace,Consolas,monospace";
+  g.fillStyle = "#6f858b"; g.font = "10px Cascadia Mono,Consolas,monospace";
   g.fillText("队列 " + maxQ, 4, pad.t + 9);
   g.fillText("0", 30, pad.t + ih - 2);
   g.fillText("t=0", pad.l, H - 5);
   g.textAlign = "right";
   g.fillText("t=" + Math.max(a.duration_s || 0, b.duration_s || 0).toFixed(0) + "s", W - 6, H - 5);
   g.textAlign = "left";
-  const lg = [["A 高优", "#4ea1ff"], ["A 低优(虚)", "#4ea1ff"], ["B 高优", "#ff9f43"], ["B 低优(虚)", "#ff9f43"]];
+  const lg = [["A 高优", "#69aefc"], ["A 低优(虚)", "#69aefc"], ["B 高优", "#ff9f43"], ["B 低优(虚)", "#ff9f43"]];
   let lx = pad.l + 8;
   lg.forEach(([t, c], i) => {
     g.fillStyle = c; g.fillRect(lx, pad.t + 2, 9, 3);
-    g.fillStyle = "#c9d8ea"; g.fillText(t, lx + 12, pad.t + 7);
+    g.fillStyle = "#b7c9cd"; g.fillText(t, lx + 12, pad.t + 7);
     lx += 12 + g.measureText(t).width + (i === 1 ? 16 : 12);
   });
   const tip = _rx$("cmpTip");
@@ -4058,7 +5167,7 @@ async function bootWithDEM() {
       bindCamButtons();
       bindTodButtons();
       bindUpgradeButtons();
-      applyTOD("dusk");
+      applyTOD("noon");
       initControls();
       initTopology();
       fetchState();

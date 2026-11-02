@@ -29,6 +29,8 @@ app.py —— UavSchedulerSim 桌面版启动器
     python app.py --browser       # 强制用浏览器打开（不建窗口）
     python app.py --stations triple --mec
                                   # 多基站演示：3 站（1×CENTER + 2×EDGE）+ MEC 边缘分流
+    python app.py --real-weather data\\real\\weather_rain.json
+                                  # 用已录制真实天气快照启动（覆盖 config.real）
 
 多基站（改造建议第五章 / docs/11）：
     ``--stations`` / ``--mec`` 只是**会话默认拓扑** —— 与 ``run.py ui --stations ...``
@@ -92,7 +94,7 @@ def _prepare_console() -> None:
 
 
 def _start_server(cfg: dict, port: int, stations: str | None = None,
-                  mec: bool | None = None):
+                  mec: bool | None = None, real_weather: str | None = None):
     """在后台线程启动本地 HTTP 服务，返回 (port, httpd)。
 
     ``stations`` / ``mec``：**会话默认拓扑**（None = 不改，保持单站 / 取 config）。
@@ -101,7 +103,8 @@ def _start_server(cfg: dict, port: int, stations: str | None = None,
     """
     from uav_sim.dashboard import make_server
 
-    httpd, dash, real_port = make_server(cfg, host="127.0.0.1", port=port)
+    httpd, dash, real_port = make_server(
+        cfg, host="127.0.0.1", port=port, real_weather=real_weather)
     if stations is not None or mec is not None:
         info = dash.set_topology_default(stations=stations, mec=mec)
         _log(f"会话默认拓扑已设定：stations={info.get('stations')} mec={info.get('mec')}")
@@ -183,6 +186,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="启用 MEC 边缘计算（轻量任务下沉 EDGE）")
     ap.add_argument("--no-mec", dest="mec", action="store_false",
                     help="显式关闭 MEC（覆盖 config.yaml 的 mec.enable）")
+    ap.add_argument("--real-weather", default=None, metavar="SNAPSHOT",
+                    help="指定真实天气快照 JSON（覆盖 config.real；不填则按配置）")
     args = ap.parse_args(argv)
 
     from uav_sim.config import load_config
@@ -196,7 +201,9 @@ def main(argv: list[str] | None = None) -> int:
         raise
     stations = str(args.stations).strip().lower() if args.stations else None
     try:
-        port, httpd = _start_server(cfg, args.port, stations=stations, mec=args.mec)
+        port, httpd = _start_server(
+            cfg, args.port, stations=stations, mec=args.mec,
+            real_weather=args.real_weather)
         _log(f"本地服务已启动，端口 {port}")
     except Exception:  # noqa: BLE001
         _log("本地服务启动失败：\n" + traceback.format_exc())

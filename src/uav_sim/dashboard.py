@@ -56,6 +56,7 @@ if str(_SRC_ROOT) not in sys.path:
 
 from uav_sim.config import cfg_get_int, load_config
 from uav_sim.models import SCENARIO_CODES, SCENARIO_LABELS, SCHEDULER_LABELS, SCHEDULER_NAMES, TaskPriority
+from uav_sim.realsource import load_weather_snapshot
 from uav_sim.scenarios import generate_trace, get_scenario
 from uav_sim.scheduler import create_scheduler
 from uav_sim.simulator import Simulator
@@ -785,13 +786,16 @@ class SimRun:
 
     def __init__(self, cfg: dict, scenario: str, scheduler: str, speed: float = 1.0,
                  weather: Optional[str] = None, stations: Optional[str] = None,
-                 mec: Optional[bool] = None) -> None:
+                 mec: Optional[bool] = None,
+                 real_weather_snapshot: Optional[dict] = None) -> None:
         self.base_cfg = cfg
         self.scenario = scenario
         self.scheduler = scheduler
         self.speed = max(0.25, min(8.0, float(speed)))
         #: 本次运行使用的天气预设（/api/weather 可在运行中/下次启动时改它）
         self.weather_preset: str = config_preset(cfg, weather)
+        #: 真实天气快照（None = 合成；有值 = 本次运行只读这份快照）
+        self.real_weather_snapshot = real_weather_snapshot
         #: 多基站拓扑（None/""/"1" = 单站默认；"triple" = 中心 1 + 边缘 2）
         self.stations: Optional[str] = (str(stations).strip() or None) if stations else None
         #: 是否启用 MEC 边缘计算（None = 取 config.mec.enable）
@@ -834,7 +838,8 @@ class SimRun:
             sim = Simulator(sc, trace, cfg, scheduler_name=self.scheduler,
                             seed=int(cfg["simulation"]["random_seed"]),
                             weather_preset=self.weather_preset,
-                            station_spec=self.stations, mec_enabled=self.mec)
+                            station_spec=self.stations, mec_enabled=self.mec,
+                            real_weather_snapshot=self.real_weather_snapshot)
             self.sim = sim
             sched = create_scheduler(self.scheduler, sim, cfg)
             raw = sim.run(sched, duration_s=sc.duration_s)
@@ -922,7 +927,7 @@ class Dashboard:
     #: 只是给前端一个合理的 intensity/visibility 数值，不参与任何指标计算。
     IDLE_WEATHER_DURATION_S: float = 90.0
 
-    def __init__(self, cfg: dict) -> None:
+    def __init__(self, cfg: dict, real_weather: Optional[str] = None) -> None:
         self.cfg = cfg
         self.run: Optional[SimRun] = None
         self._lock = threading.Lock()
@@ -935,11 +940,28 @@ class Dashboard:
         self.default_mec: Optional[bool] = None
         # ---- 天气：默认值 / 下次启动的预设（契约 §4.6.4「未运行作下次默认」） ----
         self._seed = cfg_get_int(cfg, "simulation.random_seed", 20261031)
-        self.weather_preset: str = config_preset(cfg)
+        #: 真实天气快照（None = 合成；有值 = 交互式运行默认使用真实数据）
+        self.real_weather_snapshot: Optional[dict] = None
+        self.real_weather_error: Optional[str] = None
+        snap, reason = load_weather_snapshot(cfg, path_override=real_weather)
+        if snap is not None:
+            self.real_weather_snapshot = snap
+            logger.info("真实天气快照已加载：observed_at=%s source=%s",
+                        snap.get("observed_at"), snap.get("source"))
+        elif reason and reason != "real.enable=false":
+            self.real_weather_error = reason
+            logger.warning("真实天气不可用，回退合成天气：%s", reason)
+        self.weather_preset: str = (
+            str(self.real_weather_snapshot["derived"]["preset"])
+            if self.real_weather_snapshot is not None
+            else config_preset(cfg)
+        )
         self._weather_default = WeatherModel(
             seed=self._seed, preset=self.weather_preset,
             duration_s=self.IDLE_WEATHER_DURATION_S, cfg=cfg,
+            real_snapshot=self.real_weather_snapshot,
         )
+        self.weather_preset = self._weather_default.preset
 
     # ------------------------------------------------------------------ 天气
     def _idle_weather_snapshot(self) -> dict:
@@ -965,6 +987,10 @@ class Dashboard:
         """
         name = config_preset(self.cfg, preset)
         with self._lock:
+            # 手动点天气按钮 = 明确切回合成天气；否则下一次 /api/start 又会
+            # 自动使用真实快照，用户会误以为按钮没生效。
+            self.real_weather_snapshot = None
+            self.real_weather_error = None
             self.weather_preset = name
             self._weather_default = WeatherModel(
                 seed=self._seed, preset=name,
@@ -987,8 +1013,15 @@ class Dashboard:
         with self._lock:
             if self.run is not None and self.run.status == "running":
                 return {"ok": False, "msg": "已有仿真在运行"}
-            preset = config_preset(self.cfg, weather if weather is not None
-                                   else self.weather_preset)
+            explicit_weather = weather is not None
+            real_snapshot = None
+            if explicit_weather:
+                preset = config_preset(self.cfg, weather)
+            elif self.real_weather_snapshot is not None:
+                preset = str(self.real_weather_snapshot["derived"]["preset"])
+                real_snapshot = self.real_weather_snapshot
+            else:
+                preset = config_preset(self.cfg, self.weather_preset)
             self.weather_preset = preset
             # 未显式指定时用会话默认值（见 __init__ 的说明）
             if stations is None:
@@ -996,12 +1029,14 @@ class Dashboard:
             if mec is None:
                 mec = self.default_mec
             self.run = SimRun(self.cfg, scenario, scheduler, speed, weather=preset,
-                              stations=stations, mec=mec)
+                              stations=stations, mec=mec,
+                              real_weather_snapshot=real_snapshot)
             try:
                 self.run.start()
             except Exception as exc:  # noqa: BLE001
                 return {"ok": False, "msg": str(exc)}
             return {"ok": True, "weather_preset": preset,
+                    "weather_source": "real" if real_snapshot else "synthetic",
                     "stations": self.run.stations, "mec": self.run.mec}
 
     # ------------------------------------------------------------------
@@ -1203,6 +1238,7 @@ class Dashboard:
                     "queue": snap.get("queue") or {},
                     "system_load": snap.get("system_load"),
                     "running_count": snap.get("running_count"),
+                    "weather": snap.get("weather") or {},
                 }
             except Exception:  # noqa: BLE001
                 live = {}
@@ -1311,6 +1347,7 @@ def _make_handler(dash: Dashboard):
                 # /results_img/<相对路径> 懒加载 —— 10 张图 ~1.5 MB，不该塞进 JSON。
                 try:
                     live = dash.run_result_snapshot()
+                    weather = dash.state().get("weather")
                     self._json({
                         "ok": True,
                         "output_root": str(OUTPUT_ROOT),
@@ -1319,6 +1356,7 @@ def _make_handler(dash: Dashboard):
                         "raw": _read_last_run_raw(dash.cfg),
                         "replication_ci": _read_replication_ci(dash.cfg),
                         "live": live,
+                        "weather": weather,
                     })
                 except Exception as exc:  # noqa: BLE001 - 结果界面挂了也不能 500 崩面板
                     logger.exception("读取实验结果失败")
@@ -1496,14 +1534,14 @@ def _make_handler(dash: Dashboard):
 
 
 def make_server(cfg: Optional[dict] = None, host: str = "127.0.0.1",
-                port: int = 0):
+                port: int = 0, real_weather: Optional[str] = None):
     """创建（但不启动）HTTP 服务，返回 ``(httpd, dashboard, port)``。
 
     供**桌面程序**使用：它需要一个可控端口的服务实例，由 pywebview 窗口托管。
     ``port=0`` 表示让系统分配空闲端口（避免端口冲突）。
     """
     cfg = cfg or load_config()
-    dash = Dashboard(cfg)
+    dash = Dashboard(cfg, real_weather=real_weather)
     httpd = ThreadingHTTPServer((host, port), _make_handler(dash))
     httpd.daemon_threads = True
     return httpd, dash, httpd.server_address[1]
@@ -1513,7 +1551,8 @@ def serve(cfg: Optional[dict] = None, host: str = "127.0.0.1",
           port: int = DEFAULT_PORT, open_browser: bool = True,
           scenario: str = "PEAK", scheduler: str = "dynamic",
           speed: float = 1.0, autostart: bool = False,
-          stations: Optional[str] = None, mec: Optional[bool] = None) -> int:
+          stations: Optional[str] = None, mec: Optional[bool] = None,
+          real_weather: Optional[str] = None) -> int:
     """启动面板并阻塞（Ctrl+C 退出）。返回进程退出码。
 
     ``stations`` / ``mec``：多基站拓扑名（如 ``"triple"``）与 MEC 开关。
@@ -1521,7 +1560,7 @@ def serve(cfg: Optional[dict] = None, host: str = "127.0.0.1",
     （页面的按钮不带这两个参数）。``None`` = 单站 + 取 config.mec.enable。
     """
     cfg = cfg or load_config()
-    dash = Dashboard(cfg)
+    dash = Dashboard(cfg, real_weather=real_weather)
     dash.set_topology_default(stations=stations, mec=mec)
     url = f"http://{host}:{port}/"
 

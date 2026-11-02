@@ -203,7 +203,8 @@ class Simulator:
                  scheduler_name: str, seed: int,
                  weather_preset: Optional[str] = None,
                  station_spec: Optional[object] = None,
-                 mec_enabled: Optional[bool] = None) -> None:
+                 mec_enabled: Optional[bool] = None,
+                 real_weather_snapshot: Optional[dict] = None) -> None:
         self.scenario = scenario
         self.trace = trace
         self.cfg = cfg or {}
@@ -269,11 +270,12 @@ class Simulator:
         # ---- 天气模型（3D 渲染升级：天气 -> 弱网 -> 链路健康度 -> 调度权重） ----
         # 构造顺序很关键：先建 WeatherModel，再传给 LinkMonitor —— 后者在
         # register_uav() 时会用 weather.at(t) 对健康度网格施加衰减。
-        self.weather_preset: str = config_preset(self.cfg, weather_preset)
         self.weather = WeatherModel(
-            seed=self.seed, preset=self.weather_preset,
+            seed=self.seed, preset=weather_preset,
             duration_s=float(scenario.duration_s), cfg=cfg,
+            real_snapshot=real_weather_snapshot,
         )
+        self.weather_preset: str = self.weather.preset
         self.link_monitor = LinkMonitor(
             seed=self.seed, weaknet_level=scenario.weaknet_level,
             duration_s=float(scenario.duration_s), uav_ids=uav_ids, cfg=cfg,

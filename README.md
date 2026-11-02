@@ -128,7 +128,7 @@ D:\study\uav_sched_sim\
 
 | 命令 | 作用 | 可用参数 | 退出码 |
 |---|---|---|---|
-| `<PY> run.py check` | 环境自检：Python 版本、5 个依赖、配置可解析、3 个输出目录可写、MySQL 连通性、中文字体、12 个模块可导入、**6 个调度器**注册齐全 | `--config <路径>` | 0 通过 / 2 有 `[PROBLEM]` |
+| `<PY> run.py check` | 环境自检：Python 版本、5 个依赖、配置可解析、3 个输出目录可写、MySQL 连通性、中文字体、13 个模块可导入、**6 个调度器**注册齐全 | `--config <路径>` | 0 通过 / 2 有 `[PROBLEM]` |
 | `<PY> run.py calibrate` | 打印三工况标定报告：任务数、勘查间隔、提供负载、重传放大、有效负载、容量、负载率、目标、结论 | `--seed <int>`（默认取 `simulation.random_seed=20261031`） | 0 三工况均达标 / 1 有工况偏离目标 >25% |
 | `<PY> run.py one` | 跑**单组**「工况 × 策略」，打印 12 个关键指标 | `--scenario {LIGHT,NORMAL,PEAK}`（必填）<br>`--scheduler {fcfs,rr,priority,mlfq,dynamic}`（必填）<br>`--seed <int>`<br>`--no-db` | 0 成功 / 1 该组失败 |
 | `<PY> run.py all` | 跑**全量 15 组**，导出 summary.csv + metric_dictionary.csv + raw/*.json + task_records/*.csv，并自动出 7 张图；**默认追加 3 组「站级/MEC 伴生探针」→ `charts/09`**（独立目录 `results/station_probe/`，不进 summary.csv） | `--no-db`（不写库）<br>`--seed <int>`<br>`--scenarios LIGHT NORMAL`（只跑指定工况）<br>`--schedulers dynamic mlfq`（只跑指定策略）<br>`--no-station-probe`（跳过伴生探针） | 0 全部成功 / 1 有组失败 |
@@ -138,7 +138,7 @@ D:\study\uav_sched_sim\
 | `<PY> run.py mec` | **MEC 对照实验**（纯中心 vs 多站-无MEC vs 端-边-云）：PEAK × 3 模式 × {dynamic, cross_node} = **12 组**，产出 `results/mec/mec_matrix.csv`（+ `results/mec/raw/`）、日志 `results/mec_run.log`；**不写数据库、不覆盖既有 15 组产物**（口径：单次实跑，详见 §4.10.5） | 无 | 0 |
 | `<PY> run.py stations` | **多站 × 多策略完整矩阵**（§4.11.4）：triple 拓扑 × **6 策略**（含 `cross_node`）× 3 工况 = **18 组**，MEC 关闭以隔离"拓扑×策略"；产出 `results/stations/stations_matrix.csv` + `raw/` + `charts/`（4 张），总览另存 `charts/10-多站×多策略矩阵.png`；**不写库、不碰 summary.csv** | `--seed`<br>`--scenarios`<br>`--schedulers`<br>`--no-chart` | 0 / 1 |
 | `<PY> run.py sensitivity` | 参数敏感性实验（固定 PEAK 工况，三组对照）：A. MLFQ aging 1500/6000 ms；B. RR 时间片 120/500/3000 ms；C. 弱网加剧 `retry_gain` 0.5→0.9（rr/mlfq/dynamic）。结果写 `results/sensitivity/`，**不入库** | 无 | 0 |
-| `<PY> run.py ui` | **启动实时可视化面板**（本地网页，纯标准库零依赖）：左侧无人机链路健康度色块、中间两级就绪队列 + 8 个工作线程槽位、右侧实时指标、底部队列深度曲线；可切工况/策略/速度 | `--port 8765`<br>`--host 127.0.0.1`<br>`--scenario PEAK`<br>`--scheduler dynamic`<br>`--speed 1`<br>`--autostart`<br>`--no-browser` | 0 / 正常 Ctrl+C 退出 |
+| `<PY> run.py ui` | **启动实时可视化面板**（本地网页，纯标准库零依赖）：左侧无人机链路健康度色块、中间两级就绪队列 + 8 个工作线程槽位、右侧实时指标、底部队列深度曲线；可切工况/策略/速度 | `--port 8765`<br>`--host 127.0.0.1`<br>`--scenario PEAK`<br>`--scheduler dynamic`<br>`--speed 1`<br>`--autostart`<br>`--no-browser`<br>`--real-weather <快照.json>` | 0 / 正常 Ctrl+C 退出 |
 | `<PY> run.py replicate` | **重复实验**：每个「工况×策略」跑 N 次（**同一组种子 = CRN**），给出 均值±95% 置信半宽 与配对显著性；产出 `results/replications/*.csv`。补上了 `simulation.repetitions` 这个长期"预留未实现"的开关。**支持 `--variants single,triple,triple_mec`** 覆盖多站/MEC 面（配对**不跨变体**混算） | `--reps N`（默认取 config）<br>`--seed <int>`<br>`--scenarios`、`--schedulers`<br>`--variants`<br>`--no-db` | 0 |
 | `<PY> run.py gpu` | **GPU 大规模重复实验**（CUDA）：一个线程 = 一次仿真，秒级跑上万次；自动构建内核 → 运行 → 统计 → 出 3 份 CSV。无显卡时自动回退纯 Python 模型。**多站/MEC 档**用 `--stations N --mec`。详见 [`gpu/README.md`](gpu/README.md) | `--reps N`（默认 2000）<br>`--rebuild`<br>`--out-dir`<br>`--stations N`<br>`--mec` | 0 成功 / 2 找不到 GPU 模块 |
 | `<PY> run.py bench-weather` | **多运行场景测评**：晴/雨/雪/沙尘各跑 12s，按**帧间隔**采集 FPS / P95 / P99 / 最坏帧 / 掉帧率 / JS 堆，再做一次 9 倍像素压力测试；产出 `results/weather_eval/report.{json,csv,png}` | `--port 8791`<br>`--no-chart` | 0 通过 / 1 未通过 |
@@ -149,6 +149,8 @@ D:\study\uav_sched_sim\
 |---|---|---|
 | `.\scripts\02-初始化数据库.ps1` | 建库建表（幂等）+ 打印各表行数自检 | `-Password`（默认取环境变量→config.yaml）、`-Host`、`-Port`、`-User`、`-Database` |
 | `.\scripts\03-一键跑全量实验.ps1` | 串起 check→calibrate→建库→all→产出核对 | `-NoDb`（不写库）、`-NoCalibrate`（跳过标定） |
+| `tools\fetch_real_env.py` | 采集 Open-Meteo 真实天气 → `data/real/weather_snapshot.json`（免 key；失败不写半截文件） | `--at`、`--out`、`--force`、`--lat/--lon` |
+| `tools\verify_real_env.py` | 同一快照回放两次 / 实时采集 vs 快照的 SHA-256 与整跑差异证据 | `--snapshot`、`--reps`、`--fetch-live` |
 
 **退出码约定**：`0` 成功；`1` 有实验失败；`2` 环境不可用（依赖缺失/自检不通过）。
 
@@ -872,6 +874,44 @@ exe 已重新打包并实跑验证（`--stations triple --mec` → `/api/state` 
 
 ---
 
+## 4.13 真实环境数据（天气线，2026-11 新增）
+
+> 完整口径、快照格式、映射表、证据与诚实边界：**[`docs/12-真实环境数据接入.md`](docs/12-真实环境数据接入.md)**
+
+真实天气走 **采集 → 录制 → 回放**：
+
+```powershell
+# 1) 采集一次（Open-Meteo 免费免 key）
+& ".\.venv\Scripts\python.exe" tools\fetch_real_env.py `
+  --at 2026-11-01T07:00 --force --out data\real\weather_rain.json
+
+# 2) 离线回放（推荐；不改 config.yaml）
+& ".\.venv\Scripts\python.exe" run.py ui `
+  --real-weather data\real\weather_rain.json
+```
+
+默认 `real.enable=false`，因此 15 组矩阵、单站 SHA-256 基线和所有既有实验仍走
+内置合成天气。真实模式只作为独立演示面；3D 顶栏与「仿真结果」都会显示
+`天气 合成` 或 `天气 真实 · 观测时间`。
+
+本机实测（真实降雨快照）：
+
+| 项 | 数字 |
+|---|---|
+| 快照 SHA-256 | `642903b7447ea444b76c224ab43b6c431655edff2cf6b11b36a2516b8ba3baa7` |
+| 同快照两次回放：天气/链路 SHA | 两次完全相同 |
+| 同快照两次 PEAK×dynamic 吞吐 | 25.4889 / 25.5667（相对差 **0.31 %**） |
+| 实时采集 vs 快照回放吞吐 | 25.9889 / 25.8000（相对差 **0.73 %**） |
+| 既有 PEAK 同代码抖动基线 | ≤1.12 %（docs/11 §7.1） |
+
+边界：本轮只接天气；`ping`/TCP 网络、GPX/tlog 轨迹、CPU/内存动态限流、更大 DEM
+均未做。真实快照按**整轮常量**回放，不把小时级气象伪造成秒级动态。
+
+![真实降雨驱动的 3D 场景与来源面板](docs/images/38-真实天气-3D场景.png)
+![仿真结果界面的真实天气来源](docs/images/39-真实天气-结果界面.png)
+
+---
+
 ## 5. FAQ（12 条）
 
 ### 1. 图表里的中文全是方块 / 负号变成小方框
@@ -1008,8 +1048,15 @@ CRN 种子清单）；`tests/test_des_model.py` 覆盖 GPU 分析模型的确定
 
 ## 6. 文档索引
 - [`docs/06-PDF要求对照与补充材料.md`](docs/06-PDF要求对照与补充材料.md) —— **PDF 逐条对照 + 8 道开放性问题答案 + 实训日志/小组分工模板 + 数据集合规声明**
-- [`docs/diagrams/01-系统框架图.html`](docs/diagrams/01-系统框架图.html) —— 五层系统框架图（HTML/SVG，可打印）
-- [`docs/diagrams/02-数据流详细逻辑图.html`](docs/diagrams/02-数据流详细逻辑图.html) —— 无人机采集 → 调度 → 入库 → 三维呈现，**标注到函数级**
+- [`docs/diagrams/00-图册索引.html`](docs/diagrams/00-图册索引.html) —— **系统图册入口**：8 张 HTML/SVG 图，含统一导航与打印样式
+- [`docs/diagrams/01-系统框架图.html`](docs/diagrams/01-系统框架图.html) —— 系统分层架构：现场线程、调度内核、评测存储、3D 监控台
+- [`docs/diagrams/02-数据流详细逻辑图.html`](docs/diagrams/02-数据流详细逻辑图.html) —— 任务生成 → 入队 → 调度 → 限流 → 执行 → 重试 → 结算 → 发布
+- [`docs/diagrams/03-任务生命周期状态机.html`](docs/diagrams/03-任务生命周期状态机.html) —— READY / RUNNING / BLOCKED / RETRY / CACHED / DONE / FAILED / CANCELLED
+- [`docs/diagrams/04-动态权重决策流程图.html`](docs/diagrams/04-动态权重决策流程图.html) —— 饥饿硬补偿、四因子权重、候选比较与回队
+- [`docs/diagrams/05-调度执行时序图.html`](docs/diagrams/05-调度执行时序图.html) —— UAV、队列、调度器、限流器、线程池的派发与弱网分支
+- [`docs/diagrams/06-多基站部署拓扑图.html`](docs/diagrams/06-多基站部署拓扑图.html) —— 边缘、控制面、数据面与协议端口
+- [`docs/diagrams/07-数据库实体关系图.html`](docs/diagrams/07-数据库实体关系图.html) —— `experiment` 聚合根与四类明细表的一对多关系
+- [`docs/diagrams/08-实验评测流水线.html`](docs/diagrams/08-实验评测流水线.html) —— 标定、轨迹、运行、采样、指标、持久化、报告
 
 | 文档 | 内容 | 什么时候看 |
 |---|---|---|
@@ -1022,6 +1069,7 @@ CRN 种子清单）；`tests/test_des_model.py` 覆盖 GPU 分析模型的确定
 | [09-运行场景测评报告](docs/09-运行场景测评报告.md) | **晴/雨/雪/沙尘四场景的稳定性与效率测评**：方法、帧率/P95/P99/最坏帧、9 倍像素压力测试、画面改进说明、复现命令 | 答辩讲"系统稳定高效运行"、交给老师 |
 | [10-OS微观透视与混沌工程](docs/10-OS微观透视与混沌工程.md) | **线程五态透视 / 队列传送带 / 权重天平 / 混沌注入 / 死锁看门狗 / Trace 与回放**：数据字段、实现原理、实测数据、复现命令 | 讲"OS 底层原理穿透力"、演示混沌工程 |
 | [11-多基站与MEC边缘计算](docs/11-多基站与MEC边缘计算.md) | **改造建议第五章**：多基站数据模型（接入站 vs 算力站）、`cross_node` 策略（最少连接+一致性哈希+带代价迁移）、MEC 端-边-云分级与卸载分水岭、节点宕机/分区/脑裂混沌、**"未污染既有结论"的 SHA-256 + 抖动基线对拍方法** | 讲"从单机内核到分布式系统"、演示多基站与 MEC |
+| [12-真实环境数据接入](docs/12-真实环境数据接入.md) | **真实天气线**：Open-Meteo 采集、JSON 快照、WMO 映射、断网/坏快照降级、同快照 SHA-256 回放、实时 vs 快照抖动对比、界面来源徽章 | 讲"真实数据如何不破坏可复现性" |
 
 ---
 

@@ -16,6 +16,7 @@ htmlcov/
 results/
 charts/
 logs/
+data/real/
 
 # ---- 敏感信息 ----
 # config.yaml 含本机数据库口令；仓库只跟踪脱敏的 config.example.yaml。

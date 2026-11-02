@@ -180,8 +180,10 @@ def test_http_results_endpoint_shape(tmp_path, monkeypatch) -> None:
         assert code == 200 and "application/json" in ctype
         j = json.loads(body.decode("utf-8"))
         assert j["ok"] is True
-        for key in ("images", "summary", "raw", "replication_ci", "live"):
+        for key in ("images", "summary", "raw", "replication_ci", "live", "weather"):
             assert key in j
+        assert j["weather"]["source"] == "synthetic"
+        assert j["weather"]["fetched_at"] is None
         assert j["summary"]["exists"] is False        # 假根里没造 summary.csv
         assert any(it["name"].startswith("PEAK-dynamic") for it in j["raw"]["items"])
         assert j["live"]["has_run"] is False

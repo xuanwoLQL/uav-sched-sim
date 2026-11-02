@@ -15,6 +15,7 @@
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const out = { tab: tab, log: [] };
   const ok = (c, m) => { out.log.push((c ? "[OK] " : "[FAIL] ") + m); return !!c; };
+  const weatherSource = () => (RX.data && RX.data.weather && RX.data.weather.source) || "";
   try {
     // `&start=1`：先起一轮仿真（可选 &stations=triple&mec=1&speed=2），
     // 这样「本次运行」页签才有内存态数据可看（否则只能看到"还没运行过"的提示）。
@@ -46,6 +47,9 @@
     const srcTxt = (document.getElementById("rxSrc") || {}).textContent || "";
     out.source = srcTxt;
     ok(/共 \d+ 张图/.test(srcTxt), "已读到实验产物：" + srcTxt);
+    out.weather_source = weatherSource();
+    ok(out.weather_source === "real" || out.weather_source === "synthetic",
+      "天气来源字段存在：" + out.weather_source);
 
     // 切到目标页签
     const tabs = [...document.querySelectorAll("#rxTabs button")];

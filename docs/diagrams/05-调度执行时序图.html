@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>调度执行时序图 · 无人机集群调度仿真</title>
+<link rel="icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=">
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&family=Noto+Serif:ital@0;1&display=swap" rel="stylesheet">
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --paper:#f5f5f5;--paper-2:#ececec;--ink:#2d3142;--muted:#4f5d75;--soft:#5a6580;
+    --accent:#bf4520;--link:#2e5aa8;--rule:rgba(45,49,66,0.12);
+    --sans:'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif;--serif:'Instrument Serif', 'Noto Serif', serif;--mono:'Geist Mono', 'Cascadia Mono', ui-monospace, monospace;
+  }
+  body{font-family:var(--sans);background:var(--paper);color:var(--ink);min-height:100vh;
+    display:flex;justify-content:center;padding:2rem 2rem 3rem}
+  .frame{width:100%;max-width:1360px;min-width:0}
+  .topnav{display:flex;align-items:center;justify-content:space-between;gap:1rem;
+    padding-bottom:1rem;margin-bottom:2rem;border-bottom:1px solid var(--rule)}
+  .topnav a,.topnav span{font-family:var(--mono);font-size:.68rem;letter-spacing:.1em;
+    text-transform:uppercase;color:var(--muted);text-decoration:none}
+  .topnav a:hover{color:var(--accent)}
+  .topnav .counter{color:var(--soft)}
+  .eyebrow{font-family:var(--mono);font-size:.66rem;font-weight:500;letter-spacing:.18em;
+    text-transform:uppercase;color:var(--muted);margin-bottom:.55rem}
+  h1{font-family:var(--serif);font-size:clamp(1.6rem,2.2vw + .8rem,2.15rem);
+    font-weight:400;letter-spacing:-.02em;line-height:1.12;margin-bottom:.45rem}
+  .dek{font-size:.86rem;line-height:1.65;color:var(--soft);max-width:72ch;margin-bottom:1.5rem}
+  .diagram-container{width:100%;max-width:100%;min-width:0;overflow-x:auto;
+    border:1px solid var(--rule);border-radius:8px;background:var(--paper-2);
+    padding:1rem}
+  svg{width:100%;min-width:1280px;display:block;background:var(--paper);border-radius:4px}
+  .notes{display:grid;grid-template-columns:1.12fr .88fr;gap:1rem;margin-top:1.25rem}
+  .card{background:#fff;border:1px solid var(--rule);border-radius:6px;padding:1.1rem 1.2rem}
+  .card h3{display:flex;align-items:center;gap:.55rem;font-size:.88rem;margin-bottom:.7rem}
+  .card-dot{width:7px;height:7px;border-radius:50%;background:var(--accent);flex:none}
+  .card ul{list-style:none;display:grid;gap:.45rem}
+  .card li{font-size:.76rem;line-height:1.55;color:var(--soft);padding-left:.85rem;position:relative}
+  .card li::before{content:"";position:absolute;left:0;top:.55em;width:4px;height:4px;
+    border-radius:50%;background:var(--muted);opacity:.55}
+  footer{display:flex;justify-content:space-between;gap:1rem;align-items:center;
+    margin-top:1.5rem;padding-top:.9rem;border-top:1px solid var(--rule);
+    font-family:var(--mono);font-size:.64rem;letter-spacing:.06em;color:var(--muted)}
+  footer .pager{display:flex;gap:1.2rem}
+  footer a{color:var(--muted);text-decoration:none}footer a:hover{color:var(--accent)}
+  .muted{color:var(--soft)}
+  @media (max-width:760px){
+    body{padding:1.2rem .8rem 2rem}.notes{grid-template-columns:1fr}
+    footer{align-items:flex-start;flex-direction:column}
+  }
+  @media print{
+    body{padding:0;background:#fff}.diagram-container{overflow-x:visible;border:0;padding:0;background:#fff}
+    svg{min-width:0}.topnav,footer{display:none}.notes{break-inside:avoid}
+  }
+</style>
+</head>
+<body>
+<div class="frame">
+  <nav class="topnav">
+    <a href="00-图册索引.html">← 系统图册</a>
+    <span class="counter">05 / 08</span>
+  </nav>
+  <p class="eyebrow">Sequence · 一次派发与回队</p>
+  <h1>调度执行时序图</h1>
+  <p class="dek">五条参与者生命线展示一次任务提交、准入、执行、完成确认，以及弱网条件下进入回队分支的顺序。</p>
+  <div class="diagram-container">
+<svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="seq-title seq-desc">
+<title id="seq-title">调度执行时序</title>
+<desc id="seq-desc">展示无人机提交任务、队列通知调度器、权重计算、限流准入、线程池执行、完成确认和弱网回队的时序。</desc>
+
+      <defs>
+        <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/>
+        </marker>
+        <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#bf4520"/>
+        </marker>
+        <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/>
+        </marker>
+        <marker id="arrow-open" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polyline points="0 0, 8 3, 0 6" fill="none" stroke="#4f5d75" stroke-width="1.2"/>
+        </marker>
+      </defs>
+<rect width="1280" height="720" fill="#f5f5f5"/>
+<line x1="100" y1="108" x2="100" y2="650" stroke="rgba(45,49,66,0.20)" stroke-width="1" stroke-dasharray="3,3"/>
+<line x1="340" y1="108" x2="340" y2="650" stroke="rgba(45,49,66,0.20)" stroke-width="1" stroke-dasharray="3,3"/>
+<line x1="580" y1="108" x2="580" y2="650" stroke="rgba(45,49,66,0.20)" stroke-width="1" stroke-dasharray="3,3"/>
+<line x1="820" y1="108" x2="820" y2="650" stroke="rgba(45,49,66,0.20)" stroke-width="1" stroke-dasharray="3,3"/>
+<line x1="1060" y1="108" x2="1060" y2="650" stroke="rgba(45,49,66,0.20)" stroke-width="1" stroke-dasharray="3,3"/>
+<rect x="96" y="148" width="8" height="60" fill="rgba(45,49,66,0.06)" stroke="#4f5d75" stroke-width="0.8"/>
+<rect x="336" y="150" width="8" height="480" fill="rgba(45,49,66,0.06)" stroke="#4f5d75" stroke-width="0.8"/>
+<rect x="576" y="190" width="8" height="410" fill="rgba(45,49,66,0.06)" stroke="#4f5d75" stroke-width="0.8"/>
+<rect x="816" y="290" width="8" height="60" fill="rgba(45,49,66,0.06)" stroke="#4f5d75" stroke-width="0.8"/>
+<rect x="1056" y="380" width="8" height="80" fill="rgba(45,49,66,0.06)" stroke="#4f5d75" stroke-width="0.8"/>
+<rect x="300" y="460" width="820" height="190" rx="4" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.22)" stroke-width="1"/>
+<rect x="300" y="460" width="52" height="16" rx="2" fill="#f5f5f5" stroke="rgba(45,49,66,0.22)" stroke-width="1"/>
+<text x="326" y="472" fill="#4f5d75" font-size="8" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.12em">ALT</text>
+<text x="312" y="492" fill="#4f5d75" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="start" letter-spacing="0.04em">[upload ok]</text>
+<line x1="308" y1="570" x2="1112" y2="570" stroke="rgba(45,49,66,0.20)" stroke-width="1" stroke-dasharray="4,3"/>
+<text x="312" y="588" fill="#4f5d75" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="start" letter-spacing="0.04em">[weak network]</text>
+<line x1="100" y1="160" x2="340" y2="160" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+<rect x="199.1" y="140" width="41.8" height="12" rx="2" fill="#f5f5f5"/><text x="220.0" y="149" fill="#5a6580" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.05em">SUBMIT</text>
+<line x1="340" y1="200" x2="580" y2="200" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+<rect x="441.6" y="180" width="36.8" height="12" rx="2" fill="#f5f5f5"/><text x="460.0" y="189" fill="#5a6580" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.05em">READY</text>
+<line x1="580" y1="300" x2="820" y2="300" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+<rect x="671.7" y="280" width="56.6" height="12" rx="2" fill="#f5f5f5"/><text x="700.0" y="289" fill="#5a6580" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.05em">TRY_ADMIT</text>
+<line x1="820" y1="340" x2="580" y2="340" stroke="#4f5d75" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+<rect x="679.1" y="320" width="41.8" height="12" rx="2" fill="#f5f5f5"/><text x="700.0" y="329" fill="#5a6580" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.05em">PERMIT</text>
+<line x1="580" y1="390" x2="1060" y2="390" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+<rect x="794.2" y="370" width="51.7" height="12" rx="2" fill="#f5f5f5"/><text x="820.0" y="379" fill="#5a6580" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.05em">DISPATCH</text>
+<line x1="1060" y1="520" x2="580" y2="520" stroke="#bf4520" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow-accent)"/>
+<rect x="794.2" y="500" width="51.7" height="12" rx="2" fill="#f5f5f5"/><text x="820.0" y="509" fill="#bf4520" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.05em">COMPLETE</text>
+<line x1="580" y1="550" x2="340" y2="550" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+<rect x="445.0" y="530" width="30.0" height="12" rx="2" fill="#f5f5f5"/><text x="460.0" y="539" fill="#5a6580" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.05em">ACK</text>
+<line x1="1060" y1="610" x2="580" y2="610" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+<rect x="786.7" y="590" width="66.6" height="12" rx="2" fill="#f5f5f5"/><text x="820.0" y="599" fill="#5a6580" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.05em">UPLOAD FAIL</text>
+<line x1="580" y1="640" x2="340" y2="640" stroke="#4f5d75" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+<rect x="436.6" y="620" width="46.7" height="12" rx="2" fill="#f5f5f5"/><text x="460.0" y="629" fill="#5a6580" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.05em">REQUEUE</text>
+<path d="M580 250 H620 V270 H584" fill="none" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+<text x="628" y="264" fill="#5a6580" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="start" letter-spacing="0.04em">WEIGHT(Q,W,L,S)</text>
+<rect x="20" y="60" width="160" height="48" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<text x="100" y="89" fill="#2d3142" font-size="10" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">UAV</text>
+<rect x="260" y="60" width="160" height="48" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<text x="340" y="89" fill="#2d3142" font-size="10" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">QUEUE</text>
+<rect x="500" y="60" width="160" height="48" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<text x="580" y="89" fill="#2d3142" font-size="10" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">SCHEDULER</text>
+<rect x="740" y="60" width="160" height="48" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<text x="820" y="89" fill="#2d3142" font-size="10" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">LIMITER</text>
+<rect x="980" y="60" width="160" height="48" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<text x="1060" y="89" fill="#2d3142" font-size="10" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">POOL</text>
+<line x1="40" y1="670" x2="1240" y2="670" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+<text x="40" y="688" fill="#4f5d75" font-size="8" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="start" letter-spacing="0.14em">LEGEND</text>
+<line x1="112" y1="686" x2="146" y2="686" stroke="#4f5d75" stroke-width="1"/>
+<text x="154" y="689" fill="#5a6580" font-size="9" font-weight="400" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">同步调用</text>
+<line x1="224.0" y1="686" x2="258.0" y2="686" stroke="#4f5d75" stroke-width="1" stroke-dasharray="5,4"/>
+<text x="266.0" y="689" fill="#5a6580" font-size="9" font-weight="400" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">返回 / 回退</text>
+<line x1="352.2" y1="686" x2="386.2" y2="686" stroke="#bf4520" stroke-width="1"/>
+<text x="394.2" y="689" fill="#5a6580" font-size="9" font-weight="400" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">成功完成</text>
+<rect x="464.2" y="679" width="14" height="14" rx="2" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<text x="486.2" y="689" fill="#5a6580" font-size="9" font-weight="400" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">参与者</text>
+</svg>
+  </div>
+  <div class="notes">
+    <article class="card"><p class="eyebrow">READING NOTE</p><h3><span class="card-dot"></span>消息类型不是装饰</h3><ul><li>实线是调用，虚线是返回或回退，完成消息用唯一强调色。</li><li>ALT 片段只覆盖弱网分支，不把正常路径也包进去。</li><li>激活条表示参与者持有一段时间的控制权。</li></ul></article><article class="card"><p class="eyebrow">CODE ANCHOR</p><h3><span class="card-dot"></span>调用链</h3><ul><li>UAVWorker.run() → Simulator.submit_task()</li><li>DynamicWeightScheduler.step() → try_admit()</li><li>Simulator.dispatch() → 线程池执行</li><li>完成回调 → metrics / trace / ACK</li></ul></article>
+  </div>
+  <footer>
+    <span>UAV Scheduler Simulation · Operating Systems Course Project</span>
+    <span class="pager"><a href="04-动态权重决策流程图.html">← 决策流程</a><a href="06-多基站部署拓扑图.html">部署拓扑 →</a></span>
+  </footer>
+</div>
+</body>
+</html>

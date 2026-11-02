@@ -253,7 +253,14 @@ PDF 提到的公开数据平台（**本项目未直接下载其数据**，仅作
 | 实训日志模板 | 本文件 §三 |
 | 小组分工模板 | 本文件 §四 |
 | 数据集说明与合规声明 | 本文件 §五 |
+| 系统图册入口（HTML） | `docs/diagrams/00-图册索引.html` |
 | 系统框架图（HTML） | `docs/diagrams/01-系统框架图.html` |
 | 函数级数据流图（HTML） | `docs/diagrams/02-数据流详细逻辑图.html` |
+| 任务生命周期状态机（HTML） | `docs/diagrams/03-任务生命周期状态机.html` |
+| 动态权重决策流程图（HTML） | `docs/diagrams/04-动态权重决策流程图.html` |
+| 调度执行时序图（HTML） | `docs/diagrams/05-调度执行时序图.html` |
+| 多基站部署拓扑图（HTML） | `docs/diagrams/06-多基站部署拓扑图.html` |
+| 数据库实体关系图（HTML） | `docs/diagrams/07-数据库实体关系图.html` |
+| 实验评测流水线（HTML） | `docs/diagrams/08-实验评测流水线.html` |
 | 单文件 exe | `dist/无人机集群调度仿真系统.exe` |
 | 图表尺寸放大 bug 修复 | `src/uav_sim/static/app3d.html`（`#chart` 补 CSS 宽高 + 尺寸保护） |

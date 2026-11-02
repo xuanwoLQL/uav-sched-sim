@@ -3,181 +3,207 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>数据流详细逻辑图 · 无人机采集到入库</title>
+<title>任务调度数据流图 · 无人机集群调度仿真</title>
+<link rel="icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=">
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&family=Noto+Serif:ital@0;1&display=swap" rel="stylesheet">
 <style>
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  :root {
-    --color-paper:  #f5f5f5;
-    --color-paper2: #ececec;
-    --color-ink:    #2d3142;
-    --color-muted:  #4f5d75;
-    --color-soft:   #5a6580;
-    --color-accent: #bf4520;
-    --font-sans:  'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
-    --font-serif: 'Instrument Serif', 'Noto Serif', serif;
-    --font-mono:  'Geist Mono', ui-monospace, monospace;
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --paper:#f5f5f5;--paper-2:#ececec;--ink:#2d3142;--muted:#4f5d75;--soft:#5a6580;
+    --accent:#bf4520;--link:#2e5aa8;--rule:rgba(45,49,66,0.12);
+    --sans:'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif;--serif:'Instrument Serif', 'Noto Serif', serif;--mono:'Geist Mono', 'Cascadia Mono', ui-monospace, monospace;
   }
-  body {
-    font-family: var(--font-sans);
-    background: var(--color-paper);
-    color: var(--color-ink);
-    min-height: 100vh; display: flex; align-items: flex-start; justify-content: center;
-    padding: 3rem 2rem;
+  body{font-family:var(--sans);background:var(--paper);color:var(--ink);min-height:100vh;
+    display:flex;justify-content:center;padding:2rem 2rem 3rem}
+  .frame{width:100%;max-width:1360px;min-width:0}
+  .topnav{display:flex;align-items:center;justify-content:space-between;gap:1rem;
+    padding-bottom:1rem;margin-bottom:2rem;border-bottom:1px solid var(--rule)}
+  .topnav a,.topnav span{font-family:var(--mono);font-size:.68rem;letter-spacing:.1em;
+    text-transform:uppercase;color:var(--muted);text-decoration:none}
+  .topnav a:hover{color:var(--accent)}
+  .topnav .counter{color:var(--soft)}
+  .eyebrow{font-family:var(--mono);font-size:.66rem;font-weight:500;letter-spacing:.18em;
+    text-transform:uppercase;color:var(--muted);margin-bottom:.55rem}
+  h1{font-family:var(--serif);font-size:clamp(1.6rem,2.2vw + .8rem,2.15rem);
+    font-weight:400;letter-spacing:-.02em;line-height:1.12;margin-bottom:.45rem}
+  .dek{font-size:.86rem;line-height:1.65;color:var(--soft);max-width:72ch;margin-bottom:1.5rem}
+  .diagram-container{width:100%;max-width:100%;min-width:0;overflow-x:auto;
+    border:1px solid var(--rule);border-radius:8px;background:var(--paper-2);
+    padding:1rem}
+  svg{width:100%;min-width:1280px;display:block;background:var(--paper);border-radius:4px}
+  .notes{display:grid;grid-template-columns:1.12fr .88fr;gap:1rem;margin-top:1.25rem}
+  .card{background:#fff;border:1px solid var(--rule);border-radius:6px;padding:1.1rem 1.2rem}
+  .card h3{display:flex;align-items:center;gap:.55rem;font-size:.88rem;margin-bottom:.7rem}
+  .card-dot{width:7px;height:7px;border-radius:50%;background:var(--accent);flex:none}
+  .card ul{list-style:none;display:grid;gap:.45rem}
+  .card li{font-size:.76rem;line-height:1.55;color:var(--soft);padding-left:.85rem;position:relative}
+  .card li::before{content:"";position:absolute;left:0;top:.55em;width:4px;height:4px;
+    border-radius:50%;background:var(--muted);opacity:.55}
+  footer{display:flex;justify-content:space-between;gap:1rem;align-items:center;
+    margin-top:1.5rem;padding-top:.9rem;border-top:1px solid var(--rule);
+    font-family:var(--mono);font-size:.64rem;letter-spacing:.06em;color:var(--muted)}
+  footer .pager{display:flex;gap:1.2rem}
+  footer a{color:var(--muted);text-decoration:none}footer a:hover{color:var(--accent)}
+  .muted{color:var(--soft)}
+  @media (max-width:760px){
+    body{padding:1.2rem .8rem 2rem}.notes{grid-template-columns:1fr}
+    footer{align-items:flex-start;flex-direction:column}
   }
-  .frame { max-width: 1120px; width: 100%; }
-  .diagram-container { width: 100%; overflow-x: auto; }
-  .eyebrow {
-    font-family: var(--font-mono); font-size: 0.66rem; font-weight: 500;
-    letter-spacing: 0.18em; text-transform: uppercase; color: var(--color-muted);
-    margin-bottom: 0.5rem;
-  }
-  h1 {
-    font-family: var(--font-serif); font-size: clamp(1.5rem, 2.4vw + 0.75rem, 2rem);
-    font-weight: 400; letter-spacing: -0.02em; line-height: 1.15;
-    color: var(--color-ink); margin-bottom: 0.35rem;
-  }
-  .dek { font-size: 0.82rem; color: var(--color-soft); margin-bottom: 1.5rem; max-width: 66ch; }
-  svg { width: 100%; min-width: 1040px; display: block; }
-  @media print {
-    .diagram-container { overflow-x: visible; }
-    svg { min-width: 0; }
+  @media print{
+    body{padding:0;background:#fff}.diagram-container{overflow-x:visible;border:0;padding:0;background:#fff}
+    svg{min-width:0}.topnav,footer{display:none}.notes{break-inside:avoid}
   }
 </style>
 </head>
 <body>
 <div class="frame">
-  <p class="eyebrow">Data flow · 函数级链路</p>
-  <h1>从无人机采集 → 调度执行 → 指标入库 → 三维呈现</h1>
-  <p class="dek">九个环节，每个节点下方标注真正执行的函数（mono）。左侧按四层分区：
-     无人机端 / 调度内核 / 评测入库 / 表现层。虚线是跨层的「旁路」路径（不走数据库）。</p>
-
+  <nav class="topnav">
+    <a href="00-图册索引.html">← 系统图册</a>
+    <span class="counter">02 / 08</span>
+  </nav>
+  <p class="eyebrow">Data flow · 从任务到结果</p>
+  <h1>任务调度数据流图</h1>
+  <p class="dek">五条泳道、六个阶段，追踪一次上传任务如何穿过生成、入队、调度、限流、执行、重试、结算和发布。</p>
   <div class="diagram-container">
-    <svg viewBox="0 0 1040 1120" xmlns="http://www.w3.org/2000/svg" role="img"
-         aria-labelledby="flow-title flow-desc">
-      <title id="flow-title">无人机数据从采集到入库的函数级数据流</title>
-      <desc id="flow-desc">按无人机端、调度内核、评测入库、表现层四个分区，展示任务从轨迹生成、入队、调度决策、派发执行、弱网重传、指标计算、数据库写入到三维界面呈现的九个环节及对应函数。</desc>
+<svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="flow-title flow-desc">
+<title id="flow-title">任务从生成到发布的数据流</title>
+<desc id="flow-desc">展示无人机任务生成、双队列入队、动态权重调度、限流准入、线程池执行、弱网重试、指标结算和结果发布的完整链路。</desc>
+
       <defs>
-        <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
-        <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#bf4520"/></marker>
+        <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/>
+        </marker>
+        <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#bf4520"/>
+        </marker>
+        <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/>
+        </marker>
+        <marker id="arrow-open" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polyline points="0 0, 8 3, 0 6" fill="none" stroke="#4f5d75" stroke-width="1.2"/>
+        </marker>
       </defs>
-      <rect width="100%" height="100%" fill="#f5f5f5"/>
-
-      <!-- ===== zones（先画，位于底层） ===== -->
-      <rect x="336" y="80" width="504" height="196" rx="8" fill="#ececec" opacity="0.55"/>
-
-      <rect x="336" y="296" width="504" height="412" rx="8" fill="#ececec" opacity="0.55"/>
-
-      <rect x="336" y="728" width="504" height="196" rx="8" fill="#ececec" opacity="0.55"/>
-
-      <rect x="336" y="944" width="504" height="96" rx="8" fill="#ececec" opacity="0.55"/>
-
-
-      <rect x="340" y="68" width="136" height="20" rx="4" fill="#f5f5f5" stroke="rgba(45,49,66,0.18)" stroke-width="0.8"/>
-      <text x="352" y="82" fill="#4f5d75" font-size="10" font-weight="600" font-family="'Geist', 'Microsoft YaHei', sans-serif">① 无人机端</text>
-      <rect x="340" y="284" width="136" height="20" rx="4" fill="#f5f5f5" stroke="rgba(45,49,66,0.18)" stroke-width="0.8"/>
-      <text x="352" y="298" fill="#4f5d75" font-size="10" font-weight="600" font-family="'Geist', 'Microsoft YaHei', sans-serif">② 调度内核</text>
-      <rect x="340" y="716" width="136" height="20" rx="4" fill="#f5f5f5" stroke="rgba(45,49,66,0.18)" stroke-width="0.8"/>
-      <text x="352" y="730" fill="#4f5d75" font-size="10" font-weight="600" font-family="'Geist', 'Microsoft YaHei', sans-serif">③ 评测与入库</text>
-      <rect x="340" y="932" width="136" height="20" rx="4" fill="#f5f5f5" stroke="rgba(45,49,66,0.18)" stroke-width="0.8"/>
-      <text x="352" y="946" fill="#4f5d75" font-size="10" font-weight="600" font-family="'Geist', 'Microsoft YaHei', sans-serif">④ 表现层</text>
-
-      <!-- ===== arrows + labels（先画，位于节点之下） ===== -->
-      <line x1="560" y1="152" x2="560" y2="204" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
-      <rect x="570" y="164" width="52" height="12" rx="2" fill="#f5f5f5"/>
-      <text x="596" y="173" fill="#5a6580" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">REPLAY</text>
-      <line x1="560" y1="260" x2="560" y2="312" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
-      <rect x="570" y="272" width="52" height="12" rx="2" fill="#f5f5f5"/>
-      <text x="596" y="281" fill="#5a6580" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">SUBMIT</text>
-      <line x1="560" y1="368" x2="560" y2="420" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
-      <rect x="570" y="380" width="58" height="12" rx="2" fill="#f5f5f5"/>
-      <text x="599" y="389" fill="#5a6580" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">ENQUEUE</text>
-      <line x1="560" y1="476" x2="560" y2="528" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
-      <rect x="570" y="488" width="64" height="12" rx="2" fill="#f5f5f5"/>
-      <text x="602" y="497" fill="#5a6580" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">DISPATCH</text>
-      <line x1="560" y1="584" x2="560" y2="636" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
-      <rect x="570" y="596" width="40" height="12" rx="2" fill="#f5f5f5"/>
-      <text x="590" y="605" fill="#5a6580" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">ROLL</text>
-      <line x1="560" y1="692" x2="560" y2="744" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
-      <rect x="570" y="704" width="58" height="12" rx="2" fill="#f5f5f5"/>
-      <text x="599" y="713" fill="#5a6580" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">METRICS</text>
-      <line x1="560" y1="800" x2="560" y2="852" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
-      <rect x="570" y="812" width="52" height="12" rx="2" fill="#f5f5f5"/>
-      <text x="596" y="821" fill="#5a6580" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">INSERT</text>
-      <line x1="560" y1="908" x2="560" y2="960" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
-      <rect x="570" y="920" width="36" height="12" rx="2" fill="#f5f5f5"/>
-      <text x="588" y="929" fill="#5a6580" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">API</text>
-
-      <!-- 重传：⑥ -> ④（绕右侧，虚线回到就绪队列） -->
-      <path d="M812 664 H868 V448 H816" fill="none" stroke="#bf4520" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#arrow-accent)"/>
-      <rect x="880" y="544" width="56" height="12" rx="2" fill="#f5f5f5"/>
-      <text x="908" y="553" fill="#5a6580" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">RETRY</text>
-
-      <!-- 实时旁路：④ -> ⑨（不走数据库，直接读快照） -->
-      <path d="M360 448 H320 V988 H356" fill="none" stroke="#4f5d75" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
-      <rect x="272" y="700" width="48" height="12" rx="2" fill="#f5f5f5"/>
-      <text x="296" y="709" fill="#5a6580" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">LIVE</text>
-
-      <!-- ===== nodes ===== -->
-      <rect x="360" y="96" width="452" height="56" rx="6" fill="#f5f5f5"/>
-      <rect x="360" y="96" width="452" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
-      <text x="376" y="120" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Microsoft YaHei', sans-serif">① 轨迹预生成（控制变量法的源头）</text>
-      <text x="376" y="138" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace">scenarios.generate_trace() → WorkloadTrace.events</text>
-
-      <rect x="360" y="204" width="452" height="56" rx="6" fill="#f5f5f5"/>
-      <rect x="360" y="204" width="452" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
-      <text x="376" y="228" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Microsoft YaHei', sans-serif">② 采集线程醒来（无人机行为 → 任务对象）</text>
-      <text x="376" y="246" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace">UAVWorker.run() → Simulator.make_task()</text>
-
-      <rect x="360" y="312" width="452" height="56" rx="6" fill="#f5f5f5"/>
-      <rect x="360" y="312" width="452" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
-      <text x="376" y="336" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Microsoft YaHei', sans-serif">③ 提交入队（按业务优先级分流）</text>
-      <text x="376" y="354" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace">Simulator.submit_task() → MultiLevelQueue.enqueue()</text>
-
-      <rect x="360" y="420" width="452" height="56" rx="6" fill="#f5f5f5"/>
-      <rect x="360" y="420" width="452" height="56" rx="6" fill="rgba(191,69,32,0.08)" stroke="#bf4520" stroke-width="1.2"/>
-      <text x="376" y="444" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Microsoft YaHei', sans-serif">④ 调度决策（权重 / 饥饿补偿 / 限流）</text>
-      <text x="376" y="462" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace">DynamicWeightScheduler.step() → _weight() → try_admit()</text>
-
-      <rect x="360" y="528" width="452" height="56" rx="6" fill="#f5f5f5"/>
-      <rect x="360" y="528" width="452" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
-      <text x="376" y="552" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Microsoft YaHei', sans-serif">⑤ 派发执行（8 线程真正"上传"）</text>
-      <text x="376" y="570" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace">Simulator.dispatch() → _run_task()</text>
-
-      <rect x="360" y="636" width="452" height="56" rx="6" fill="#f5f5f5"/>
-      <rect x="360" y="636" width="452" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
-      <text x="376" y="660" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Microsoft YaHei', sans-serif">⑥ 弱网判定（失败 → 退避重传 / 本地缓存）</text>
-      <text x="376" y="678" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace">_failure_probability() → _on_upload_failed()</text>
-
-      <rect x="360" y="744" width="452" height="56" rx="6" fill="#f5f5f5"/>
-      <rect x="360" y="744" width="452" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
-      <text x="376" y="768" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Microsoft YaHei', sans-serif">⑦ 指标计算（24 项，口径统一）</text>
-      <text x="376" y="786" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace">compute_metrics() → RunResult</text>
-
-      <rect x="360" y="852" width="452" height="56" rx="6" fill="#f5f5f5"/>
-      <rect x="360" y="852" width="452" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
-      <text x="376" y="876" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Microsoft YaHei', sans-serif">⑧ 入库 MySQL 8（单事务 + 批量 executemany）</text>
-      <text x="376" y="894" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace">DBWriter.save_run() → 4 张明细表</text>
-
-      <rect x="360" y="960" width="452" height="56" rx="6" fill="#f5f5f5"/>
-      <rect x="360" y="960" width="452" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
-      <text x="376" y="984" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Microsoft YaHei', sans-serif">⑨ 三维呈现（120ms 轮询实时快照）</text>
-      <text x="376" y="1002" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace">snapshot() → GET /api/state → applyState()</text>
-
-
-      <!-- ===== legend ===== -->
-      <line x1="40" y1="1064" x2="1000" y2="1064" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
-      <text x="40" y="1084" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">图例</text>
-      <line x1="96" y1="1081" x2="132" y2="1081" stroke="#4f5d75" stroke-width="1"/>
-      <text x="140" y="1084" fill="#5a6580" font-size="9" font-family="'Geist', 'Microsoft YaHei', sans-serif">任务 / 数据向前推进</text>
-      <line x1="332" y1="1081" x2="368" y2="1081" stroke="#bf4520" stroke-width="1" stroke-dasharray="5,4"/>
-      <text x="376" y="1084" fill="#5a6580" font-size="9" font-family="'Geist', 'Microsoft YaHei', sans-serif">弱网重传回队列</text>
-      <line x1="548" y1="1081" x2="584" y2="1081" stroke="#4f5d75" stroke-width="1" stroke-dasharray="5,4"/>
-      <text x="592" y="1084" fill="#5a6580" font-size="9" font-family="'Geist', 'Microsoft YaHei', sans-serif">实时快照旁路（不入库）</text>
-      <rect x="796" y="1074" width="14" height="14" rx="2" fill="rgba(191,69,32,0.08)" stroke="#bf4520" stroke-width="1"/>
-      <text x="818" y="1084" fill="#5a6580" font-size="9" font-family="'Geist', 'Microsoft YaHei', sans-serif">算法核心</text>
-    </svg>
+<rect width="1280" height="720" fill="#f5f5f5"/>
+<rect x="200" y="120" width="1040" height="120" fill="rgba(45,49,66,0.018)"/>
+<line x1="40" y1="120" x2="1240" y2="120" stroke="rgba(45,49,66,0.12)" stroke-width="0.8"/>
+<text x="112" y="182" fill="#4f5d75" font-size="8" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.12em">FIELD</text>
+<line x1="40" y1="240" x2="1240" y2="240" stroke="rgba(45,49,66,0.12)" stroke-width="0.8"/>
+<text x="112" y="302" fill="#4f5d75" font-size="8" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.12em">READY QUEUES</text>
+<rect x="200" y="360" width="1040" height="120" fill="rgba(45,49,66,0.018)"/>
+<line x1="40" y1="360" x2="1240" y2="360" stroke="rgba(45,49,66,0.12)" stroke-width="0.8"/>
+<text x="112" y="422" fill="#4f5d75" font-size="8" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.12em">CORE</text>
+<line x1="40" y1="480" x2="1240" y2="480" stroke="rgba(45,49,66,0.12)" stroke-width="0.8"/>
+<text x="112" y="542" fill="#4f5d75" font-size="8" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.12em">EVALUATION</text>
+<line x1="200" y1="120" x2="200" y2="600" stroke="rgba(45,49,66,0.20)" stroke-width="1"/>
+<rect x="244" y="14" width="32" height="16" rx="8" fill="rgba(45,49,66,0.12)"/>
+<text x="260" y="26" fill="#2d3142" font-size="8" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle">01</text>
+<text x="260" y="48" fill="#4f5d75" font-size="7" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.10em">GENERATE</text>
+<rect x="404" y="14" width="32" height="16" rx="8" fill="rgba(45,49,66,0.12)"/>
+<text x="420" y="26" fill="#2d3142" font-size="8" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle">02</text>
+<text x="420" y="48" fill="#4f5d75" font-size="7" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.10em">ENQUEUE</text>
+<rect x="564" y="14" width="32" height="16" rx="8" fill="rgba(191,69,32,0.08)"/>
+<text x="580" y="26" fill="#bf4520" font-size="8" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle">03</text>
+<text x="580" y="48" fill="#bf4520" font-size="7" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.10em">SCHEDULE</text>
+<rect x="724" y="14" width="32" height="16" rx="8" fill="rgba(45,49,66,0.12)"/>
+<text x="740" y="26" fill="#2d3142" font-size="8" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle">04</text>
+<text x="740" y="48" fill="#4f5d75" font-size="7" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.10em">EXECUTE</text>
+<rect x="884" y="14" width="32" height="16" rx="8" fill="rgba(45,49,66,0.12)"/>
+<text x="900" y="26" fill="#2d3142" font-size="8" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle">05</text>
+<text x="900" y="48" fill="#4f5d75" font-size="7" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.10em">SETTLE</text>
+<rect x="1044" y="14" width="32" height="16" rx="8" fill="rgba(45,49,66,0.12)"/>
+<text x="1060" y="26" fill="#2d3142" font-size="8" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle">06</text>
+<text x="1060" y="48" fill="#4f5d75" font-size="7" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.10em">PUBLISH</text>
+<path d="M320 168 H412 Q420 168 420 176 V256" fill="none" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+<rect x="432.0" y="210" width="41.8" height="12" rx="2" fill="#f5f5f5"/><text x="438" y="219" fill="#5a6580" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="start" letter-spacing="0.05em">SUBMIT</text>
+<path d="M480 288 H572 Q580 288 580 296 V376" fill="none" stroke="#bf4520" stroke-width="1.2" marker-end="url(#arrow-accent)"/>
+<rect x="592.0" y="330" width="32.0" height="12" rx="2" fill="#f5f5f5"/><text x="598" y="339" fill="#bf4520" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="start" letter-spacing="0.05em">STEP</text>
+<line x1="640" y1="408" x2="680" y2="408" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+<rect x="641.6" y="388" width="36.8" height="12" rx="2" fill="#f5f5f5"/><text x="660" y="397" fill="#5a6580" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.05em">ADMIT</text>
+<line x1="800" y1="408" x2="840" y2="408" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+<rect x="794.2" y="388" width="51.7" height="12" rx="2" fill="#f5f5f5"/><text x="820" y="397" fill="#5a6580" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.05em">DISPATCH</text>
+<line x1="900" y1="440" x2="900" y2="496" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+<rect x="912.0" y="462" width="41.8" height="12" rx="2" fill="#f5f5f5"/><text x="918" y="471" fill="#5a6580" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="start" letter-spacing="0.05em">METRIC</text>
+<line x1="960" y1="528" x2="1000" y2="528" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+<rect x="956.6" y="508" width="46.7" height="12" rx="2" fill="#f5f5f5"/><text x="980" y="517" fill="#5a6580" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.05em">PUBLISH</text>
+<path d="M900 376 V184 Q900 176 892 176 H820" fill="none" stroke="#4f5d75" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+<rect x="912.0" y="274" width="36.8" height="12" rx="2" fill="#f5f5f5"/><text x="918" y="283" fill="#5a6580" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="start" letter-spacing="0.05em">RETRY</text>
+<path d="M680 168 H496 Q488 168 488 176 V280 Q488 288 480 288" fill="none" stroke="#4f5d75" stroke-width="1" marker-end="url(#arrow)"/>
+<rect x="429.3" y="218" width="46.7" height="12" rx="2" fill="#f5f5f5"/><text x="435.28" y="227" fill="#5a6580" font-size="8" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="start" letter-spacing="0.05em">REQUEUE</text>
+<rect x="200" y="136" width="120" height="64" rx="6" fill="#f5f5f5"/>
+<rect x="200" y="136" width="120" height="64" rx="6" fill="rgba(79,93,117,0.10)" stroke="#5a6580" stroke-width="1"/>
+<rect x="208" y="142" width="33" height="12" rx="2" fill="transparent" stroke="#5a6580" stroke-opacity="0.42" stroke-width="0.8"/>
+<text x="224.5" y="151" fill="#5a6580" font-size="7" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">FIELD</text>
+<text x="260.0" y="164" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">生成任务</text>
+<text x="260.0" y="180" fill="#4f5d75" font-size="9" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle">TraceEvent</text>
+<text x="260.0" y="193" fill="#4f5d75" font-size="9" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle">make_task()</text>
+<rect x="360" y="256" width="120" height="64" rx="6" fill="#f5f5f5"/>
+<rect x="360" y="256" width="120" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<rect x="368" y="262" width="33" height="12" rx="2" fill="transparent" stroke="#2d3142" stroke-opacity="0.42" stroke-width="0.8"/>
+<text x="384.5" y="271" fill="#2d3142" font-size="7" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">QUEUE</text>
+<text x="420.0" y="284" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">双层就绪队列</text>
+<text x="420.0" y="300" fill="#4f5d75" font-size="9" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle">HIGH / LOW</text>
+<text x="420.0" y="313" fill="#4f5d75" font-size="9" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle">congestion</text>
+<rect x="520" y="376" width="120" height="64" rx="6" fill="#f5f5f5"/>
+<rect x="520" y="376" width="120" height="64" rx="6" fill="rgba(191,69,32,0.08)" stroke="#bf4520" stroke-width="1.2"/>
+<rect x="528" y="382" width="38" height="12" rx="2" fill="transparent" stroke="#bf4520" stroke-opacity="0.42" stroke-width="0.8"/>
+<text x="547.0" y="391" fill="#bf4520" font-size="7" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">POLICY</text>
+<text x="580.0" y="404" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">动态权重</text>
+<text x="580.0" y="420" fill="#4f5d75" font-size="9" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle">W = f(Q,W,L,S)</text>
+<text x="580.0" y="433" fill="#4f5d75" font-size="9" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle">hard boost</text>
+<rect x="680" y="376" width="120" height="64" rx="6" fill="#f5f5f5"/>
+<rect x="680" y="376" width="120" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<rect x="688" y="382" width="33" height="12" rx="2" fill="transparent" stroke="#2d3142" stroke-opacity="0.42" stroke-width="0.8"/>
+<text x="704.5" y="391" fill="#2d3142" font-size="7" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">LIMIT</text>
+<text x="740.0" y="404" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">限流准入</text>
+<text x="740.0" y="420" fill="#4f5d75" font-size="9" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle">try_admit()</text>
+<text x="740.0" y="433" fill="#4f5d75" font-size="9" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle">8 slots</text>
+<rect x="840" y="376" width="120" height="64" rx="6" fill="#f5f5f5"/>
+<rect x="840" y="376" width="120" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<rect x="848" y="382" width="30" height="12" rx="2" fill="transparent" stroke="#2d3142" stroke-opacity="0.42" stroke-width="0.8"/>
+<text x="863.0" y="391" fill="#2d3142" font-size="7" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">POOL</text>
+<text x="900.0" y="404" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">线程池执行</text>
+<text x="900.0" y="420" fill="#4f5d75" font-size="9" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle">dispatch()</text>
+<text x="900.0" y="433" fill="#4f5d75" font-size="9" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle">upload task</text>
+<rect x="680" y="136" width="120" height="64" rx="6" fill="#f5f5f5"/>
+<rect x="680" y="136" width="120" height="64" rx="6" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.20)" stroke-width="1" stroke-dasharray="4,3"/>
+<rect x="688" y="142" width="33" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.20)" stroke-opacity="0.42" stroke-width="0.8"/>
+<text x="704.5" y="151" fill="rgba(45,49,66,0.20)" font-size="7" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">RETRY</text>
+<text x="740.0" y="164" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">弱网重试</text>
+<text x="740.0" y="180" fill="#4f5d75" font-size="9" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle">backoff 2s</text>
+<text x="740.0" y="193" fill="#4f5d75" font-size="9" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle">CACHED</text>
+<rect x="840" y="496" width="120" height="64" rx="6" fill="#f5f5f5"/>
+<rect x="840" y="496" width="120" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<rect x="848" y="502" width="38" height="12" rx="2" fill="transparent" stroke="#2d3142" stroke-opacity="0.42" stroke-width="0.8"/>
+<text x="867.0" y="511" fill="#2d3142" font-size="7" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">METRIC</text>
+<text x="900.0" y="524" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">指标结算</text>
+<text x="900.0" y="540" fill="#4f5d75" font-size="9" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle">24 metrics</text>
+<text x="900.0" y="553" fill="#4f5d75" font-size="9" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle">RunResult</text>
+<rect x="1000" y="496" width="120" height="64" rx="6" fill="#f5f5f5"/>
+<rect x="1000" y="496" width="120" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+<rect x="1008" y="502" width="38" height="12" rx="2" fill="transparent" stroke="#2d3142" stroke-opacity="0.42" stroke-width="0.8"/>
+<text x="1027.0" y="511" fill="#2d3142" font-size="7" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">REPORT</text>
+<text x="1060.0" y="524" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">结果发布</text>
+<text x="1060.0" y="540" fill="#4f5d75" font-size="9" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle">summary.csv</text>
+<text x="1060.0" y="553" fill="#4f5d75" font-size="9" font-weight="400" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="middle">charts/*.png</text>
+<line x1="40" y1="670" x2="1240" y2="670" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+<text x="40" y="688" fill="#4f5d75" font-size="8" font-weight="500" font-family="'Geist Mono', 'Cascadia Mono', ui-monospace, monospace" text-anchor="start" letter-spacing="0.14em">LEGEND</text>
+<line x1="112" y1="686" x2="146" y2="686" stroke="#4f5d75" stroke-width="1"/>
+<text x="154" y="689" fill="#5a6580" font-size="9" font-weight="400" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">任务推进</text>
+<line x1="224.0" y1="686" x2="258.0" y2="686" stroke="#4f5d75" stroke-width="1" stroke-dasharray="5,4"/>
+<text x="266.0" y="689" fill="#5a6580" font-size="9" font-weight="400" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">弱网回退</text>
+<line x1="336.0" y1="686" x2="370.0" y2="686" stroke="#bf4520" stroke-width="1"/>
+<text x="378.0" y="689" fill="#5a6580" font-size="9" font-weight="400" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">核心决策</text>
+<rect x="448.0" y="679" width="14" height="14" rx="2" fill="rgba(191,69,32,0.08)" stroke="#bf4520" stroke-width="1"/>
+<text x="470.0" y="689" fill="#5a6580" font-size="9" font-weight="400" font-family="'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif" text-anchor="middle">动态权重</text>
+</svg>
   </div>
+  <div class="notes">
+    <article class="card"><p class="eyebrow">READING NOTE</p><h3><span class="card-dot"></span>控制变量法的数据链</h3><ul><li>任务与链路曲线先离线生成，所有策略只回放同一份输入。</li><li>失败任务进入退避与本地缓存，恢复后重新回到就绪队列。</li><li>指标结算与发布是两条独立出口：数据库和图表文件。</li></ul></article><article class="card"><p class="eyebrow">EVIDENCE</p><h3><span class="card-dot"></span>可直接打开的产物</h3><ul><li>results/raw/*.json — 队列/链路时序</li><li>results/summary.csv — 15 组矩阵</li><li>charts/06-队列堆积时序.png</li><li>charts/07-链路健康度与权重曲线.png</li></ul></article>
+  </div>
+  <footer>
+    <span>UAV Scheduler Simulation · Operating Systems Course Project</span>
+    <span class="pager"><a href="01-系统框架图.html">← 系统架构</a><a href="03-任务生命周期状态机.html">状态机 →</a></span>
+  </footer>
 </div>
 </body>
 </html>

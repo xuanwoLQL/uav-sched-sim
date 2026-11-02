@@ -134,6 +134,22 @@ weather:
     snow:  { visibility_km: 1.2,  link_penalty_max: 24.0, wind_speed_mps: 4.0 }
     dust:  { visibility_km: 0.6,  link_penalty_max: 32.0, wind_speed_mps: 14.0 }
 
+real:
+  # 真实环境数据（本轮只接天气）。默认关闭：15 组矩阵与单站 SHA-256 基线
+  # 继续走内置合成天气，不需要网络、不需要 API key。
+  enable: false
+  source: snapshot             # snapshot | open_meteo
+  snapshot: data/real/weather_snapshot.json
+  cache_ttl_s: 900             # source=open_meteo 时，复用该时长内的快照
+  fallback: synthetic          # 唯一支持值；真实数据不可用时回退合成
+  weather:
+    # 默认取当前真实 DEM 的中心坐标（德兴铜矿作业区）
+    latitude: 41.8455
+    longitude: 123.9092
+    timezone: Asia/Shanghai
+    timeout_s: 10
+    name: 作业区
+
 database:
   # 关闭后所有结果只落本地 CSV/JSON，程序功能不受影响（优雅降级）
   enable: true
