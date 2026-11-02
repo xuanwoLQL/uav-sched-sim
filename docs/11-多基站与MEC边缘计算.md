@@ -11,7 +11,7 @@
 >
 > 另：本仿真器是真实多线程 + sleep 模拟 IO，**实测指标为"单次实跑口径"**（wall-clock 抖动见 §4.4）。
 >
-> 版本：v1.0 · 工程 `D:\study\uav_sched_sim`
+> 版本：v1.0 · 工程 `<项目根>`
 
 ---
 
@@ -1186,7 +1186,7 @@ OS 透视「多基站」页签新增 quorum 卡片与每站卡片的 **`分区�
 ## 6. 复现命令
 
 ```powershell
-cd D:\study\uav_sched_sim
+cd <项目根>
 
 # ① 可视化演示：打开 3D 场景 + OS 透视「多基站」页签
 & ".\.venv\Scripts\python.exe" run.py ui
@@ -1311,9 +1311,9 @@ PEAK 逐策略绝对值（改造前 → 改造后，仅列结论级）：
 | `mlfq` | 26.04 → 25.99 | 95.87 % → 95.66 % |
 | `dynamic` | 25.86 → 25.86 | 95.17 % → 95.41 % |
 
-> **对拍产物在仓库外**：`D:\study\uav_sched_sim-archive\regress\`
+> **对拍产物在仓库外**：`<仓库外归档>\regress\`
 > （`summary_before.csv` / `summary_run1.csv` / `summary_run2.csv` + `compare_jitter.py`）。
-> 复算：`& ".\.venv\Scripts\python.exe" D:\study\uav_sched_sim-archive\regress\compare_jitter.py`。
+> 复算：`& ".\.venv\Scripts\python.exe" <仓库外归档>\regress\compare_jitter.py`。
 > **不引入抖动基线就宣称"没改坏"，是口号；有了它才是可复现的对照证据。**
 
 ### 7.2 因此
@@ -1348,7 +1348,7 @@ PEAK 逐策略绝对值（改造前 → 改造后，仅列结论级）：
 ### 8.1 本轮验收证据汇总（可复现）
 
 ```powershell
-cd D:\study\uav_sched_sim
+cd <项目根>
 
 # ① 三件套门禁（基线 83 → 现在 115 passed）
 & ".\.venv\Scripts\python.exe" -m ruff check src tests run.py gpu tools/bench_weather.py   # All checks passed!
@@ -1402,4 +1402,4 @@ node tools\shot.mjs --gpu --url "http://127.0.0.1:8791/static/app3d.html?quality
 | `gpu/README.md` §9 | §4.8 GPU 多站/MEC 的构建、对拍表与诚实边界 |
 | `tests/test_rebalance.py` / `test_quorum.py` / `test_station_matrix.py` / `test_replication_variants.py` / `test_des_multistation.py` | 本轮新增的 5 个测试文件（共 32 条用例），逐条对应 §8 的验收点 |
 | `results/summary.csv` | 既有 15 组的实测数字（本章默认单站配置下与之**无系统性差异**，见 §7.1） |
-| `D:\study\uav_sched_sim-archive\regress\` | §7.1 的"抖动基线 vs 改造前后"对拍产物与 `compare_jitter.py`（**仓库外**） |
+| `<仓库外归档>\regress\` | §7.1 的"抖动基线 vs 改造前后"对拍产物与 `compare_jitter.py`（**仓库外**） |

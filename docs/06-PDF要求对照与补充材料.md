@@ -26,10 +26,10 @@
 
 | # | PDF 要求 | 本工程落点 | 状态 |
 |---|---|---|---|
-| 5 | 硬件环境：内存 ≥8GB，教师机 ≥16GB | 实测 i5-12500H / 15.7GB，`run.py check` 有内存检测项 | ✅ |
+| 5 | 硬件环境：内存 ≥8GB，教师机 ≥16GB | 实测 12 核 16 线程 / 16 GB，`run.py check` 有内存检测项 | ✅ |
 | 6 | 软件环境：Python 3.8+，threading / queue / socket / matplotlib | Python 3.11.0 + 标准库 threading/queue + matplotlib 3.11.2（**未用 socket**，见说明①） | 🟡 |
 | 7 | 开发 IDE：PyCharm 或 VS Code | 用 VS Code（已装 ms-python/Pylance）；IDEA 2024.1.3 Ultimate 用于直连 MySQL | ✅ |
-| 8 | 版本管理：Git | `.gitignore` 已就绪；本机未初始化仓库（无 git 客户端约束） | 🟡 |
+| 8 | 版本管理：Git | `.gitignore` 已就绪；已上传 GitHub（脱敏后公开） | 🟡 |
 | 9 | 代码/注释/日志规范统一 | 每模块 docstring 写四层映射；统一 logging 格式 | ✅ |
 | 10 | 课前资源：案例 PPT、工况介绍、模块开发指导文档、**实验报告模板、小组分工模板** | `docs/02`（报告模板）、`docs/03`（指导书）；**分工模板本次补** | ✅ |
 | 11 | 数据集来源说明与合规性声明 | **本次补**（见本文件 §五） | ➕ |

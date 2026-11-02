@@ -3,10 +3,10 @@
     构建 GPU 重复实验内核（replication_kernel.cu）。
 
 .DESCRIPTION
-    本机（2026-11 实测）环境：
-      * CUDA Toolkit 13.3  ->  D:\CUDA Toolkit for hashcat\bin\nvcc.exe
-      * MSVC 14.51 (VS2022)->  D:\Reverse tools\Visual Studio 2022\visual studio 2022
-    两者都不在 PATH 里，所以本脚本负责把 nvcc 的编译环境拼出来
+    环境要求：
+      * CUDA Toolkit（nvcc 在 PATH，或设置 CUDA_PATH）
+      * MSVC（Visual Studio 2022，用 vswhere 自动定位）
+    脚本负责把 nvcc 的编译环境拼出来
     （设置 PATH / INCLUDE / LIB 三个变量），再调用 nvcc。
 
 .PARAMETER Rebuild
@@ -27,7 +27,7 @@ $root = Split-Path -Parent $here
 
 # ---- 1) 找 nvcc ----
 $nvccCandidates = @(
-    'D:\CUDA Toolkit for hashcat\bin\nvcc.exe',
+    'nvcc.exe',
     "$env:CUDA_PATH\bin\nvcc.exe"
 )
 $nvcc = $null
@@ -48,9 +48,9 @@ if (Test-Path $vswhere) {
     $vsRoot = (& $vswhere -latest -products * -property installationPath) 2>$null
 }
 if (-not $vsRoot) {
-    # 本机实测路径（VS 装在 D 盘）
-    foreach ($p in @('D:\Reverse tools\Visual Studio 2022\visual studio 2022',
-                     'C:\Program Files\Microsoft Visual Studio\2022\Community')) {
+    foreach ($p in @('C:\Program Files\Microsoft Visual Studio\2022\Community',
+                     'C:\Program Files\Microsoft Visual Studio\2022\Professional',
+                     'C:\Program Files\Microsoft Visual Studio\2022\Enterprise')) {
         if (Test-Path $p) { $vsRoot = $p; break }
     }
 }

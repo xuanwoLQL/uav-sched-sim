@@ -10,10 +10,10 @@
 
 | 项 | 值 |
 |---|---|
-| 工程根目录 | `D:\study\uav_sched_sim` |
-| 解释器 | `D:\study\uav_sched_sim\.venv\Scripts\python.exe`（Python 3.11.0） |
+| 工程根目录 | `<项目根>` |
+| 解释器 | `<项目根>\.venv\Scripts\python.exe`（Python 3.11.0） |
 | 数据库 | MySQL 8.0.45 Community @ `127.0.0.1:3306`，库名 `uav_sched_sim` |
-| 依赖 | PyYAML 6.0.3 / matplotlib 3.11.2 / pandas 3.1.0 / PyMySQL 1.2.3 / numpy 2.4.6 |
+| 依赖 | PyYAML 6.0.3 / matplotlib 3.11.2 / pandas 3.1.0 / PyMySQL 2.2.8 / numpy 2.4.6 |
 | 重型依赖 | **无**。核心逻辑只用标准库 `threading` / `queue` / `concurrent.futures` / `statistics`；numpy 仅被 matplotlib 间接使用 |
 | 规模 | 3 工况 × 5 策略 = 15 组（**既有矩阵，不变**）；峰值工况 90 仿真秒、30 架无人机、2756 条到达事件。另有第 6 种策略 `cross_node` 与多基站/MEC 能力，默认单站时退化为原行为（§4.10） |
 | 指标 | **24 个**统一口径指标（15 组矩阵全部沿用、不变）；多基站/MEC 另定义 **18 个站级/MEC 指标键**，单站模式下恒为 0/等价值（`models.METRIC_SPEC` 共 42 键） |
@@ -28,10 +28,10 @@
 
 ```powershell
 # 0) 进入工程目录（后续命令都在这里执行）
-cd D:\study\uav_sched_sim
+cd <项目根>
 
 # 1) 建虚拟环境（只需一次）
-& "C:\Users\Administrator\AppData\Local\Programs\Python\Python311\python.exe" -m venv .venv
+& "python" -m venv .venv
 
 # 2) 装依赖（清华源，避免超时）
 & ".\.venv\Scripts\python.exe" -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
@@ -55,8 +55,8 @@ cd D:\study\uav_sched_sim
 跑完看三样东西：
 
 ```powershell
-start "" "D:\study\uav_sched_sim\charts"          # 7 张对比图
-code "D:\study\uav_sched_sim\results\summary.csv" # 15 行汇总表（Excel 可直接打开）
+start "" "<项目根>\charts"          # 7 张对比图
+code "<项目根>\results\summary.csv" # 15 行汇总表（Excel 可直接打开）
 mysql --host=127.0.0.1 -uroot -p -e "use uav_sched_sim; select * from v_exp_summary;"
 ```
 
@@ -67,7 +67,7 @@ mysql --host=127.0.0.1 -uroot -p -e "use uav_sched_sim; select * from v_exp_summ
 ## 3. 目录结构
 
 ```
-D:\study\uav_sched_sim\
+<项目根>\
 ├─ config.yaml                    # 全部真实参数（工况/算法系数/限流/弱网/数据库），改这里不改代码
 ├─ config.example.yaml            # 脱敏模板（config.yaml 已被 .gitignore 忽略，含明文口令）
 ├─ pyproject.toml                 # 包元数据 + 依赖分层 + pytest/coverage/ruff 配置
@@ -234,7 +234,7 @@ D:\study\uav_sched_sim\
 | 数据源 | AWS `elevation-tiles-prod` 的 Mapzen Terrarium 瓦片（NASA SRTM 等多源 DEM 合成，**公开免密钥**） |
 | 区域 | 辽宁**抚顺西露天矿及周边**（亚洲最大露天煤矿，坑长约 6.6 km，最深处约 −420 m） |
 | 网格 | **1024 × 760**，14.2 m/px，真实海拔 **−281 ~ +237 m**（覆盖 14.6 × 10.8 km） |
-| 文件 | `src/uav_sim/static/dem.json`（**2.0 MB**；旧版 512×380 备份已归档到 `D:\study\uav_sched_sim-archive\_backup\dem-512x380.json`） |
+| 文件 | `src/uav_sim/static/dem.json`（**2.0 MB**；旧版 512×380 备份已归档到 `<仓库外归档>\_backup\dem-512x380.json`） |
 | 世界尺寸 | **352 × 256 世界单位**（旧版 176×128，面积 ×4；1 世界单位仍 ≈ 41 m，山体/矿坑物理尺寸不变，只是可作业区域变大） |
 | 垂直放大 | **4×**（1 世界单位 ≈ 41 m 水平；不放大则 518 m 高差在近景里几乎是平的） |
 | 配套 | 相机距离上限 340→760、机群铺满全矿区、单机测区 21×19→34×30、植被/碎石按新面积加权、远景远山外推、雾密度 0.0034→0.0016（远景不再糊成一片） |
@@ -409,7 +409,7 @@ http://127.0.0.1:<端口>/static/_dev_weather.html     # 天气：?preset=dust&i
 ```powershell
 & ".\.venv\Scripts\python.exe" -m pip install -e ".[dev]"   # 可编辑安装（含 pytest/ruff）
 uavsim check                                                 # 等价于 python run.py check
-& ".\.venv\Scripts\python.exe" -m pytest -q                  # 54 个用例
+& ".\.venv\Scripts\python.exe" -m pytest -q                  # 153 个用例
 & ".\.venv\Scripts\python.exe" -m ruff check src tests run.py
 ```
 
@@ -595,7 +595,7 @@ curl -o trace.csv "http://127.0.0.1:8765/api/trace?format=csv"
 | 策略矩阵 | 3 工况 × 5 经典策略 = 15 组 | `cross_node` **不入矩阵** |
 | 指标 | 既有 24 个口径不变；站级/MEC 18 个键恒为 0/等价值；quorum 4 个键中 `quorum_commits` 单站下**等于完成数**、其余 3 个恒 0（键总数 **24 → 46**） | 结构与行数口径不变（`summary.csv` 仍 15 行；新增键按 `METRIC_SPEC` 自动多出列） |
 
-> 对拍产物在**仓库外**：`D:\study\uav_sched_sim-archive\regress\`（`summary_before/run1/run2.csv` + `compare_jitter.py`）。
+> 对拍产物在**仓库外**：`<仓库外归档>\regress\`（`summary_before/run1/run2.csv` + `compare_jitter.py`）。
 > **不引入抖动基线就宣称"没改坏"，是口号；有了它才是可复现的对照证据。**
 
 ### 4.10.5 `run.py mec` 实测结果（单次实跑口径）
@@ -1008,7 +1008,7 @@ mysql --host=127.0.0.1 --port=3306 --user=root -p --database=uav_sched_sim -e "s
 
 ### 12. 测试怎么跑？
 
-三种方式，任选其一（`tests/` 下共 **15** 个测试文件、**115** 个用例，全部通过）：
+三种方式，任选其一（`tests/` 下共 **17** 个测试文件、**153** 个用例，全部通过）：
 
 ```powershell
 # ① 推荐：pytest（pyproject.toml 里已配好 testpaths/pythonpath，无需设 PYTHONPATH）
@@ -1049,6 +1049,7 @@ CRN 种子清单）；`tests/test_des_model.py` 覆盖 GPU 分析模型的确定
 ## 6. 文档索引
 - [`docs/06-PDF要求对照与补充材料.md`](docs/06-PDF要求对照与补充材料.md) —— **PDF 逐条对照 + 8 道开放性问题答案 + 实训日志/小组分工模板 + 数据集合规声明**
 - [`docs/diagrams/00-图册索引.html`](docs/diagrams/00-图册索引.html) —— **系统图册入口**：8 张 HTML/SVG 图，含统一导航与打印样式
+- [`docs/charts/`](docs/charts/) —— **10 张结果图快照**：吞吐 / 时延 / 饥饿 / 利用率 / 完整率 / 队列 / 链路 / 天气 / 站级 MEC / 多站矩阵
 - [`docs/diagrams/01-系统框架图.html`](docs/diagrams/01-系统框架图.html) —— 系统分层架构：现场线程、调度内核、评测存储、3D 监控台
 - [`docs/diagrams/02-数据流详细逻辑图.html`](docs/diagrams/02-数据流详细逻辑图.html) —— 任务生成 → 入队 → 调度 → 限流 → 执行 → 重试 → 结算 → 发布
 - [`docs/diagrams/03-任务生命周期状态机.html`](docs/diagrams/03-任务生命周期状态机.html) —— READY / RUNNING / BLOCKED / RETRY / CACHED / DONE / FAILED / CANCELLED

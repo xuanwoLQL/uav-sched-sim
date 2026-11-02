@@ -37,7 +37,7 @@ $ProgressPreference    = 'SilentlyContinue'
 
 $Root  = Split-Path -Parent $PSScriptRoot
 $Venv  = Join-Path $Root '.venv\Scripts\python.exe'
-$Mysql = 'D:\Program Files\MySQL\MySQL Server 8.0\bin\mysql.exe'
+$Mysql = 'mysql.exe'
 
 function Write-Step {
     param([string]$Text)

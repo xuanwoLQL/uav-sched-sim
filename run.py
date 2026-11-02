@@ -5,7 +5,7 @@ run.py —— UavSchedulerSim 统一命令行入口
 
 《操作系统》课程实训项目：面向智慧地质勘查的无人机集群并发自适应负载均衡调度仿真系统
 
-用法（在项目根目录 D:\\study\\uav_sched_sim 下执行）：
+用法（在项目根目录 uav_sched_sim 下执行）：
     .venv\\Scripts\\python.exe run.py check                 环境自检
     .venv\\Scripts\\python.exe run.py calibrate             三工况容量标定报告
     .venv\\Scripts\\python.exe run.py one --scenario LIGHT --scheduler dynamic

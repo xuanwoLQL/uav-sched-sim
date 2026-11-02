@@ -49,7 +49,7 @@ $ConfigFile = Join-Path $Root 'config.yaml'
 
 # MySQL 客户端（本机实测路径；找不到再尝试 PATH）
 $MysqlCandidates = @(
-    'D:\Program Files\MySQL\MySQL Server 8.0\bin\mysql.exe',
+    'mysql.exe',
     'C:\Program Files\MySQL\MySQL Server 8.0\bin\mysql.exe'
 )
 $Mysql = $MysqlCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1

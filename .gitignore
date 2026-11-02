@@ -15,6 +15,9 @@ htmlcov/
 # ---- 运行产出（可重新生成，不入库） ----
 results/
 charts/
+# 结果图在 docs/charts/ 保留一份（根目录 charts/ 仍作为运行产物忽略）
+!docs/charts/
+!docs/charts/*.png
 logs/
 data/real/
 
@@ -26,7 +29,7 @@ config.yaml
 
 # ---- 调试 / 归档产物（开发过程留下，不属于交付物） ----
 # 注：2026-11 已把 shots/、build/、_check.js、_tdbg.py、_backup/ 移出仓库
-#（见 D:\study\uav_sched_sim-archive）。测试需要的"改动前实现"已转正为
+#（见 <仓库外归档>）。测试需要的"改动前实现"已转正为
 # tests/fixtures/link_monitor_prechange.py，随测试一起入库。
 shots/
 archive/

@@ -12,7 +12,7 @@ config.py —— 全局配置加载、嵌套取值与路径解析
 | 代码实现层 | `load_config()` / `get()` / `project_root()` / `resolve_path()` |
 
 约定（对应契约 §4.1，签名逐字冻结）：
-    * 项目根 = 本文件上溯两级：``src/uav_sim/config.py`` -> ``D:\\study\\uav_sched_sim``
+    * 项目根 = 本文件上溯两级：``src/uav_sim/config.py`` -> ``uav_sched_sim``
     * 环境变量 ``UAV_DB_PASSWORD`` 优先于 ``config.yaml`` 里的 ``database.password``
       （生产环境只设环境变量，避免密码进入版本库）。
 """

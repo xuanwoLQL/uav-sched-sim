@@ -24,7 +24,7 @@
 自检：
 
 ```powershell
-$check = "D:\agent\diagram-design-main\skills\diagram-design\scripts\self_check.py"
+$check = "<diagram-design>\scripts\self_check.py"
 Get-ChildItem docs\diagrams -Filter *.html | ForEach-Object {
   & ".\.venv\Scripts\python.exe" $check $_.FullName
 }

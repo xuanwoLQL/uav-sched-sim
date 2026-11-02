@@ -224,8 +224,8 @@ RTX 3050 Laptop（4 GB 显存，16 个 SM）：
 
 | 组件 | 路径 | 版本 |
 |---|---|---|
-| nvcc | `D:\CUDA Toolkit for hashcat\bin\nvcc.exe` | CUDA 13.3 |
-| MSVC | `D:\Reverse tools\Visual Studio 2022\visual studio 2022` | 14.51（cl.exe 是 nvcc 的 host 编译器） |
+| nvcc | `nvcc.exe` | CUDA 13.3 |
+| MSVC | `<VS2022 安装目录>` | 14.51（cl.exe 是 nvcc 的 host 编译器） |
 | GPU | NVIDIA GeForce RTX 3050 Laptop, `sm_86`, 16 SMs | 见 `nvidia-smi` |
 
 `build.ps1` 会自动拼 `PATH/INCLUDE/LIB`，并处理了三个隐蔽的坑：
