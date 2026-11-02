@@ -16,7 +16,7 @@
 | 依赖 | PyYAML 6.0.3 / matplotlib 3.11.2 / pandas 3.1.0 / PyMySQL 2.2.8 / numpy 2.4.6 |
 | 重型依赖 | **无**。核心逻辑只用标准库 `threading` / `queue` / `concurrent.futures` / `statistics`；numpy 仅被 matplotlib 间接使用 |
 | 规模 | 3 工况 × 5 策略 = 15 组（**既有矩阵，不变**）；峰值工况 90 仿真秒、30 架无人机、2756 条到达事件。另有第 6 种策略 `cross_node` 与多基站/MEC 能力，默认单站时退化为原行为（§4.10） |
-| 指标 | **24 个**统一口径指标（15 组矩阵全部沿用、不变）；多基站/MEC 另定义 **18 个站级/MEC 指标键**，单站模式下恒为 0/等价值（`models.METRIC_SPEC` 共 42 键） |
+| 指标 | **24 个**基础统一口径指标（15 组矩阵全部沿用、不变）；多基站/MEC/quorum 另定义 **22 个扩展指标键**，单站模式下恒为 0/等价值（`models.METRIC_SPEC` 共 **46** 键） |
 | 全量实耗 | 约 100 秒（`time_scale=0.1`，真实时间 = 仿真时间 × 0.1）；`run.py mec` 12 组另约 112 秒 |
 | 数据规模 | 15 条 experiment / 360 条 exp_metric（24×15）/ 14776 条 task_record / 1800 条 queue_sample / 16604 条 link_sample |
 
@@ -316,7 +316,7 @@ http://127.0.0.1:<端口>/static/_dev_weather.html     # 天气：?preset=dust&i
 ## 4.6 单文件 exe（免装 Python，双击即用）
 
 ```powershell
-# 已构建：dist\无人机集群调度仿真系统.exe（13.0 MB，单文件，含 2026-11 全部 3D 升级）
+# 已构建：dist\无人机集群调度仿真系统.exe（13.9 MB，单文件，含 2026-11 全部 3D 升级）
 & ".\dist\无人机集群调度仿真系统.exe"
 ```
 
@@ -763,7 +763,7 @@ Python 参考模型 ↔ CUDA 内核对拍（各 300 reps）：多站/MEC 档偏�
 
 截图 6 张（`docs/images/19~23` + `19-…-分区与多数派`），全部由当前代码产出、
 脚本内联断言全 `[OK]`。新增测试 5 个文件共 **32** 条用例；三件套门禁
-`ruff` / `pytest`（**83 → 115 passed / 0 failed**）/ `run.py check` 全过。
+`ruff` / `pytest`（**83 → 153 passed / 0 failed**）/ `run.py check` 全过。
 exe 已重新打包并实跑验证（`--stations triple --mec` → `/api/state` 3 站 + 脑裂拒写可见）。
 
 ---

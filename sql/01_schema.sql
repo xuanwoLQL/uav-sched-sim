@@ -118,7 +118,9 @@ VALUES ('fcfs', 'FCFS 先来先服务', 0, '单一 FIFO 队列，不区分优先
        ('priority', '静态优先级', 0, '严格优先级：高优先级队列非空必取高；低优先级任务饥饿（教学痛点复现）', 3),
        ('mlfq', '多级反馈队列 MLFQ', 0, '新任务进高队列，时间片耗尽降级到低队列；低队列定期 aging 升权，缓解饥饿但参数敏感', 4),
        ('dynamic', '动态权重自适应（本方案）', 1,
-        'W=base×(w0+αQ+βW_wait+γL)×(1-δS)，饥饿硬补偿，自适应时间片，弱网降权+本地缓存，过载收敛', 5)
+        'W=base×(w0+αQ+βW_wait+γL)×(1-δS)，饥饿硬补偿，自适应时间片，弱网降权+本地缓存，过载收敛', 5),
+       ('cross_node', '跨节点负载均衡（最少连接+一致性哈希）', 1,
+        '站内复用动态权重；站间「最少连接 + 一致性哈希 + MEC 亲和 + 带代价迁移」，节点宕机即时改派', 6)
 AS nv
 ON DUPLICATE KEY UPDATE label       = nv.label,
                         link_aware  = nv.link_aware,
@@ -293,7 +295,30 @@ SELECT e.exp_id                                                          AS exp_
        MAX(CASE WHEN m.metric_name = 'throttle_count' THEN m.metric_value END)       AS throttle_count,
        MAX(CASE WHEN m.metric_name = 'reject_large_count' THEN m.metric_value END)   AS reject_large_count,
        MAX(CASE WHEN m.metric_name = 'chunk_count' THEN m.metric_value END)          AS chunk_count,
-       MAX(CASE WHEN m.metric_name = 'runtime_wall_s' THEN m.metric_value END)       AS runtime_wall_s
+       MAX(CASE WHEN m.metric_name = 'runtime_wall_s' THEN m.metric_value END)       AS runtime_wall_s,
+       -- ---- 多基站 / MEC / quorum 扩展指标（单站/无共识时恒为 0 或等价值） ----
+       MAX(CASE WHEN m.metric_name = 'station_max_queue_depth' THEN m.metric_value END)  AS station_max_queue_depth,
+       MAX(CASE WHEN m.metric_name = 'station_load_imbalance' THEN m.metric_value END)   AS station_load_imbalance,
+       MAX(CASE WHEN m.metric_name = 'migration_count' THEN m.metric_value END)          AS migration_count,
+       MAX(CASE WHEN m.metric_name = 'migration_cost_ms' THEN m.metric_value END)        AS migration_cost_ms,
+       MAX(CASE WHEN m.metric_name = 'cross_node_comm_ms' THEN m.metric_value END)       AS cross_node_comm_ms,
+       MAX(CASE WHEN m.metric_name = 'edge_offload_ratio' THEN m.metric_value END)       AS edge_offload_ratio,
+       MAX(CASE WHEN m.metric_name = 'avg_e2e_ms' THEN m.metric_value END)               AS avg_e2e_ms,
+       MAX(CASE WHEN m.metric_name = 'edge_e2e_ms' THEN m.metric_value END)              AS edge_e2e_ms,
+       MAX(CASE WHEN m.metric_name = 'center_e2e_ms' THEN m.metric_value END)            AS center_e2e_ms,
+       MAX(CASE WHEN m.metric_name = 'e2e_if_edge_ms' THEN m.metric_value END)           AS e2e_if_edge_ms,
+       MAX(CASE WHEN m.metric_name = 'e2e_if_center_ms' THEN m.metric_value END)         AS e2e_if_center_ms,
+       MAX(CASE WHEN m.metric_name = 'e2e_light_if_edge_ms' THEN m.metric_value END)     AS e2e_light_if_edge_ms,
+       MAX(CASE WHEN m.metric_name = 'e2e_light_if_center_ms' THEN m.metric_value END)   AS e2e_light_if_center_ms,
+       MAX(CASE WHEN m.metric_name = 'e2e_heavy_if_edge_ms' THEN m.metric_value END)     AS e2e_heavy_if_edge_ms,
+       MAX(CASE WHEN m.metric_name = 'e2e_heavy_if_center_ms' THEN m.metric_value END)   AS e2e_heavy_if_center_ms,
+       MAX(CASE WHEN m.metric_name = 'mec_crossing_data_mb' THEN m.metric_value END)     AS mec_crossing_data_mb,
+       MAX(CASE WHEN m.metric_name = 'mec_light_tasks' THEN m.metric_value END)          AS mec_light_tasks,
+       MAX(CASE WHEN m.metric_name = 'mec_heavy_tasks' THEN m.metric_value END)          AS mec_heavy_tasks,
+       MAX(CASE WHEN m.metric_name = 'quorum_commits' THEN m.metric_value END)           AS quorum_commits,
+       MAX(CASE WHEN m.metric_name = 'quorum_rejects' THEN m.metric_value END)           AS quorum_rejects,
+       MAX(CASE WHEN m.metric_name = 'uncommitted_tasks' THEN m.metric_value END)        AS uncommitted_tasks,
+       MAX(CASE WHEN m.metric_name = 'quorum_term' THEN m.metric_value END)              AS quorum_term
 FROM experiment e
          LEFT JOIN exp_metric m ON m.exp_id = e.exp_id
          LEFT JOIN scenario_def d_s ON d_s.code = e.scenario

@@ -8,3 +8,4 @@ PyYAML>=6.0.1          # 读取 config.yaml
 matplotlib>=3.7,<4.0   # 图表输出（实验四四张对比图）
 pandas>=2.0            # 实验数据汇总与 CSV 导出（可选，缺失时降级为 csv 标准库）
 PyMySQL>=1.1.0         # MySQL 8.0 持久化（纯 Python 驱动，免编译）
+pywebview>=5.0         # 桌面窗口（app.py / 启动仿真软件.bat；缺失时自动降级为浏览器打开）

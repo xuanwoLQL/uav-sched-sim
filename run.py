@@ -212,7 +212,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     if missing:
         problems.append("模块缺失：" + ", ".join(missing))
 
-    # 9) 五个调度器可实例化检查（不做真实仿真）
+    # 9) 六个调度器可实例化检查（不做真实仿真）
     try:
         from uav_sim.models import SCHEDULER_NAMES
         from uav_sim.scheduler import SCHEDULERS
@@ -853,7 +853,7 @@ def cmd_mec(args: argparse.Namespace) -> int:
         if over:
             run_cfg.setdefault("mec", {}).update(over)
         print(f"[{k:>2}/{total}] {tag:<26} × {sched:<10} ... ", end="", flush=True)
-        runner = ExperimentRunner(run_cfg, results_dir=out_dir / "raw",
+        runner = ExperimentRunner(run_cfg, results_dir=out_dir,
                                   station_spec=station_spec, mec_enabled=mec_on)
         res = runner.run_one(MEC_EXP_SCENARIO, sched, persist=False)
         if res.error:
@@ -1874,7 +1874,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("one", help="跑单组实验")
     sp.add_argument("--scenario", required=True, choices=["LIGHT", "NORMAL", "PEAK"])
     sp.add_argument("--scheduler", required=True,
-                    choices=["fcfs", "rr", "priority", "mlfq", "dynamic"])
+                    choices=["fcfs", "rr", "priority", "mlfq", "dynamic", "cross_node"])
     sp.add_argument("--seed", type=int, default=None)
     sp.add_argument("--no-db", action="store_true", help="不写数据库")
     sp.set_defaults(func=cmd_one)
@@ -1885,7 +1885,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--scenarios", nargs="*", default=None,
                     choices=["LIGHT", "NORMAL", "PEAK"], help="只跑指定工况")
     sp.add_argument("--schedulers", nargs="*", default=None,
-                    choices=["fcfs", "rr", "priority", "mlfq", "dynamic"],
+                    choices=["fcfs", "rr", "priority", "mlfq", "dynamic", "cross_node"],
                     help="只跑指定策略")
     sp.add_argument("--no-station-probe", action="store_true",
                     help="跳过站级/MEC 伴生探针（3 组独立实验 + charts/09 图）")

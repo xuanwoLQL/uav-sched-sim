@@ -150,6 +150,52 @@ real:
     timeout_s: 10
     name: 作业区
 
+stations:
+  # ===========================================================================
+  # 多基站 / 多服务器节点拓扑（改造建议第五章 A）
+  # ---------------------------------------------------------------------------
+  # 控制变量硬约束：``nodes`` 默认只声明 1 个中心站，且 workers 与
+  # ``runtime.worker_threads`` 一致 —— 此时多站代码路径退化为单站，
+  # 既有 15 组实验结果只发生"落在实跑抖动范围内"的变化。
+  # 需要多站时用 ``topologies.triple``（中心 1 + 边缘 2），由
+  # ``Simulator(..., station_spec="triple")`` 或 ``/api/start?stations=triple`` 启用。
+  # ===========================================================================
+  nodes:
+    - {id: 1, name: 中心站A, role: CENTER, x: 0, z: 0,
+       workers: 8, bandwidth_mbps: 150, backhaul_mbps: 200, edge_compute_mbps: 0}
+  topologies:
+    # 端-边-云三层：1 个中心云 + 2 个边缘站（总并发 6+3+3 = 12）
+    triple:
+      - {id: 1, name: 中心站A, role: CENTER, x: 0, z: 0,
+         workers: 6, bandwidth_mbps: 150, backhaul_mbps: 200, edge_compute_mbps: 0}
+      - {id: 2, name: 边缘站B, role: EDGE, x: -70, z: 45,
+         workers: 3, bandwidth_mbps: 90, backhaul_mbps: 60, edge_compute_mbps: 120}
+      - {id: 3, name: 边缘站C, role: EDGE, x: 70, z: -45,
+         workers: 3, bandwidth_mbps: 90, backhaul_mbps: 60, edge_compute_mbps: 120}
+  # ---- 任务迁移代价（迁移不是瞬间完成的，这是 cross_node 策略的核心成本） ----
+  migration_latency_ms: 120
+  migration_bw_penalty: 0.15
+  migration_load_ratio: 1.25
+  migration_batch: 8
+  hash_virtual_nodes: 64
+
+mec:
+  # ===========================================================================
+  # MEC 边缘计算（改造建议第五章 B）
+  # ---------------------------------------------------------------------------
+  # enable=false 时不改变任何调度行为，只是关闭边缘分流决策与 MEC 指标口径。
+  # ===========================================================================
+  enable: false
+  # 任务分级：轻量运维任务下沉边缘站，重勘查任务回中心站
+  edge_task_types: [GPS, ATTITUDE, HEARTBEAT, ALARM]
+  center_task_types: [IMAGERY, MULTISPECTRAL, LIDAR]
+  edge_compute_mbps: 120
+  center_compute_mbps: 400
+  backhaul_mbps: 60
+  sync_ratio: 0.15
+  edge_access_ms: 18
+  center_access_ms: 46
+
 database:
   # 关闭后所有结果只落本地 CSV/JSON，程序功能不受影响（优雅降级）
   enable: true

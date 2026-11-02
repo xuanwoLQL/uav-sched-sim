@@ -29,5 +29,5 @@ UavSchedulerSim —— 面向智慧地质勘查的无人机集群并发自适应
 
 from __future__ import annotations
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __all__ = ["__version__"]
